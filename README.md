@@ -73,7 +73,7 @@ All nodes run the same software. Priority order determines who serves DHCP when 
 Run on **each node** (primary first, then secondaries):
 
 ```bash
-git clone https://github.com/RamSet/pihole-ha-public.git pihole-ha
+git clone https://github.com/RamSet/pihole-ha-cluster.git pihole-ha
 cd pihole-ha
 sudo ./setup.sh
 ```
@@ -85,7 +85,7 @@ sudo ./setup.sh
 1. **Scans the subnet** in parallel (~1 second) for existing pihole-ha nodes on port 8887
 2. **Auto-detects role** — if an existing cluster is found, this node joins as the next standby; if no cluster exists, this node becomes PRIMARY
 3. **Preserves cluster priority** — discovered nodes keep their existing order, the new node is appended last
-4. **Asks about VIP** — requires typing "yes" explicitly to enable (pressing Enter = disabled)
+4. **Detects deployment mode** (DHCP-HA vs DNS-only) and, for DHCP-HA, **asks about VIP** — requires typing "yes" explicitly to enable. It never enables Pi-hole DHCP on a DNS-only network.
 5. **Registers with the cluster** — calls `/api/nodes/join` on each existing node so they immediately learn about the new node
 6. **Installs and starts services** — scripts, systemd units (bare metal) or Docker compose stack
 7. **Injects the HA page** into Pi-hole's admin UI
@@ -429,21 +429,23 @@ curl "http://localhost:8887/api/nodes/leave?node=192.168.1.55"
 # Propagates to all other nodes automatically
 ```
 
+## Updating
+
+Pull the latest and refresh the installed code in place — config and cluster membership are left untouched:
+
+```bash
+cd pihole-ha && git pull
+sudo ./install.sh --update
+```
+
 ## Uninstall
 
 ### Bare Metal
 
-```bash
-# Leave the cluster first (notifies other nodes):
-curl "http://localhost:8887/api/nodes/leave?node=$(hostname -I | awk '{print $1}')"
+From the cloned repo. This leaves the cluster (so peers drop this node), stops and disables all services, and removes the binaries, config, and admin-panel injection:
 
-sudo systemctl stop pihole-ha pihole-ha-dash
-sudo systemctl disable pihole-ha pihole-ha-dash pihole-ha-sync.timer pihole-ha-sync-pull.timer pihole-ha-inject.path
-sudo rm -f /usr/local/bin/pihole-ha /usr/local/bin/pihole-ha-dash /usr/local/bin/pihole-ha-sync /usr/local/bin/pihole-ha-sync-pull /usr/local/bin/pihole-ha-inject
-sudo rm -rf /usr/local/share/pihole-ha /usr/local/lib/pihole-ha /etc/pihole-ha /run/pihole-ha
-sudo rm -f /etc/systemd/system/pihole-ha*.service /etc/systemd/system/pihole-ha*.timer /etc/systemd/system/pihole-ha*.path
-sudo systemctl daemon-reload
-sudo rm -f /var/www/html/admin/ha.lp /var/www/html/admin/ha-api.lp /var/www/html/admin/scripts/js/ha.js
+```bash
+sudo ./install.sh --uninstall      # add -y to skip the confirmation prompt
 ```
 
 ### Docker
@@ -455,3 +457,7 @@ curl "http://localhost:8887/api/nodes/leave?node=$(hostname -I | awk '{print $1}
 cd pihole-ha/docker
 docker compose down
 ```
+
+## License
+
+[Apache License 2.0](LICENSE).
