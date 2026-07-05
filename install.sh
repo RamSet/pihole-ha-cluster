@@ -455,7 +455,7 @@ if [[ ${#discovered_nodes[@]} -gt 0 ]]; then
     # is always false and would misfire, so the cluster decides. Peers on an older
     # dash won't report dhcp_ha; default to DHCP-HA (what pre-existing clusters are).
     for _mp in "${discovered_nodes[@]}"; do
-        _mode_ha="$(curl -sf --max-time 5 "http://$_mp:8887/api/config" 2>/dev/null | sed -n 's/.*"dhcp_ha":"\([a-z]*\)".*/\1/p')"
+        _mode_ha="$(curl -sf --max-time 5 "http://$_mp:8887/api/config" 2>/dev/null | sed -n 's/.*"dhcp_ha":"\([a-z]*\)".*/\1/p' || true)"
         if [[ -n "$_mode_ha" ]]; then
             [[ "$_mode_ha" == "false" ]] && _dhcp_mode="dns"
             break
@@ -467,7 +467,7 @@ elif [[ "$(pihole-FTL --config dhcp.active 2>/dev/null)" == "true" ]]; then
 else
     _ext_dhcp=""
     if command -v nmap >/dev/null 2>&1; then
-        _ext_dhcp="$(nmap --script broadcast-dhcp-discover 2>/dev/null | sed -n 's/.*Server Identifier: \([0-9.]*\).*/\1/p' | grep -vx "$local_ip" | head -1)"
+        _ext_dhcp="$(nmap --script broadcast-dhcp-discover 2>/dev/null | sed -n 's/.*Server Identifier: \([0-9.]*\).*/\1/p' | grep -vx "$local_ip" | head -1 || true)"
     fi
     if [[ -n "$_ext_dhcp" ]]; then
         _dhcp_mode="dns"
@@ -617,10 +617,13 @@ if [[ "$_dhcp_mode" == "dns" ]]; then
 else
     printf "  %b Configuring DHCP role..." "${INFO}"
     if [[ "$is_primary" == "true" ]]; then
-        pihole-FTL --config dhcp.active true >/dev/null 2>&1
-        printf "%b  %b DHCP enabled (primary)\\n" "${OVER}" "${TICK}"
+        if pihole-FTL --config dhcp.active true >/dev/null 2>&1; then
+            printf "%b  %b DHCP enabled (primary)\\n" "${OVER}" "${TICK}"
+        else
+            printf "%b  %b %bDHCP not enabled — set a DHCP range in Pi-hole (Settings > DHCP), then re-run%b\\n" "${OVER}" "${CROSS}" "${COL_YELLOW}" "${COL_NC}"
+        fi
     else
-        pihole-FTL --config dhcp.active false >/dev/null 2>&1
+        pihole-FTL --config dhcp.active false >/dev/null 2>&1 || true
         printf "%b  %b DHCP disabled (standby — auto-activates on failover)\\n" "${OVER}" "${TICK}"
     fi
 fi

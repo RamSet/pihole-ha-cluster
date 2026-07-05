@@ -263,6 +263,8 @@ build_dns_option() {
     echo "$lines"
 }
 ensure_dns_option() {
+    # DNS-only deployment: we don't manage DHCP, so never write DHCP options.
+    [[ "$DHCP_HA" != "true" ]] && return 0
     local want header full
     want="$(build_dns_option)"
     header="# pihole-ha: DHCP options for clients"
@@ -296,7 +298,7 @@ ensure_dns_option
 # Ensure dhcp-script hook for new device notifications
 DNSMASQ_DHCP_SCRIPT="/etc/dnsmasq.d/10-pihole-ha-dhcp-script.conf"
 DHCP_SCRIPT_BIN="/usr/local/bin/new_dhcp_device"
-if [[ -x "$DHCP_SCRIPT_BIN" ]] && [[ ! -f "$DNSMASQ_DHCP_SCRIPT" ]]; then
+if [[ "$DHCP_HA" == "true" ]] && [[ -x "$DHCP_SCRIPT_BIN" ]] && [[ ! -f "$DNSMASQ_DHCP_SCRIPT" ]]; then
     printf 'dhcp-script=%s\n' "$DHCP_SCRIPT_BIN" > "$DNSMASQ_DHCP_SCRIPT"
     platform_ftl_restart 2>/dev/null || true
     log_info "event=dhcp_script_hook_created file=$DNSMASQ_DHCP_SCRIPT"
