@@ -42,6 +42,8 @@ At install it checks whether Pi-hole DHCP is active, probes the LAN for another 
 - `network_mode: host` on both containers (required for DHCP broadcast and VIP)
 - See [Docker README](docker/README.md) for full setup guide
 
+> **Note:** The bare-metal (systemd) path is the primary, well-tested deployment. The Docker sidecar is newer and less battle-tested — the image builds and the logic is verified, but the full two-container runtime hasn't been exercised as broadly. Report issues if you hit them.
+
 ## Network Architecture
 
 ```
