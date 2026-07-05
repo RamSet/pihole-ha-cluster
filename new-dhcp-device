@@ -1,0 +1,170 @@
+#!/bin/bash
+
+# Called by dnsmasq via dhcp-script= on every DHCP lease event.
+# Sends a Pushover notification when a new device joins the network.
+# Uses /etc/pihole-ha/notify.conf (same config as pihole-ha daemon).
+
+op="${1:-op}"
+mac="${2:-mac}"
+ip="${3:-ip}"
+hostname="${4}"
+
+# --- Exit if not an "add" operation ---
+[[ "$op" != "add" ]] && exit 0
+
+# --- Load notify.conf ---
+NOTIFY_CONF="/etc/pihole-ha/notify.conf"
+PO_ENABLED="false"
+PO_USER=""
+PO_TOKEN=""
+PO_TITLE="pihole-ha"
+DHCP_NOTIFY_ENABLED="true"
+DHCP_NOTIFY_IGNORED_MACS=""
+if [[ -f "$NOTIFY_CONF" ]]; then
+    while IFS='=' read -r key val; do
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        case "$key" in
+            PO_ENABLED)               PO_ENABLED="$val" ;;
+            PO_USER)                  PO_USER="$val" ;;
+            PO_TOKEN)                 PO_TOKEN="$val" ;;
+            PO_TITLE)                 PO_TITLE="$val" ;;
+            DHCP_NOTIFY_ENABLED)      DHCP_NOTIFY_ENABLED="$val" ;;
+            DHCP_NOTIFY_IGNORED_MACS) DHCP_NOTIFY_IGNORED_MACS="$val" ;;
+        esac
+    done < "$NOTIFY_CONF"
+fi
+[[ "$PO_ENABLED" == "true" && -n "$PO_USER" && -n "$PO_TOKEN" ]] || exit 0
+[[ "$DHCP_NOTIFY_ENABLED" == "true" ]] || exit 0
+
+# --- Ignore MACs from config (case-insensitive) ---
+IFS=',' read -ra _ignored <<< "$DHCP_NOTIFY_IGNORED_MACS"
+for _m in "${_ignored[@]}"; do
+    [[ "${mac,,}" == "${_m,,}" ]] && exit 0
+done
+
+# --- Node identity from pihole-ha status ---
+local_ip="$(hostname -I | awk '{print $1}')"
+node_role="unknown"
+if [[ -f /var/run/pihole-ha/status.json ]]; then
+    node_role="$(grep -o '"role":"[^"]*"' /var/run/pihole-ha/status.json | head -1 | cut -d'"' -f4)"
+fi
+
+# --- Locking mechanism to prevent spam ---
+lock_file="/tmp/new-dhcp-device.lock"
+delay=2
+lock_timeout=30
+waited=0
+while [[ -e "$lock_file" ]]; do
+    sleep "$delay"
+    (( waited += delay ))
+    if (( waited >= lock_timeout )); then
+        rm -f "$lock_file"
+        break
+    fi
+done
+touch "$lock_file"
+
+# --- MAC vendor lookup (local DBs first, throttled API fallback) ---
+# The vendor name is derived from the OUI (leading bytes) of the MAC, so a local
+# lookup is as accurate as the macvendors.com API with no network call or rate
+# limit. Order: Pi-hole's macvendor.db, then the ieee-data registry files, then
+# the API. Some MACs use smaller MA-M (28-bit) / MA-S (36-bit) / IAB assignments
+# whose 24-bit prefix only resolves to "IEEE Registration Authority"; for those
+# we consult the finer registry files (mam.csv / oui36.csv / iab.csv).
+hex="${mac//[:-]/}"; hex="${hex^^}"
+oui="${hex:0:6}"
+vendor=""
+
+# Org name from field 3 of an IEEE CSV line (handles quoted names with commas).
+_csv_org() {
+    local rest="$1"
+    rest="${rest#*,}"; rest="${rest#*,}"   # drop Registry,Assignment,
+    if [[ "$rest" == '"'* ]]; then rest="${rest#\"}"; printf '%s' "${rest%%\"*}"
+    else printf '%s' "${rest%%,*}"; fi
+}
+# A registry placeholder (or empty) means "look at a more specific assignment".
+_is_real_vendor() { [[ -n "$1" && "$1" != "IEEE Registration Authority" ]]; }
+
+# 1) Pi-hole's MAC vendor DB — query via pihole-FTL (no sqlite3 dep needed).
+if command -v pihole-FTL >/dev/null 2>&1 && [[ -e /etc/pihole/macvendor.db ]]; then
+    _oui_colon="${oui:0:2}:${oui:2:2}:${oui:4:2}"
+    _v="$(pihole-FTL sqlite3 /etc/pihole/macvendor.db "SELECT vendor FROM macvendor WHERE mac='$_oui_colon' LIMIT 1;" 2>/dev/null)"
+    _is_real_vendor "$_v" && vendor="$_v"
+fi
+
+# 2) Local IEEE registry files. Try the 24-bit OUI first (covers most devices in
+#    one grep); if that is only the registry placeholder, the block is sub-divided
+#    — consult the 36-bit (oui36), 28-bit (mam) and IAB files for the real owner.
+if [[ -z "$vendor" ]]; then
+    _iee=""
+    for _d in /var/lib/ieee-data /usr/share/ieee-data; do [[ -d "$_d" ]] && _iee="$_d" && break; done
+    if [[ -n "$_iee" ]]; then
+        _org="$(_csv_org "$(grep -i -m1 ",$oui," "$_iee/oui.csv" 2>/dev/null)")"
+        if _is_real_vendor "$_org"; then
+            vendor="$_org"
+        else
+            for _spec in oui36.csv:9 mam.csv:7 iab.csv:9; do   # file:assignment-hex-length
+                _f="${_spec%%:*}"; _n="${_spec##*:}"
+                [[ -f "$_iee/$_f" ]] || continue
+                _o2="$(_csv_org "$(grep -i -m1 ",${hex:0:$_n}," "$_iee/$_f" 2>/dev/null)")"
+                if _is_real_vendor "$_o2"; then vendor="$_o2"; break; fi
+            done
+        fi
+    fi
+fi
+
+# 3) Per-OUI cache. Positives are permanent (a vendor never changes). Negatives
+#    ("confirmed not in macvendors") are kept only for OUI_NEG_TTL, so the same
+#    unknown device can't hammer the API during a failover burst, yet an unknown
+#    OUI is re-checked online later in case macvendors has since added it.
+oui_cache="/tmp/pihole-ha-oui.cache"
+OUI_NEG_TTL=604800   # re-check unknowns online after 7 days
+_cached=""
+if [[ -z "$vendor" && -f "$oui_cache" ]]; then
+    _neg_epoch=""
+    while IFS= read -r _hit; do
+        _val="${_hit#*=}"
+        if [[ "$_val" == '!'* ]]; then
+            _neg_epoch="${_val#!}"               # negative marker: !<epoch>
+        else
+            vendor="$_val"; _cached=1; break     # positive hit always wins
+        fi
+    done < <(grep "^$oui=" "$oui_cache" 2>/dev/null)
+    # Honor a still-fresh negative only when no positive was found.
+    if [[ -z "$vendor" && -n "$_neg_epoch" ]] && (( $(date +%s) - _neg_epoch < OUI_NEG_TTL )); then
+        _cached=1   # recently confirmed unknown — skip the API this round
+    fi
+fi
+
+# 4) API fallback — on a local miss with no fresh cache entry (incl. an unknown
+#    whose negative cache has aged out), and only when reachable. Short connect
+#    timeout so a no-internet burst degrades to an instant "Unknown Vendor"
+#    instead of stalling per device. The lock above serializes calls.
+if [[ -z "$vendor" && -z "$_cached" ]]; then
+    _api="$(curl -s --connect-timeout 2 --max-time 4 "https://api.macvendors.com/$mac")"
+    _rc=$?
+    if [[ $_rc -eq 0 && -n "$_api" && "$_api" != '{'* && "$_api" != *"Not Found"* && "$_api" != *"errors"* ]]; then
+        vendor="$_api"
+        printf '%s=%s\n' "$oui" "$vendor" >> "$oui_cache"          # cache positive (permanent)
+    elif [[ $_rc -eq 0 && ( -z "$_api" || "$_api" == *"Not Found"* ) ]]; then
+        printf '%s=!%s\n' "$oui" "$(date +%s)" >> "$oui_cache"     # cache negative w/ timestamp
+    fi
+    # rc!=0 (offline/timeout) or 429/errors: do NOT cache — retry on next join.
+fi
+
+[[ -z "$vendor" ]] && vendor="Unknown Vendor"
+
+# --- Send Pushover notification ---
+tstamp="$(date '+%Y-%m-%d %H:%M:%S')"
+title="${PO_TITLE} [${node_role} ${local_ip}]"
+message="<b><font color='#3498db'>New device joined the network</font></b> <br><b>MAC:</b> <font color='#95a5a6'>$mac</font> <br><b>Vendor:</b> <font color='#2ecc71'>$vendor</font> <br><b>Assigned IP:</b> <font color='#f39c12'>$ip</font> <br><b>Hostname:</b> <font color='#9b59b6'>${hostname:-(none)}</font> <br><b>Time:</b> <font color='#95a5a6'>$tstamp</font>"
+
+curl -s --max-time 10 \
+    -X POST "https://api.pushover.net/1/messages.json" \
+    -d "token=$PO_TOKEN" -d "user=$PO_USER" \
+    -d "html=1" \
+    -d "title=$title" \
+    --data-urlencode "message=$message" >/dev/null 2>&1
+
+rm -f "$lock_file"
+exit 0

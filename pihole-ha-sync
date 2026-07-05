@@ -1,0 +1,290 @@
+#!/bin/bash
+# pihole-ha-sync — Build Pi-hole config payload for HTTP pull by standby nodes
+# Runs on PRIMARY only. Builds tar.gz payload + manifest when config changes.
+# Payload served by pihole-ha-dash on /api/sync/manifest and /api/sync/payload
+
+set -uo pipefail
+
+# Load platform abstraction (systemd vs Docker)
+for _p in /usr/local/lib/pihole-ha/pihole-ha-platform ./pihole-ha-platform; do
+    [[ -f "$_p" ]] && { . "$_p"; break; }
+done
+
+# Load node config (with backwards-compatible defaults)
+NODES_CONF="/etc/pihole-ha/nodes.conf"
+GATEWAY="" VIP="" HA_NODES=""
+[[ -f "$NODES_CONF" ]] && . "$NODES_CONF"
+if [[ -z "$HA_NODES" ]]; then
+    echo "ERROR: /etc/pihole-ha/nodes.conf missing or incomplete (need HA_NODES)" >&2
+    exit 1
+fi
+# Parse HA_NODES: supports IP or IP:PORT (strip port, not needed for sync)
+IFS=',' read -ra _RAW_NODES <<< "$HA_NODES"
+NODES=()
+for _rn in "${_RAW_NODES[@]}"; do NODES+=("${_rn%%:*}"); done
+_ROLE_NAMES=("PRIMARY" "SECONDARY" "TERTIARY")
+NODE_COUNT=${#NODES[@]}
+ROLES=()
+for (( _ri=0; _ri<NODE_COUNT; _ri++ )); do
+    if (( _ri < ${#_ROLE_NAMES[@]} )); then ROLES+=("${_ROLE_NAMES[$_ri]}"); else ROLES+=("NODE$((_ri+1))"); fi
+done
+
+LOCAL_IP="$(platform_get_local_ip)"
+SYNC_DIR="/run/pihole-ha"
+HASH_FILE="$SYNC_DIR/last-sync-hash"
+PAYLOAD_FILE="$SYNC_DIR/sync-payload.tar.gz"
+MANIFEST_FILE="$SYNC_DIR/sync-manifest.json"
+STAGING_DIR="/tmp/pihole-ha-sync-staging"
+SYNC_CONF="/etc/pihole-ha/sync.conf"
+
+mkdir -p "$SYNC_DIR"
+
+# Determine this node's index and role
+MY_IDX=-1
+for (( i=0; i<NODE_COUNT; i++ )); do
+    [[ "$LOCAL_IP" == "${NODES[$i]}" ]] && { MY_IDX=$i; break; }
+done
+MY_ROLE="${ROLES[$MY_IDX]:-UNKNOWN}"
+
+ROLE="SYNC"
+PIHOLE_HA_LOG_TAG="pihole-ha-sync"  # _log/log_* come from pihole-ha-platform
+
+# Pushover load+send come from pihole-ha-platform. Oneshot scripts run
+# notify() synchronously — the script exits as soon as it finishes, so
+# backgrounding would lose the message before curl could finish.
+load_notify_conf
+
+# Load sync config (defaults: all true)
+SYNC_ENABLED=true
+SYNC_GRAVITY=true
+SYNC_DHCP=true
+SYNC_DNS=true
+SYNC_SETTINGS=true
+SYNC_NOTIFY=true
+SYNC_PRIMARY="${NODES[0]}"
+[[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+
+# Exit if sync disabled
+if [[ "$SYNC_ENABLED" != "true" ]]; then
+    log_info "event=skip reason=\"sync disabled\""
+    exit 0
+fi
+
+# Only run on sync primary
+if [[ "$LOCAL_IP" != "$SYNC_PRIMARY" ]]; then
+    log_info "event=skip reason=\"not sync primary\" local=$LOCAL_IP primary=$SYNC_PRIMARY"
+    exit 0
+fi
+
+# Convert pihole-FTL TOML-style array output to JSON for re-import
+# FTL outputs: [ val1, val2, val3 ]  (unquoted)
+# FTL expects: ["val1","val2","val3"]  (JSON)
+ftl_to_json() {
+    local input
+    input="$(cat)"
+    [[ "$input" == "[]" || -z "$input" ]] && echo "[]" && return
+    # DHCP entries start with MAC (XX:), DNS entries start with IP (N.)
+    # Add quotes around each entry by splitting on ", " before a MAC or IP start
+    echo "$input" | sed -E \
+        -e 's/^\[ /["/' \
+        -e 's/ ?\]$/"]/'\
+        -e 's/, ([0-9a-fA-F]{2}:)/","\1/g' \
+        -e 's/, ([0-9]{1,3}\.[0-9])/","\1/g'
+}
+
+# Compute current config fingerprint (only enabled components)
+SETTINGS_KEYS=(
+    dns.cnameRecords dns.revServers dns.blockTTL dns.blocking.mode dns.blocking.edns
+    dns.blocking.active dns.rateLimit.count dns.rateLimit.interval dns.queryLogging
+    dns.dnssec dns.showDNSSEC dns.domainNeeded dns.expandHosts dns.bogusPriv
+    dns.piholePTR dns.domain.name dns.domain.local dns.cache.size dns.cache.optimizer
+    dns.cache.upstreamBlockedTTL dns.specialDomains.mozillaCanary
+    dns.specialDomains.iCloudPrivateRelay dns.specialDomains.designatedResolver
+    dns.CNAMEdeepInspect dns.blockESNI dns.EDNS0ECS dns.ignoreLocalhost
+    dns.analyzeOnlyAandAAAA dns.replyWhenBusy dns.localise
+    # DHCP scope: must match across nodes so failover takeover serves the same
+    # range/router/lease. dhcp.active is intentionally excluded — it's the
+    # failover toggle owned by pihole-ha. dhcp.hosts is synced separately as JSON.
+    dhcp.start dhcp.end dhcp.router dhcp.netmask dhcp.leaseTime
+    dhcp.ipv6 dhcp.rapidCommit dhcp.multiDNS dhcp.logging dhcp.ignoreUnknownClients
+)
+export_adlists() {
+    pihole-FTL sqlite3 /etc/pihole/gravity.db \
+        "SELECT enabled||char(9)||address FROM adlist ORDER BY address" 2>/dev/null
+}
+
+current_hash() {
+    {
+        [[ "$SYNC_GRAVITY" == "true" ]] && md5sum /etc/pihole/gravity.db 2>/dev/null
+        [[ "$SYNC_DHCP" == "true" ]] && pihole-FTL --config dhcp.hosts 2>/dev/null
+        [[ "$SYNC_DNS" == "true" ]] && pihole-FTL --config dns.hosts 2>/dev/null
+        # Adlists are always included in the payload
+        export_adlists
+        if [[ "$SYNC_SETTINGS" == "true" ]]; then
+            for _sk in "${SETTINGS_KEYS[@]}"; do
+                pihole-FTL --config "$_sk" 2>/dev/null
+            done
+        fi
+        [[ "$SYNC_NOTIFY" == "true" && -f /etc/pihole-ha/notify.conf ]] && md5sum /etc/pihole-ha/notify.conf 2>/dev/null
+        # sync.conf always tracked so changes (e.g. SYNC_INTERVAL) propagate
+        [[ -f /etc/pihole-ha/sync.conf ]] && md5sum /etc/pihole-ha/sync.conf 2>/dev/null
+    } | md5sum | awk '{print $1}'
+}
+
+export_settings() {
+    local first=true json="{"
+    for _sk in "${SETTINGS_KEYS[@]}"; do
+        local val
+        val="$(pihole-FTL --config "$_sk" 2>/dev/null)" || continue
+        # Escape double quotes and backslashes in value
+        val="${val//\\/\\\\}"
+        val="${val//\"/\\\"}"
+        $first || json+=","
+        first=false
+        json+="\"$_sk\":\"$val\""
+    done
+    json+="}"
+    echo "$json"
+}
+
+# Bootstrap check: only runs when this primary has never published a payload
+# (no HASH_FILE yet). Protects a freshly-rebuilt primary from overwriting good
+# standby config. Once primary has published once, it is authoritative and we
+# must not pull from standbys — otherwise local edits get reverted on every tick
+# as standbys naturally accumulate generation from each successful pull.
+GEN_FILE="/etc/pihole-ha/sync-generation"
+if [[ ! -f "$HASH_FILE" ]]; then
+    _local_gen="$(cat "$GEN_FILE" 2>/dev/null || echo 0)"
+    _best_gen=$_local_gen
+    _best_ip=""
+    _any_standby_reachable=false
+    for (( _bi=1; _bi<NODE_COUNT; _bi++ )); do
+        _bs_ip="${NODES[$_bi]}"
+        [[ "$_bs_ip" == "$LOCAL_IP" ]] && continue
+        _peer_gen="$(curl -sf --max-time 5 "http://$_bs_ip:8887/api/sync/generation" 2>/dev/null | grep -o '"generation":[0-9]*' | cut -d: -f2)"
+        [[ -z "$_peer_gen" ]] && continue
+        _any_standby_reachable=true
+        if (( _peer_gen > _best_gen )); then
+            _best_gen=$_peer_gen
+            _best_ip=$_bs_ip
+        fi
+    done
+
+    if [[ -n "$_best_ip" ]]; then
+        log_info "event=bootstrap reason=\"standby has newer config\" standby=$_best_ip standby_gen=$_best_gen local_gen=$_local_gen"
+        _pull_ok=false
+        for _pull_script in /usr/local/bin/pihole-ha-sync-pull ./pihole-ha-sync-pull; do
+            [[ -x "$_pull_script" ]] || continue
+            PULL_SOURCE="$_best_ip" "$_pull_script" --force && _pull_ok=true
+            break
+        done
+        if [[ "$_pull_ok" != "true" ]]; then
+            log_warn "event=bootstrap_fail reason=\"pull from standby failed\" standby=$_best_ip"
+        fi
+    elif [[ "$_local_gen" -eq 0 && "$_any_standby_reachable" == "false" ]]; then
+        log_warn "event=skip reason=\"fresh node with no config and no standbys reachable — will retry next cycle\""
+        exit 0
+    fi
+fi
+
+CURRENT="$(current_hash)"
+PREVIOUS="$(cat "$HASH_FILE" 2>/dev/null || echo "")"
+
+# Check for --force flag
+FORCE=false
+[[ "${1:-}" == "--force" ]] && FORCE=true
+
+if [[ "$CURRENT" == "$PREVIOUS" && "$FORCE" != "true" ]]; then
+    log_info "event=skip reason=\"no changes\""
+    exit 0
+fi
+
+log_info "event=build_start reason=\"changes detected\""
+
+# Stage payload contents
+rm -rf "$STAGING_DIR"
+mkdir -p "$STAGING_DIR"
+
+TAR_FILES=""
+
+# Adlists are always included in the payload (independent of SYNC_GRAVITY)
+export_adlists > "$STAGING_DIR/adlists.tsv"
+TAR_FILES+=" adlists.tsv"
+
+if [[ "$SYNC_GRAVITY" == "true" ]]; then
+    cp /etc/pihole/gravity.db "$STAGING_DIR/gravity.db" 2>/dev/null || {
+        log_error "event=build_fail reason=\"could not copy gravity.db\""
+        exit 1
+    }
+    TAR_FILES+=" gravity.db"
+fi
+
+if [[ "$SYNC_DHCP" == "true" ]]; then
+    pihole-FTL --config dhcp.hosts 2>/dev/null | ftl_to_json > "$STAGING_DIR/dhcp-hosts.json"
+    TAR_FILES+=" dhcp-hosts.json"
+fi
+
+if [[ "$SYNC_DNS" == "true" ]]; then
+    pihole-FTL --config dns.hosts 2>/dev/null | ftl_to_json > "$STAGING_DIR/dns-hosts.json"
+    TAR_FILES+=" dns-hosts.json"
+fi
+
+if [[ "$SYNC_SETTINGS" == "true" ]]; then
+    export_settings > "$STAGING_DIR/settings.json"
+    TAR_FILES+=" settings.json"
+fi
+
+if [[ "$SYNC_NOTIFY" == "true" && -f /etc/pihole-ha/notify.conf ]]; then
+    cp /etc/pihole-ha/notify.conf "$STAGING_DIR/notify.conf"
+    TAR_FILES+=" notify.conf"
+fi
+
+# sync.conf always shipped — carries SYNC_INTERVAL and component toggles so
+# the cluster stays consistent even when a value is changed via CLI/manual edit.
+if [[ -f /etc/pihole-ha/sync.conf ]]; then
+    cp /etc/pihole-ha/sync.conf "$STAGING_DIR/sync.conf"
+    TAR_FILES+=" sync.conf"
+fi
+
+if [[ -z "$TAR_FILES" ]]; then
+    log_info "event=skip reason=\"all components disabled\""
+    rm -rf "$STAGING_DIR"
+    exit 0
+fi
+
+# Build tar.gz payload
+tar -czf "$PAYLOAD_FILE.tmp" -C "$STAGING_DIR" $TAR_FILES 2>/dev/null || {
+    log_error "event=build_fail reason=\"tar.gz creation failed\""
+    rm -rf "$STAGING_DIR"
+    exit 1
+}
+mv "$PAYLOAD_FILE.tmp" "$PAYLOAD_FILE"
+
+# Build manifest with component flags
+TIMESTAMP="$(date '+%Y-%m-%dT%H:%M:%S')"
+PAYLOAD_SIZE="$(stat -c%s "$PAYLOAD_FILE")"
+if (( PAYLOAD_SIZE >= 1048576 )); then
+    PAYLOAD_HUMAN="$(awk "BEGIN {printf \"%.1f MB\", $PAYLOAD_SIZE/1048576}")"
+elif (( PAYLOAD_SIZE >= 1024 )); then
+    PAYLOAD_HUMAN="$(awk "BEGIN {printf \"%.1f KB\", $PAYLOAD_SIZE/1024}")"
+else
+    PAYLOAD_HUMAN="${PAYLOAD_SIZE} B"
+fi
+GRAVITY_MD5=""
+[[ "$SYNC_GRAVITY" == "true" ]] && GRAVITY_MD5="$(md5sum "$STAGING_DIR/gravity.db" | awk '{print $1}')"
+
+SYNCCONF_PRESENT=false
+[[ -f "$STAGING_DIR/sync.conf" ]] && SYNCCONF_PRESENT=true
+printf '{"timestamp":"%s","hash":"%s","gravity_md5":"%s","size":%d,"components":{"gravity":%s,"dhcp":%s,"dns":%s,"settings":%s,"notify":%s,"syncconf":%s,"adlists":true}}\n' \
+    "$TIMESTAMP" "$CURRENT" "$GRAVITY_MD5" "$PAYLOAD_SIZE" \
+    "$SYNC_GRAVITY" "$SYNC_DHCP" "$SYNC_DNS" "$SYNC_SETTINGS" "$SYNC_NOTIFY" "$SYNCCONF_PRESENT" > "$MANIFEST_FILE.tmp"
+mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+
+# Cleanup staging
+rm -rf "$STAGING_DIR"
+
+# Save hash
+echo "$CURRENT" > "$HASH_FILE"
+
+log_info "event=build_complete size=${PAYLOAD_SIZE} hash=$CURRENT gravity=$SYNC_GRAVITY dhcp=$SYNC_DHCP dns=$SYNC_DNS settings=$SYNC_SETTINGS adlists=true"
+notify "<b><font color='#3498db'>Pi-hole Sync Payload Ready</font></b> <br> Built on $MY_ROLE <font color='#95a5a6'>($LOCAL_IP)</font> <br> Config exported for standby nodes <br> <font color='#95a5a6'>${PAYLOAD_HUMAN}</font>"

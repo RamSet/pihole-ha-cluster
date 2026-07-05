@@ -1,0 +1,17 @@
+[Unit]
+Description=Pi-hole HA Monitor
+After=network-online.target pihole-FTL.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pihole-ha
+RuntimeDirectory=pihole-ha
+RuntimeDirectoryMode=0755
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

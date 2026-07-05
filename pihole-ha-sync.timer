@@ -1,0 +1,10 @@
+[Unit]
+Description=Pi-hole Config Sync Timer (every 15 min)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

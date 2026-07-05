@@ -1,0 +1,10 @@
+[Unit]
+Description=Pi-hole HA Config Sync
+After=network-online.target pihole-FTL.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/pihole-ha-sync
+StandardOutput=journal
+StandardError=journal

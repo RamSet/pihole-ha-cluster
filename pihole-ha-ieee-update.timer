@@ -1,0 +1,12 @@
+[Unit]
+Description=Monthly IEEE OUI registry refresh for pihole-ha
+
+[Timer]
+OnCalendar=monthly
+# Spread the three nodes out so they don't all hit IEEE at the same instant.
+RandomizedDelaySec=12h
+# Catch up if the node was powered off when the timer was due.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

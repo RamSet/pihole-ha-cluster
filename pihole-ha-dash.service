@@ -1,0 +1,15 @@
+[Unit]
+Description=Pi-hole HA Dashboard
+After=network-online.target pihole-ha.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pihole-ha-dash
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

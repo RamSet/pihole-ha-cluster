@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh local IEEE OUI registry (MAC vendor DB) for pihole-ha
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Self-contained fetcher (works regardless of the distro's ieee-data version).
+ExecStart=/usr/local/bin/pihole-ha-oui-update

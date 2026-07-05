@@ -1,0 +1,181 @@
+#!/bin/bash
+# pihole-ha-platform — Platform abstraction layer + shared helpers
+# Detects Docker vs bare-metal and provides unified functions
+# Source this file from pihole-ha scripts: . /usr/local/lib/pihole-ha/pihole-ha-platform
+
+# Detect platform: Docker if /.dockerenv exists
+if [[ -f /.dockerenv ]]; then
+    PIHOLE_HA_PLATFORM="docker"
+else
+    PIHOLE_HA_PLATFORM="systemd"
+fi
+
+# Structured logging. Callers may override PIHOLE_HA_LOG_TAG (for syslog
+# tagging) and ROLE (printed in each line) before or after sourcing. Both
+# have safe defaults; logger is best-effort and never fails the script.
+PIHOLE_HA_LOG_TAG="${PIHOLE_HA_LOG_TAG:-pihole-ha}"
+_log() {
+    local lvl="$1"; shift
+    local ts; ts="$(date '+%Y-%m-%dT%H:%M:%S')"
+    echo "$ts [${ROLE:-}] [$lvl] $*"
+    logger -t "$PIHOLE_HA_LOG_TAG" "[${ROLE:-}] [$lvl] $*" 2>/dev/null || true
+}
+log_info()  { _log "INFO"  "$*"; }
+log_warn()  { _log "WARN"  "$*"; }
+log_error() { _log "ERROR" "$*"; }
+
+# IPv4 dotted-quad validator. Returns 0 if $1 is valid, 1 otherwise.
+is_valid_ip() {
+    [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+    local i; for i in 1 2 3 4; do (( ${BASH_REMATCH[$i]} > 255 )) && return 1; done; return 0
+}
+
+# Load Pushover settings from /etc/pihole-ha/notify.conf into globals
+# PO_ENABLED / PO_USER / PO_TOKEN / PO_TITLE. Safe when the file is absent.
+load_notify_conf() {
+    local conf="${1:-/etc/pihole-ha/notify.conf}"
+    PO_ENABLED="false"; PO_USER=""; PO_TOKEN=""; PO_TITLE="pihole-ha"
+    [[ -f "$conf" ]] || return 0
+    local key val
+    while IFS='=' read -r key val; do
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        case "$key" in
+            PO_ENABLED) PO_ENABLED="$val" ;;
+            PO_USER)    PO_USER="$val" ;;
+            PO_TOKEN)   PO_TOKEN="$val" ;;
+            PO_TITLE)   PO_TITLE="$val" ;;
+        esac
+    done < "$conf"
+}
+
+# Send a Pushover notification (synchronous). Resolves api.pushover.net
+# via local Pi-hole, then any peers in ${NODES[@]}, then system resolver,
+# so notifications keep working during failover when local DNS is flapping.
+# Callers in long-running daemons should background with `notify "..." &`.
+notify() {
+    [[ "$PO_ENABLED" == "true" && -n "$PO_USER" && -n "$PO_TOKEN" ]] || return 0
+    local po_ip="" src="" peer
+    po_ip="$(dig +short +timeout=2 +tries=1 @127.0.0.1 api.pushover.net A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | tail -1)"
+    [[ -n "$po_ip" ]] && src="local"
+    if [[ -z "$po_ip" && -n "${NODES[*]:-}" ]]; then
+        for peer in "${NODES[@]}"; do
+            [[ "$peer" == "${LOCAL_IP:-}" ]] && continue
+            po_ip="$(dig +short +timeout=2 +tries=1 @"$peer" api.pushover.net A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | tail -1)"
+            [[ -n "$po_ip" ]] && src="peer:$peer" && break
+        done
+    fi
+    if [[ -z "$po_ip" ]]; then
+        po_ip="$(dig +short +timeout=2 +tries=1 api.pushover.net A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | tail -1)"
+        [[ -n "$po_ip" ]] && src="system"
+    fi
+    if [[ -z "$po_ip" ]]; then
+        command -v log_warn >/dev/null 2>&1 && log_warn "event=notify_dns_failed host=api.pushover.net"
+        return 0
+    fi
+    command -v log_info >/dev/null 2>&1 && log_info "event=notify_sending dns_src=$src resolved=$po_ip"
+    curl -s --max-time 10 \
+        --resolve "api.pushover.net:443:$po_ip" \
+        -X POST "https://api.pushover.net/1/messages.json" \
+        -d "token=$PO_TOKEN" -d "user=$PO_USER" \
+        -d "html=1" -d "title=$PO_TITLE" \
+        --data-urlencode "message=$*" >/dev/null 2>&1
+}
+
+platform_get_local_ip() {
+    # hostname -I works on Debian/Ubuntu but not Alpine BusyBox
+    if hostname -I &>/dev/null; then
+        hostname -I | awk '{print $1}'
+    else
+        # Fallback: use ip route to find the source IP for default route
+        ip -o route get 1.0.0.0 2>/dev/null | sed -n 's/.*src \([^ ]*\).*/\1/p'
+    fi
+}
+
+platform_ftl_is_active() {
+    if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
+        pgrep -x pihole-FTL >/dev/null 2>&1
+    else
+        systemctl is-active --quiet pihole-FTL
+    fi
+}
+
+platform_ftl_restart() {
+    if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
+        local pid
+        pid="$(pgrep -x pihole-FTL 2>/dev/null)" || return 1
+        kill -TERM "$pid" 2>/dev/null || true
+        # Wait for FTL to come back (pihole container restart policy brings it back)
+        local waited=0
+        while (( waited < 10 )); do
+            sleep 1
+            (( waited++ ))
+            pgrep -x pihole-FTL >/dev/null 2>&1 && return 0
+        done
+        return 1
+    else
+        systemctl restart pihole-FTL
+    fi
+}
+
+platform_sync_enable() {
+    if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
+        touch /run/pihole-ha/sync-enabled
+    else
+        systemctl start pihole-ha-sync.timer 2>/dev/null || true
+    fi
+}
+
+platform_sync_disable() {
+    if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
+        rm -f /run/pihole-ha/sync-enabled
+    else
+        systemctl stop pihole-ha-sync.timer 2>/dev/null || true
+    fi
+}
+
+platform_sync_pull_enable() {
+    if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
+        touch /run/pihole-ha/sync-pull-enabled
+    else
+        systemctl start pihole-ha-sync-pull.timer 2>/dev/null || true
+    fi
+}
+
+platform_sync_pull_disable() {
+    if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
+        rm -f /run/pihole-ha/sync-pull-enabled
+    else
+        systemctl stop pihole-ha-sync-pull.timer 2>/dev/null || true
+    fi
+}
+
+platform_sync_set_interval() {
+    local minutes="${1:-15}"
+    if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
+        # Docker uses SYNC_INTERVAL env var read from sync.conf each cycle
+        :
+    else
+        # Write systemd timer drop-ins for both sync and sync-pull
+        for unit in pihole-ha-sync.timer pihole-ha-sync-pull.timer; do
+            local dir="/etc/systemd/system/${unit}.d"
+            mkdir -p "$dir"
+            cat > "$dir/interval.conf" <<EOF
+[Timer]
+OnUnitActiveSec=
+OnUnitActiveSec=${minutes}min
+EOF
+        done
+        systemctl daemon-reload 2>/dev/null || true
+        # Restart active timers to pick up new interval
+        systemctl try-restart pihole-ha-sync.timer 2>/dev/null || true
+        systemctl try-restart pihole-ha-sync-pull.timer 2>/dev/null || true
+    fi
+}
+
+platform_ha_daemon_restart() {
+    if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
+        touch /run/pihole-ha/restart-requested
+    else
+        systemctl restart pihole-ha 2>/dev/null || true
+    fi
+}

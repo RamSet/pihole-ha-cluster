@@ -1,0 +1,74 @@
+#!/bin/bash
+# pihole-ha-inject — Install HA page into Pi-hole web UI
+# Copies ha.lp + ha.js and patches the sidebar menu.
+# Called by installer and by systemd path watcher after Pi-hole updates.
+
+set -euo pipefail
+
+WEBDIR="/var/www/html/admin"
+SIDEBAR="$WEBDIR/scripts/lua/sidebar.lp"
+SRCDIR="/usr/local/share/pihole-ha"
+
+log() { logger -t pihole-ha-inject "$*"; echo "pihole-ha-inject: $*"; }
+
+# Verify source files exist
+if [[ ! -f "$SRCDIR/ha.lp" || ! -f "$SRCDIR/ha.js" || ! -f "$SRCDIR/ha-api.lp" ]]; then
+    log "ERROR: Source files not found in $SRCDIR"
+    exit 1
+fi
+
+# Verify Pi-hole web directory exists
+if [[ ! -d "$WEBDIR/scripts/js" ]]; then
+    log "ERROR: Pi-hole web directory not found at $WEBDIR"
+    exit 1
+fi
+
+# 1. Copy page files
+cp "$SRCDIR/ha.lp" "$WEBDIR/ha.lp"
+cp "$SRCDIR/ha-api.lp" "$WEBDIR/ha-api.lp"
+cp "$SRCDIR/ha.js" "$WEBDIR/scripts/js/ha.js"
+log "Copied ha.lp, ha-api.lp, and ha.js to Pi-hole web root"
+
+# 2. Patch sidebar if not already done
+if [[ ! -f "$SIDEBAR" ]]; then
+    log "WARNING: sidebar.lp not found at $SIDEBAR — skipping sidebar patch"
+    exit 0
+fi
+
+if grep -q 'HA Cluster' "$SIDEBAR"; then
+    log "Sidebar already patched — skipping"
+    exit 0
+fi
+
+# Patch using Python for clean multi-line insertion
+python3 - "$SIDEBAR" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path, 'r') as f:
+    content = f.read()
+
+# Add 'ha' to the Tools treeview in_array check so parent menu opens
+content = content.replace(
+    "'network'})",
+    "'network', 'ha'})"
+)
+
+# Insert HA menu entry before "Update Gravity"
+ha_entry = """                        <!-- HA Cluster -->
+                        <li<? if scriptname == 'ha' then ?> class="active"<? end ?>>
+                            <a href="<?=webhome?>ha">
+                                <i class="fa fa-fw menu-icon fa-server"></i> <span>HA Cluster</span>
+                            </a>
+                        </li>
+"""
+content = content.replace(
+    '                        <!-- Update Gravity -->',
+    ha_entry + '                        <!-- Update Gravity -->'
+)
+
+with open(path, 'w') as f:
+    f.write(content)
+PYEOF
+
+log "Sidebar patched — HA Cluster menu added under Tools"

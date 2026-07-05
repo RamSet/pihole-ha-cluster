@@ -1,0 +1,689 @@
+#!/bin/bash
+# pihole-ha — Pi-hole DHCP failover monitor
+# 3-check health: ping + DNS:53 + Pi-hole API DHCP status
+# Writes status JSON for dashboard, sends Pushover on state changes
+
+set -uo pipefail
+
+# Load platform abstraction (systemd vs Docker)
+for _p in /usr/local/lib/pihole-ha/pihole-ha-platform ./pihole-ha-platform; do
+    [[ -f "$_p" ]] && { . "$_p"; break; }
+done
+
+# Load node config (with backwards-compatible defaults)
+NODES_CONF="/etc/pihole-ha/nodes.conf"
+GATEWAY="" VIP="" VIP_ENABLED="" HA_ENABLED="" HA_NODES=""
+[[ -f "$NODES_CONF" ]] && . "$NODES_CONF"
+EXPECTED_CONFIG_VERSION=1
+CONFIG_VERSION="${CONFIG_VERSION:-0}"
+if [[ -z "$GATEWAY" || -z "$HA_NODES" ]]; then
+    echo "ERROR: /etc/pihole-ha/nodes.conf missing or incomplete (need GATEWAY and HA_NODES)" >&2
+    exit 1
+fi
+VIP_ENABLED="${VIP_ENABLED:-true}"
+HA_ENABLED="${HA_ENABLED:-true}"
+# Parse HA_NODES: supports IP or IP:PORT (default port 80)
+IFS=',' read -ra _RAW_NODES <<< "$HA_NODES"
+NODES=()
+declare -A NODE_PORTS
+for _rn in "${_RAW_NODES[@]}"; do
+    if [[ "$_rn" == *:* ]]; then
+        NODES+=("${_rn%%:*}")
+        NODE_PORTS["${_rn%%:*}"]="${_rn##*:}"
+    else
+        NODES+=("$_rn")
+        NODE_PORTS["$_rn"]=80
+    fi
+done
+_ROLE_NAMES=("PRIMARY" "SECONDARY" "TERTIARY")
+NODE_COUNT=${#NODES[@]}
+ROLES=()
+for (( _ri=0; _ri<NODE_COUNT; _ri++ )); do
+    if (( _ri < ${#_ROLE_NAMES[@]} )); then
+        ROLES+=("${_ROLE_NAMES[$_ri]}")
+    else
+        ROLES+=("NODE$((_ri+1))")
+    fi
+done
+
+IFACE="$(ip -o route get "$GATEWAY" 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p')"
+[[ -z "$IFACE" ]] && IFACE="$(ip -o link show up | grep -v lo | head -1 | awk -F': ' '{print $2}')"
+
+CHECK_INTERVAL=10
+DEACTIVATE_AFTER=3
+HEALTH_TIMEOUT=2
+STATUS_DIR="/run/pihole-ha"
+STATUS_FILE="$STATUS_DIR/status.json"
+
+LOCAL_IP="$(platform_get_local_ip)"
+
+MY_IDX=-1
+for (( i=0; i<NODE_COUNT; i++ )); do
+    [[ "$LOCAL_IP" == "${NODES[$i]}" ]] && { MY_IDX=$i; break; }
+done
+[[ $MY_IDX -lt 0 ]] && { echo "Unknown IP: $LOCAL_IP" >&2; exit 1; }
+
+PRIORITY=$((MY_IDX + 1))
+ROLE="${ROLES[$MY_IDX]}"
+
+# Staggered activation: primary=immediate, last node=4 checks, others=2
+if (( MY_IDX == 0 )); then
+    ACTIVATE_AFTER=0
+elif (( MY_IDX == NODE_COUNT - 1 && NODE_COUNT > 2 )); then
+    ACTIVATE_AFTER=4
+else
+    ACTIVATE_AFTER=2
+fi
+
+mkdir -p "$STATUS_DIR"
+
+# Detect and auto-restart pihole-FTL if it crashes
+FTL_LAST_RESTART=0
+ensure_ftl_running() {
+    platform_ftl_is_active && return 0
+    local now
+    now="$(date +%s)"
+    if (( now - FTL_LAST_RESTART < 30 )); then
+        return 1
+    fi
+    log_warn "event=ftl_down action=restart"
+    platform_ftl_restart 2>/dev/null || true
+    FTL_LAST_RESTART="$now"
+    sleep 2
+    if platform_ftl_is_active; then
+        log_info "event=ftl_restart status=ok"
+        return 0
+    fi
+    log_error "event=ftl_restart status=failed"
+    return 1
+}
+
+declare -i activate_count=0 deactivate_count=0 stable_count=0
+declare -A peer_ping peer_dns peer_api peer_dhcp peer_leases peer_clients peer_auth
+declare -A peer_password peer_sid
+
+# Load per-node Pi-hole API passwords (for password-protected instances)
+# Format: PASS_10_33_47_5=secretpass (dots replaced with underscores)
+AUTH_CONF="/etc/pihole-ha/auth.conf"
+load_auth() {
+    peer_password=()
+    [[ -f "$AUTH_CONF" ]] || return
+    while IFS='=' read -r key val; do
+        [[ "$key" =~ ^PASS_ ]] || continue
+        local ip="${key#PASS_}"
+        ip="${ip//_/.}"
+        peer_password[$ip]="$val"
+    done < "$AUTH_CONF"
+}
+load_auth
+
+# Load DHCP master override config (auto = priority-based, IP = forced master)
+MASTER_CONF="/etc/pihole-ha/master.conf"
+DHCP_MASTER="auto"
+load_master() {
+    DHCP_MASTER="auto"
+    [[ -f "$MASTER_CONF" ]] || return
+    while IFS='=' read -r key val; do
+        [[ "$key" == "DHCP_MASTER" ]] && DHCP_MASTER="$val"
+    done < "$MASTER_CONF"
+}
+load_master
+
+# Reload VIP settings from nodes.conf (picks up changes from config sync)
+# Returns 0 if VIP config changed, 1 if unchanged
+reload_vip_conf() {
+    [[ -f "$NODES_CONF" ]] || return 1
+    local prev_vip="$VIP" prev_ve="$VIP_ENABLED" prev_nodes="$HA_NODES"
+    while IFS='=' read -r key val; do
+        val="${val#\"}"; val="${val%\"}"  # strip surrounding quotes
+        val="${val#\'}"; val="${val%\'}"
+        case "$key" in
+            VIP)         VIP="$val" ;;
+            VIP_ENABLED) VIP_ENABLED="$val" ;;
+            HA_ENABLED)  HA_ENABLED="$val" ;;
+            HA_NODES)    HA_NODES="$val" ;;
+        esac
+    done < "$NODES_CONF"
+    # Rebuild node array if order changed
+    if [[ "$HA_NODES" != "$prev_nodes" ]]; then
+        # Re-parse with the same IP:PORT handling as startup, else :PORT suffixes
+        # leak into NODES and every peer (including self) looks unreachable.
+        IFS=',' read -ra _RAW_NODES <<< "$HA_NODES"
+        NODES=()
+        for _rn in "${_RAW_NODES[@]}"; do
+            if [[ "$_rn" == *:* ]]; then
+                NODES+=("${_rn%%:*}")
+                NODE_PORTS["${_rn%%:*}"]="${_rn##*:}"
+            else
+                NODES+=("$_rn")
+                NODE_PORTS["$_rn"]=80
+            fi
+        done
+        NODE_COUNT=${#NODES[@]}
+        for i in "${!NODES[@]}"; do
+            [[ "${NODES[$i]}" == "$LOCAL_IP" ]] && { MY_IDX=$i; break; }
+        done
+        PRIORITY=$((MY_IDX + 1))
+        ROLE="${ROLES[$MY_IDX]:-UNKNOWN}"
+        # Recalculate staggered activation delay
+        if (( MY_IDX == 0 )); then
+            ACTIVATE_AFTER=0
+        elif (( MY_IDX == NODE_COUNT - 1 && NODE_COUNT > 2 )); then
+            ACTIVATE_AFTER=4
+        else
+            ACTIVATE_AFTER=2
+        fi
+        log_info "event=priority_change nodes=\"${NODES[*]}\" role=$ROLE priority=$PRIORITY"
+    fi
+    [[ "$VIP" != "$prev_vip" || "$VIP_ENABLED" != "$prev_ve" || "$HA_NODES" != "$prev_nodes" ]]
+}
+
+# _log/log_info/log_warn/log_error live in pihole-ha-platform. Default
+# PIHOLE_HA_LOG_TAG is "pihole-ha", which is what this daemon wants.
+
+# is_valid_ip() is provided by pihole-ha-platform sourced above.
+
+# Validate all node IPs at startup
+for _vip in "${NODES[@]}"; do
+    is_valid_ip "$_vip" || { echo "Invalid node IP: $_vip" >&2; exit 1; }
+done
+is_valid_ip "$GATEWAY" || { echo "Invalid gateway IP: $GATEWAY" >&2; exit 1; }
+
+# Enforce: this node's own DNS must NOT depend on the VIP. If resolv.conf
+# points only at the VIP, when this node holds the VIP and dies, surviving
+# peers can't resolve anything — including pushover.net for failover alerts.
+# Re-pin every startup so reboots that pick up DHCP-supplied DNS self-heal.
+enforce_dns_pin() {
+    local first_ns
+    first_ns="$(grep -E '^nameserver[[:space:]]+' /etc/resolv.conf 2>/dev/null | head -1 | awk '{print $2}')"
+    [[ "$first_ns" == "127.0.0.1" ]] && return 0
+
+    log_warn "event=dns_pin_repair first_nameserver=${first_ns:-none} action=repinning"
+
+    # NetworkManager: pin DNS on every active non-loopback connection
+    if command -v nmcli &>/dev/null; then
+        while IFS= read -r nm_con; do
+            [[ -z "$nm_con" ]] && continue
+            nmcli con mod "$nm_con" ipv4.dns "127.0.0.1" ipv4.ignore-auto-dns yes 2>/dev/null || true
+            nmcli con up "$nm_con" >/dev/null 2>&1 || true
+        done < <(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep -v ':lo$' | cut -d: -f1)
+    fi
+
+    # systemd-resolved drop-in (idempotent)
+    if systemctl is-active systemd-resolved &>/dev/null; then
+        mkdir -p /etc/systemd/resolved.conf.d
+        cat > /etc/systemd/resolved.conf.d/pihole-ha.conf <<'RESOLVED'
+[Resolve]
+DNS=127.0.0.1
+Domains=~.
+DNSStubListener=no
+RESOLVED
+        systemctl restart systemd-resolved 2>/dev/null || true
+    fi
+
+    # Final guarantee: write /etc/resolv.conf directly
+    [[ -L /etc/resolv.conf ]] && rm -f /etc/resolv.conf
+    chattr -i /etc/resolv.conf 2>/dev/null || true
+    cat > /etc/resolv.conf <<'RESOLV'
+# pihole-ha: pin DNS to local FTL (do not edit — managed by pihole-ha)
+nameserver 127.0.0.1
+options edns0 trust-ad
+RESOLV
+
+    log_info "event=dns_pin_repaired nameserver=127.0.0.1"
+}
+enforce_dns_pin
+
+if [[ "$CONFIG_VERSION" -ne "$EXPECTED_CONFIG_VERSION" ]]; then
+    log_warn "event=config_version_mismatch found=$CONFIG_VERSION expected=$EXPECTED_CONFIG_VERSION"
+fi
+
+# Manage dnsmasq DHCP options advertised to clients
+# VIP enabled:  DNS=VIP only, DHCP server-id=VIP
+# VIP disabled: DNS=all node IPs, no server-id override
+DNSMASQ_HA="/etc/dnsmasq.d/09-pihole-ha.conf"
+build_dns_option() {
+    local lines=""
+    if [[ "$VIP_ENABLED" == "true" && -n "$VIP" ]]; then
+        # VIP mode: single VIP as DNS + DHCP server identifier
+        lines="dhcp-option=6,$VIP"$'\n'"dhcp-option=54,$VIP"
+    else
+        # No VIP: all node IPs as DNS, no server-id override
+        local dns_list=""
+        for ip in "${NODES[@]}"; do
+            [[ -n "$dns_list" ]] && dns_list+=","
+            dns_list+="$ip"
+        done
+        lines="dhcp-option=6,$dns_list"
+    fi
+    echo "$lines"
+}
+ensure_dns_option() {
+    local want header full
+    want="$(build_dns_option)"
+    header="# pihole-ha: DHCP options for clients"
+    full="$(printf '%s\n%s\n' "$header" "$want")"
+    if [[ -f "$DNSMASQ_HA" ]] && [[ "$(cat "$DNSMASQ_HA")" == "$full" ]]; then
+        return
+    fi
+    printf '%s\n' "$full" > "$DNSMASQ_HA"
+    # Rate-limit FTL restarts to avoid DHCP disruption
+    local now; now="$(date +%s)"
+    if (( now - FTL_LAST_RESTART < 30 )); then
+        log_info "event=dns_option_update options=\"$want\" ftl=deferred"
+        return
+    fi
+    platform_ftl_restart 2>/dev/null || true
+    FTL_LAST_RESTART="$now"
+    log_info "event=dns_option_update options=\"$want\" ftl=restarted"
+}
+# Ensure Pi-hole's built-in multiDNS is off (we manage dhcp-option=6 ourselves)
+if command -v pihole-FTL &>/dev/null; then
+    _multi="$(pihole-FTL --config dhcp.multiDNS 2>/dev/null)"
+    if [[ "$_multi" == "true" ]]; then
+        pihole-FTL --config dhcp.multiDNS false &>/dev/null
+        log_info "event=multidns_disabled reason=\"conflicts with $DNSMASQ_HA\""
+    fi
+fi
+# Remove stale vip-dns.conf if it exists (legacy)
+[[ -f /etc/dnsmasq.d/vip-dns.conf ]] && rm -f /etc/dnsmasq.d/vip-dns.conf && log_info "event=cleanup file=/etc/dnsmasq.d/vip-dns.conf"
+ensure_dns_option
+
+# Ensure dhcp-script hook for new device notifications
+DNSMASQ_DHCP_SCRIPT="/etc/dnsmasq.d/10-pihole-ha-dhcp-script.conf"
+DHCP_SCRIPT_BIN="/usr/local/bin/new_dhcp_device"
+if [[ -x "$DHCP_SCRIPT_BIN" ]] && [[ ! -f "$DNSMASQ_DHCP_SCRIPT" ]]; then
+    printf 'dhcp-script=%s\n' "$DHCP_SCRIPT_BIN" > "$DNSMASQ_DHCP_SCRIPT"
+    platform_ftl_restart 2>/dev/null || true
+    log_info "event=dhcp_script_hook_created file=$DNSMASQ_DHCP_SCRIPT"
+fi
+
+# Pushover notifications (optional — configure /etc/pihole-ha/notify.conf).
+# load_notify_conf and notify() live in pihole-ha-platform. Daemon callers
+# below background with `&` so curl never blocks the failover loop.
+load_notify_conf
+get_dhcp() { pihole-FTL --config dhcp.active 2>/dev/null || echo "false"; }
+
+# Get SID for authenticated API access; caches per peer
+get_sid() {
+    local ip="$1"
+    [[ -z "${peer_password[$ip]:-}" ]] && return  # no password configured
+    # Reuse cached SID if we have one (valid 30 min, we refresh every ~20s)
+    [[ -n "${peer_sid[$ip]:-}" ]] && echo "${peer_sid[$ip]}" && return
+    local resp
+    local port="${NODE_PORTS[$ip]:-80}"
+    # JSON-escape password: backslashes before quotes, then literal quotes.
+    local _pw="${peer_password[$ip]}"
+    _pw="${_pw//\\/\\\\}"
+    _pw="${_pw//\"/\\\"}"
+    resp="$(curl -s --max-time 3 -X POST "http://$ip:${port}/api/auth" \
+        -H "Content-Type: application/json" \
+        -d "{\"password\":\"${_pw}\"}" 2>/dev/null)" || return
+    local sid
+    sid="$(echo "$resp" | grep -o '"sid":"[^"]*"' | cut -d'"' -f4)"
+    if [[ -n "$sid" && "$sid" != "null" ]]; then
+        peer_sid[$ip]="$sid"
+        echo "$sid"
+    fi
+}
+
+# Override local node's port from env var or FTL query (Docker may differ from nodes.conf)
+if [[ -n "${PIHOLE_WEB_PORT:-}" ]]; then
+    NODE_PORTS["$LOCAL_IP"]="$PIHOLE_WEB_PORT"
+elif _ftl_port="$(pihole-FTL --config webserver.port 2>/dev/null | grep -o '^[0-9]*')" && [[ -n "$_ftl_port" ]]; then
+    NODE_PORTS["$LOCAL_IP"]="$_ftl_port"
+fi
+
+# Build URL with SID query param if peer needs auth
+api_url() {
+    local ip="$1" path="$2"
+    local port="${NODE_PORTS[$ip]:-80}"
+    local sid
+    sid="$(get_sid "$ip")"
+    if [[ -n "$sid" ]]; then
+        echo "http://$ip:${port}$path?sid=$sid"
+    else
+        echo "http://$ip:${port}$path"
+    fi
+}
+
+has_vip() {
+    [[ -n "$VIP" && -n "$IFACE" ]] || return 1
+    ip -4 addr show dev "$IFACE" 2>/dev/null | grep -qE "inet $VIP/"
+}
+
+# Re-detect IFACE if missing (interface may rename after reboot or USB ethernet reattach)
+ensure_iface() {
+    [[ -n "$IFACE" ]] && ip link show "$IFACE" &>/dev/null && return 0
+    IFACE="$(ip -o route get "$GATEWAY" 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p')"
+    [[ -z "$IFACE" ]] && IFACE="$(ip -o link show up | grep -v lo | head -1 | awk -F': ' '{print $2}')"
+    if [[ -n "$IFACE" ]]; then
+        log_warn "event=iface_redetected iface=$IFACE"
+        return 0
+    fi
+    log_error "event=iface_detect_failed gateway=$GATEWAY"
+    return 1
+}
+
+add_vip() {
+    [[ "$VIP_ENABLED" != "true" ]] && return 0
+    if ! ensure_iface; then
+        notify "<b><font color='#e74c3c'>VIP CLAIM FAILED</font></b> <br> $LOCAL_IP: no network interface" &
+        return 1
+    fi
+    has_vip && return 0
+    local err
+    err="$(ip addr add "$VIP/32" dev "$IFACE" 2>&1)" || {
+        log_error "event=vip_add status=failed iface=$IFACE error=\"$err\""
+        notify "<b><font color='#e74c3c'>VIP CLAIM FAILED</font></b> <br> $LOCAL_IP iface=$IFACE <br> $err" &
+        return 1
+    }
+    if ! has_vip; then
+        log_error "event=vip_add status=verify_failed iface=$IFACE"
+        notify "<b><font color='#e74c3c'>VIP CLAIM VERIFY FAILED</font></b> <br> $LOCAL_IP: kernel did not bind $VIP on $IFACE" &
+        return 1
+    fi
+    if command -v arping &>/dev/null; then
+        arping -U -c3 -I "$IFACE" "$VIP" &>/dev/null &
+    fi
+    log_info "event=vip_add ip=$VIP iface=$IFACE status=ok"
+    return 0
+}
+
+remove_vip() {
+    has_vip || return 0
+    local err
+    err="$(ip addr del "$VIP/32" dev "$IFACE" 2>&1)" || {
+        log_error "event=vip_remove status=failed iface=$IFACE error=\"$err\""
+        return 1
+    }
+    log_info "event=vip_remove ip=$VIP iface=$IFACE status=ok"
+}
+
+set_dhcp() {
+    local want="$1" have
+    have="$(get_dhcp)"
+    [[ "$have" == "$want" ]] && return 0
+    pihole-FTL --config dhcp.active "$want" >/dev/null 2>&1
+    sleep 1
+    have="$(get_dhcp)"
+    [[ "$have" == "$want" ]]
+}
+
+check_peer() {
+    local ip="$1"
+    if ping -c1 -W"$HEALTH_TIMEOUT" "$ip" >/dev/null 2>&1; then
+        peer_ping[$ip]="true"
+    else
+        peer_ping[$ip]="false"; peer_dns[$ip]="false"
+        peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="null"
+        return
+    fi
+    if nc -z -w"$HEALTH_TIMEOUT" "$ip" 53 >/dev/null 2>&1; then
+        peer_dns[$ip]="true"
+    else
+        peer_dns[$ip]="false"; peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="null"
+        return
+    fi
+    local resp url
+    url="$(api_url "$ip" /api/config/dhcp/active)"
+    resp="$(curl -s --max-time "$HEALTH_TIMEOUT" "$url" 2>/dev/null)" || {
+        peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="null"; return
+    }
+    # If 401, clear cached SID and retry once
+    if echo "$resp" | grep -q '"unauthorized"'; then
+        unset "peer_sid[$ip]"
+        url="$(api_url "$ip" /api/config/dhcp/active)"
+        resp="$(curl -s --max-time "$HEALTH_TIMEOUT" "$url" 2>/dev/null)" || {
+            peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="\"denied\""; return
+        }
+        if echo "$resp" | grep -q '"unauthorized"'; then
+            peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="\"denied\""; return
+        fi
+    fi
+    peer_api[$ip]="true"; peer_auth[$ip]="\"ok\""
+    # Client count from stats summary
+    local stats
+    stats="$(curl -s --max-time 2 "$(api_url "$ip" /api/stats/summary)" 2>/dev/null)"
+    peer_clients[$ip]="$(echo "$stats" | grep -o '"active":[0-9]*' | head -1 | grep -o '[0-9]*')"
+    [[ -z "${peer_clients[$ip]}" ]] && peer_clients[$ip]="null"
+    if echo "$resp" | grep -q '"active":true'; then
+        peer_dhcp[$ip]="true"
+        peer_leases[$ip]="$(curl -s --max-time 2 "$(api_url "$ip" /api/dhcp/leases)" 2>/dev/null | grep -o '"expires"' | wc -l)"
+    elif echo "$resp" | grep -q '"active":false'; then
+        peer_dhcp[$ip]="false"; peer_leases[$ip]="null"
+    else
+        peer_dhcp[$ip]="null"; peer_leases[$ip]="null"
+    fi
+}
+
+is_serving() {
+    local ip="$1"
+    [[ "${peer_ping[$ip]}" == "true" ]] &&
+    [[ "${peer_dns[$ip]}" == "true" ]] &&
+    [[ "${peer_api[$ip]}" == "true" ]] &&
+    [[ "${peer_dhcp[$ip]}" == "true" ]]
+}
+
+get_fail_reason() {
+    local ip="$1" r=""
+    [[ "${peer_ping[$ip]}" != "true" ]] && r+="ping failed, "
+    [[ "${peer_dns[$ip]}" != "true" ]] && r+="DNS:53 down, "
+    [[ "${peer_api[$ip]}" != "true" ]] && r+="API unreachable, "
+    [[ "${peer_dhcp[$ip]}" == "false" ]] && r+="DHCP disabled, "
+    [[ "${peer_dhcp[$ip]}" == "null" && "${peer_api[$ip]}" == "true" ]] && r+="DHCP unknown, "
+    echo "${r%, }"
+}
+
+should_i_serve() {
+    if [[ "$DHCP_MASTER" != "auto" ]]; then
+        # Manual override mode
+        if [[ "$DHCP_MASTER" == "$LOCAL_IP" ]]; then
+            return 0  # I am the designated master
+        fi
+        # Designated master is healthy — yield to it
+        is_serving "$DHCP_MASTER" && return 1
+        # Designated master is down — fallback to priority among remaining
+        for (( i=0; i<MY_IDX; i++ )); do
+            [[ "${NODES[$i]}" == "$DHCP_MASTER" ]] && continue
+            is_serving "${NODES[$i]}" && return 1
+        done
+        return 0
+    fi
+    # Auto mode: original priority logic
+    (( MY_IDX == 0 )) && return 0
+    for (( i=0; i<MY_IDX; i++ )); do
+        is_serving "${NODES[$i]}" && return 1
+    done
+    return 0
+}
+
+build_reason() {
+    if [[ "$DHCP_MASTER" != "auto" ]]; then
+        if [[ "$DHCP_MASTER" == "$LOCAL_IP" ]]; then
+            echo "Manual DHCP master"
+            return
+        fi
+        # Designated master is down, we're taking over
+        local parts="Manual master $DHCP_MASTER down: $(get_fail_reason "$DHCP_MASTER")"
+        for (( i=0; i<MY_IDX; i++ )); do
+            [[ "${NODES[$i]}" == "$DHCP_MASTER" ]] && continue
+            [[ -n "$parts" ]] && parts+=" | "
+            parts+="${ROLES[$i]} ${NODES[$i]}: $(get_fail_reason "${NODES[$i]}")"
+        done
+        echo "$parts"
+        return
+    fi
+    if (( MY_IDX == 0 )); then
+        echo "Primary enforcing DHCP"
+    else
+        local parts=""
+        for (( i=0; i<MY_IDX; i++ )); do
+            [[ -n "$parts" ]] && parts+=" | "
+            parts+="${ROLES[$i]} ${NODES[$i]}: $(get_fail_reason "${NODES[$i]}")"
+        done
+        echo "$parts"
+    fi
+}
+
+yielded_to() {
+    if [[ "$DHCP_MASTER" != "auto" && "$DHCP_MASTER" != "$LOCAL_IP" ]]; then
+        if is_serving "$DHCP_MASTER"; then
+            echo "Manual master ($DHCP_MASTER)"
+            return
+        fi
+    fi
+    # Return which higher-priority node(s) are serving
+    local parts=""
+    for (( i=0; i<MY_IDX; i++ )); do
+        is_serving "${NODES[$i]}" && parts+="${ROLES[$i]} (${NODES[$i]}), "
+    done
+    echo "${parts%, }"
+}
+
+write_status() {
+    local reason="${1:-}" gw="${2:-true}" dhcp
+    dhcp="$(get_dhcp)"
+    local vip_held="false"
+    has_vip && vip_held="true"
+    local tmp="$STATUS_FILE.tmp"
+    {
+        printf '{"ha_enabled":%s,"dhcp_master":"%s","node":{"ip":"%s","role":"%s","priority":%d,"dhcp_active":%s,"vip":"%s","vip_enabled":%s,"vip_held":%s},' \
+            "$HA_ENABLED" "$DHCP_MASTER" "$LOCAL_IP" "$ROLE" "$PRIORITY" "$dhcp" "$VIP" "$VIP_ENABLED" "$vip_held"
+        printf '"gateway":%s,"timestamp":"%s",' "$gw" "$(date '+%Y-%m-%dT%H:%M:%S')"
+        printf '"reason":"%s","peers":{' "$(echo "$reason" | sed 's/"/\\"/g')"
+        local sep=""
+        for (( i=0; i<NODE_COUNT; i++ )); do
+            local ip="${NODES[$i]}"
+            printf '%s"%s":{"role":"%s","priority":%d,"ping":%s,"dns":%s,"api":%s,"dhcp":%s,"leases":%s,"clients":%s,"auth":%s}' \
+                "$sep" "$ip" "${ROLES[$i]}" "$((i+1))" \
+                "${peer_ping[$ip]:-null}" "${peer_dns[$ip]:-null}" \
+                "${peer_api[$ip]:-null}" "${peer_dhcp[$ip]:-null}" \
+                "${peer_leases[$ip]:-null}" "${peer_clients[$ip]:-null}" \
+                "${peer_auth[$ip]:-null}"
+            sep=","
+        done
+        printf '}}\n'
+    } > "$tmp"
+    mv "$tmp" "$STATUS_FILE"
+}
+
+# --- Main Loop ---
+log_info "event=startup ip=$LOCAL_IP priority=$PRIORITY interval=${CHECK_INTERVAL}s activate_after=$ACTIVATE_AFTER deactivate_after=$DEACTIVATE_AFTER"
+log_info "event=startup checks=\"ping dns:53 api dhcp\""
+notify "<b><font color='#3498db'>$ROLE</font> DHCP Monitor Started</b> <br> <font color='#95a5a6'>$LOCAL_IP</font> (P<b>$PRIORITY</b>) <br> Order: ${NODES[*]} <br> VIP: $VIP ($([[ "$VIP_ENABLED" == "true" ]] && echo enabled || echo disabled)) <br> HA: $([[ "$HA_ENABLED" == "true" ]] && echo enabled || echo disabled)" &
+
+while true; do
+    sleep "$CHECK_INTERVAL"
+    load_auth      # reload passwords in case user saved new ones via web UI
+    load_master    # reload DHCP master override (live config changes)
+    if reload_vip_conf; then  # only update DNS option when VIP config actually changes
+        ensure_dns_option
+    fi
+
+    # Always run health checks so dashboard shows real peer state
+    for ip in "${NODES[@]}"; do check_peer "$ip"; done
+
+    if [[ "$HA_ENABLED" != "true" ]]; then
+        write_status "HA disabled"
+        continue
+    fi
+    if ! ensure_ftl_running; then
+        write_status "pihole-FTL down"
+        continue
+    fi
+
+    if ! ping -c1 -W"$HEALTH_TIMEOUT" "$GATEWAY" >/dev/null 2>&1; then
+        log_warn "event=gateway_unreachable gateway=$GATEWAY"
+        activate_count=0; deactivate_count=0
+        write_status "LAN outage - gateway unreachable" "false"
+        continue
+    fi
+
+    current="$(get_dhcp)"
+
+    if should_i_serve; then
+        deactivate_count=0; stable_count=0
+        if [[ "$current" == "true" ]]; then
+            has_vip || add_vip  # Ensure VIP is present when serving
+            activate_count=0
+            write_status "$(build_reason)"
+            continue
+        fi
+        (( activate_count++ )) || true
+        if (( activate_count >= ACTIVATE_AFTER )); then
+            reason="$(build_reason)"
+            log_info "event=dhcp_activate reason=\"$reason\""
+            add_vip
+            if set_dhcp "true"; then
+                vip_msg=""
+                [[ "$VIP_ENABLED" == "true" ]] && vip_msg=" <br> VIP <b>$VIP</b> acquired"
+                # Build detailed per-node health breakdown for notification
+                detail=""
+                for (( _ni=0; _ni<NODE_COUNT; _ni++ )); do
+                    _nip="${NODES[$_ni]}"
+                    [[ "$_nip" == "$LOCAL_IP" ]] && continue
+                    _st=""
+                    if [[ "${peer_ping[$_nip]}" == "true" ]]; then _st+="<font color='#3fb950'>ping</font> "; else _st+="<font color='#f85149'>ping</font> "; fi
+                    if [[ "${peer_dns[$_nip]}" == "true" ]]; then _st+="<font color='#3fb950'>dns</font> "; else _st+="<font color='#f85149'>dns</font> "; fi
+                    if [[ "${peer_api[$_nip]}" == "true" ]]; then _st+="<font color='#3fb950'>api</font> "; else _st+="<font color='#f85149'>api</font> "; fi
+                    if [[ "${peer_dhcp[$_nip]}" == "true" ]]; then _st+="<font color='#3fb950'>dhcp</font>"; elif [[ "${peer_dhcp[$_nip]}" == "false" ]]; then _st+="<font color='#d29922'>dhcp:off</font>"; else _st+="<font color='#f85149'>dhcp</font>"; fi
+                    detail+=" <br> <font color='#8b949e'>${ROLES[$_ni]}</font> $_nip: $_st"
+                done
+                notify "<b><font color='#2ecc71'>$ROLE DHCP ACTIVATED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> now serving DHCP${vip_msg} <br> <font color='#e74c3c'>$reason</font>${detail}" &
+                log_info "event=dhcp_activate status=ok"
+            else
+                notify "<b><font color='#e74c3c'>$ROLE DHCP ACTIVATION FAILED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> could not enable DHCP" &
+                log_error "event=dhcp_activate status=failed"
+            fi
+            activate_count=0
+            write_status "$reason"
+        else
+            log_info "event=dhcp_activate_pending count=$activate_count/$ACTIVATE_AFTER"
+            write_status "$(build_reason)"
+        fi
+    else
+        # Anti-flap: only clear activation progress once peers prove stable
+        (( stable_count++ )) || true
+        if (( stable_count >= ACTIVATE_AFTER )); then
+            activate_count=0; stable_count=0
+        fi
+        if [[ "$current" == "false" ]]; then
+            deactivate_count=0
+            write_status ""
+            continue
+        fi
+        (( deactivate_count++ )) || true
+        if (( deactivate_count >= DEACTIVATE_AFTER )); then
+            yielded_for="$(yielded_to)"
+            log_info "event=dhcp_deactivate yielded_to=\"$yielded_for\""
+            if set_dhcp "false"; then
+                remove_vip
+                vip_rel=""
+                [[ "$VIP_ENABLED" == "true" ]] && vip_rel=" <br> VIP released"
+                # Build per-node health for deactivation notification
+                detail=""
+                for (( _ni=0; _ni<NODE_COUNT; _ni++ )); do
+                    _nip="${NODES[$_ni]}"
+                    [[ "$_nip" == "$LOCAL_IP" ]] && continue
+                    _st=""
+                    if [[ "${peer_ping[$_nip]}" == "true" ]]; then _st+="<font color='#3fb950'>ping</font> "; else _st+="<font color='#f85149'>ping</font> "; fi
+                    if [[ "${peer_dns[$_nip]}" == "true" ]]; then _st+="<font color='#3fb950'>dns</font> "; else _st+="<font color='#f85149'>dns</font> "; fi
+                    if [[ "${peer_api[$_nip]}" == "true" ]]; then _st+="<font color='#3fb950'>api</font> "; else _st+="<font color='#f85149'>api</font> "; fi
+                    if [[ "${peer_dhcp[$_nip]}" == "true" ]]; then _st+="<font color='#3fb950'>dhcp</font>"; elif [[ "${peer_dhcp[$_nip]}" == "false" ]]; then _st+="<font color='#d29922'>dhcp:off</font>"; else _st+="<font color='#f85149'>dhcp</font>"; fi
+                    detail+=" <br> <font color='#8b949e'>${ROLES[$_ni]}</font> $_nip: $_st"
+                done
+                notify "<b><font color='#f39c12'>$ROLE DHCP DEACTIVATED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> yielding to <b><font color='#2ecc71'>$yielded_for</font></b>${vip_rel}${detail}" &
+                log_info "event=dhcp_deactivate status=ok yielded_to=\"$yielded_for\""
+            else
+                notify "<b><font color='#e74c3c'>$ROLE DHCP DEACTIVATION FAILED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> could not disable DHCP" &
+                log_error "event=dhcp_deactivate status=failed"
+            fi
+            deactivate_count=0
+            write_status ""
+        else
+            log_info "event=dhcp_deactivate_pending count=$deactivate_count/$DEACTIVATE_AFTER"
+            write_status "Deactivating ($deactivate_count/$DEACTIVATE_AFTER)"
+        fi
+    fi
+done

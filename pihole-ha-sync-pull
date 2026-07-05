@@ -1,0 +1,324 @@
+#!/bin/bash
+# pihole-ha-sync-pull — Pull Pi-hole config from primary via HTTP
+# Runs on SECONDARY/TERTIARY only. Downloads payload when timestamp changes.
+
+set -uo pipefail
+
+# Load platform abstraction (systemd vs Docker)
+for _p in /usr/local/lib/pihole-ha/pihole-ha-platform ./pihole-ha-platform; do
+    [[ -f "$_p" ]] && { . "$_p"; break; }
+done
+
+# Load node config (with backwards-compatible defaults)
+NODES_CONF="/etc/pihole-ha/nodes.conf"
+GATEWAY="" VIP="" HA_NODES=""
+[[ -f "$NODES_CONF" ]] && . "$NODES_CONF"
+if [[ -z "$HA_NODES" ]]; then
+    echo "ERROR: /etc/pihole-ha/nodes.conf missing or incomplete (need HA_NODES)" >&2
+    exit 1
+fi
+# Parse HA_NODES: supports IP or IP:PORT (strip port, not needed for sync-pull)
+IFS=',' read -ra _RAW_NODES <<< "$HA_NODES"
+NODES=()
+for _rn in "${_RAW_NODES[@]}"; do NODES+=("${_rn%%:*}"); done
+_ROLE_NAMES=("PRIMARY" "SECONDARY" "TERTIARY")
+NODE_COUNT=${#NODES[@]}
+ROLES=()
+for (( _ri=0; _ri<NODE_COUNT; _ri++ )); do
+    if (( _ri < ${#_ROLE_NAMES[@]} )); then ROLES+=("${_ROLE_NAMES[$_ri]}"); else ROLES+=("NODE$((_ri+1))"); fi
+done
+
+LOCAL_IP="$(platform_get_local_ip)"
+SYNC_DIR="/run/pihole-ha"
+LAST_HASH_FILE="$SYNC_DIR/last-pull-hash"
+STAGING_DIR="/tmp/pihole-ha-pull-staging"
+SYNC_CONF="/etc/pihole-ha/sync.conf"
+
+mkdir -p "$SYNC_DIR"
+
+# Determine this node's index and role
+MY_IDX=-1
+for (( i=0; i<NODE_COUNT; i++ )); do
+    [[ "$LOCAL_IP" == "${NODES[$i]}" ]] && { MY_IDX=$i; break; }
+done
+[[ $MY_IDX -lt 0 ]] && { echo "Unknown IP: $LOCAL_IP" >&2; exit 1; }
+
+MY_ROLE="${ROLES[$MY_IDX]}"
+
+ROLE="SYNC-PULL"
+PIHOLE_HA_LOG_TAG="pihole-ha-sync-pull"  # _log/log_* come from pihole-ha-platform
+
+# Pushover load+send come from pihole-ha-platform. Oneshot scripts run
+# notify() synchronously — the script exits as soon as it finishes, so
+# backgrounding would lose the message before curl could finish.
+load_notify_conf
+
+# Load sync config (defaults: all true)
+SYNC_ENABLED=true
+SYNC_GRAVITY=true
+SYNC_DHCP=true
+SYNC_DNS=true
+SYNC_SETTINGS=true
+SYNC_PRIMARY="${NODES[0]}"
+[[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+
+# Support PULL_SOURCE override for bootstrap mode (primary pulling from standby)
+_PULL_FROM="${PULL_SOURCE:-$SYNC_PRIMARY}"
+PRIMARY_URL="http://$_PULL_FROM:8887"
+
+# Exit if sync disabled
+if [[ "$SYNC_ENABLED" != "true" ]]; then
+    log_info "event=skip reason=\"sync disabled\""
+    exit 0
+fi
+
+# Only run on standby nodes (not the sync primary), unless bootstrapping from a peer
+if [[ "$LOCAL_IP" == "$SYNC_PRIMARY" && -z "${PULL_SOURCE:-}" ]]; then
+    log_info "event=skip reason=\"this is sync primary\""
+    exit 0
+fi
+
+# Fetch manifest from primary
+MANIFEST="$(curl -sf --max-time 10 "$PRIMARY_URL/api/sync/manifest" 2>/dev/null)" || {
+    log_warn "event=skip reason=\"primary unreachable or no manifest\""
+    exit 0
+}
+
+# Parse hash from manifest
+REMOTE_HASH="$(echo "$MANIFEST" | grep -o '"hash":"[^"]*"' | cut -d'"' -f4)"
+REMOTE_TS="$(echo "$MANIFEST" | grep -o '"timestamp":"[^"]*"' | cut -d'"' -f4)"
+REMOTE_GRAVITY_MD5="$(echo "$MANIFEST" | grep -o '"gravity_md5":"[^"]*"' | cut -d'"' -f4)"
+
+# Parse component flags from manifest
+COMP_GRAVITY="$(echo "$MANIFEST" | grep -o '"gravity":[a-z]*' | cut -d: -f2)"
+COMP_DHCP="$(echo "$MANIFEST" | grep -o '"dhcp":[a-z]*' | cut -d: -f2)"
+COMP_DNS="$(echo "$MANIFEST" | grep -o '"dns":[a-z]*' | cut -d: -f2)"
+COMP_SETTINGS="$(echo "$MANIFEST" | grep -o '"settings":[a-z]*' | cut -d: -f2)"
+COMP_NOTIFY="$(echo "$MANIFEST" | grep -o '"notify":[a-z]*' | cut -d: -f2)"
+COMP_SYNCCONF="$(echo "$MANIFEST" | grep -o '"syncconf":[a-z]*' | cut -d: -f2)"
+
+if [[ -z "$REMOTE_HASH" ]]; then
+    log_warn "event=skip reason=\"could not parse manifest\""
+    exit 0
+fi
+
+# Check if we already have this version
+LOCAL_HASH="$(cat "$LAST_HASH_FILE" 2>/dev/null || echo "")"
+
+# Check for --force flag
+FORCE=false
+[[ "${1:-}" == "--force" ]] && FORCE=true
+
+if [[ "$REMOTE_HASH" == "$LOCAL_HASH" && "$FORCE" != "true" ]]; then
+    log_info "event=skip reason=\"already up to date\" hash=$REMOTE_HASH"
+    exit 0
+fi
+
+log_info "event=pull_start remote_hash=$REMOTE_HASH local_hash=$LOCAL_HASH ts=$REMOTE_TS"
+
+# Download payload
+rm -rf "$STAGING_DIR"
+mkdir -p "$STAGING_DIR"
+
+curl -sf --max-time 120 "$PRIMARY_URL/api/sync/payload" -o "$STAGING_DIR/payload.tar.gz" 2>/dev/null || {
+    log_error "event=pull_fail reason=\"download failed\""
+    rm -rf "$STAGING_DIR"
+    exit 1
+}
+
+# Extract payload
+tar -xzf "$STAGING_DIR/payload.tar.gz" -C "$STAGING_DIR" 2>/dev/null || {
+    log_error "event=pull_fail reason=\"extraction failed\""
+    rm -rf "$STAGING_DIR"
+    exit 1
+}
+
+# Verify expected files exist (only for components included in manifest)
+[[ "$COMP_GRAVITY" == "true" && ! -f "$STAGING_DIR/gravity.db" ]] && {
+    log_error "event=pull_fail reason=\"missing gravity.db\""; rm -rf "$STAGING_DIR"; exit 1; }
+[[ "$COMP_DHCP" == "true" && ! -f "$STAGING_DIR/dhcp-hosts.json" ]] && {
+    log_error "event=pull_fail reason=\"missing dhcp-hosts.json\""; rm -rf "$STAGING_DIR"; exit 1; }
+[[ "$COMP_DNS" == "true" && ! -f "$STAGING_DIR/dns-hosts.json" ]] && {
+    log_error "event=pull_fail reason=\"missing dns-hosts.json\""; rm -rf "$STAGING_DIR"; exit 1; }
+[[ "$COMP_SETTINGS" == "true" && ! -f "$STAGING_DIR/settings.json" ]] && {
+    log_error "event=pull_fail reason=\"missing settings.json\""; rm -rf "$STAGING_DIR"; exit 1; }
+
+log_info "event=pull_apply reason=\"payload downloaded\""
+
+APPLIED_SOMETHING=false
+
+# Apply adlists (always present in payload; merge into gravity.db)
+if [[ -f "$STAGING_DIR/adlists.tsv" ]]; then
+    _adlists_added=0
+    while IFS=$'\t' read -r _enabled _address; do
+        [[ -z "$_address" ]] && continue
+        # Normalize _enabled to a strict 0/1 — anything else would corrupt
+        # the INSERT below, since it interpolates straight into SQL.
+        case "$_enabled" in 1|true|TRUE) _enabled=1 ;; *) _enabled=0 ;; esac
+        # Escape single quotes for SQL
+        _address_esc="${_address//\'/\'\'}"
+        pihole-FTL sqlite3 /etc/pihole/gravity.db \
+            "INSERT OR IGNORE INTO adlist (address,enabled) VALUES ('$_address_esc',$_enabled);" 2>/dev/null \
+            && (( _adlists_added++ )) || true
+    done < "$STAGING_DIR/adlists.tsv"
+    log_info "event=apply component=adlists status=ok processed=$_adlists_added"
+    APPLIED_SOMETHING=true
+fi
+
+# Apply DHCP hosts (immediate, no restart needed)
+if [[ "$COMP_DHCP" == "true" && -f "$STAGING_DIR/dhcp-hosts.json" ]]; then
+    DHCP_HOSTS="$(cat "$STAGING_DIR/dhcp-hosts.json")"
+    pihole-FTL --config dhcp.hosts "$DHCP_HOSTS" >/dev/null 2>&1 && {
+        log_info "event=apply component=dhcp_hosts status=ok"
+        APPLIED_SOMETHING=true
+    }
+fi
+
+# Apply DNS hosts (immediate, no restart needed)
+if [[ "$COMP_DNS" == "true" && -f "$STAGING_DIR/dns-hosts.json" ]]; then
+    DNS_HOSTS="$(cat "$STAGING_DIR/dns-hosts.json")"
+    pihole-FTL --config dns.hosts "$DNS_HOSTS" >/dev/null 2>&1 && {
+        log_info "event=apply component=dns_hosts status=ok"
+        APPLIED_SOMETHING=true
+    }
+fi
+
+# FTL settings: defined as a function so we can apply them AFTER any
+# FTL restart (e.g. gravity update). Applying *before* a restart is
+# unsafe — FTL persists in-memory state on shutdown and can clobber
+# fresh CLI writes for string-valued keys (dhcp.start, dns.blocking.mode,
+# etc.) Booleans usually survive but strings are reliably lost.
+SETTINGS_APPLIED=false
+apply_settings() {
+    [[ "$COMP_SETTINGS" == "true" && -f "$STAGING_DIR/settings.json" ]] || return 0
+    local _settings_applied=0 _sjson _skey _sval _rest
+    _sjson="$(cat "$STAGING_DIR/settings.json")"
+    _sjson="${_sjson#\{}"
+    _sjson="${_sjson%\}}"
+    while [[ -n "$_sjson" ]]; do
+        _skey="${_sjson%%\":\"*}"
+        _skey="${_skey#\"}"
+        _rest="${_sjson#*\":\"}"
+        if [[ "$_rest" == "$_sjson" ]]; then
+            _sval="${_sjson#*\":\"}"
+            _sval="${_sval%\"}"
+            _sjson=""
+        else
+            _sval="${_rest%%\",\"*}"
+            if [[ "$_sval" == "$_rest" ]]; then
+                _sval="${_rest%\"}"
+                _sjson=""
+            else
+                _sjson="${_rest#*\",}"
+            fi
+        fi
+        _sval="${_sval//\\\\/\\}"
+        _sval="${_sval//\\\"/\"}"
+        if [[ -n "$_skey" ]]; then
+            pihole-FTL --config "$_skey" "$_sval" >/dev/null 2>&1 && (( _settings_applied++ )) || true
+        fi
+    done
+    log_info "event=apply component=settings status=ok keys=$_settings_applied"
+    APPLIED_SOMETHING=true
+    SETTINGS_APPLIED=true
+}
+
+# Apply notify.conf (ignored MACs, Pushover keys, etc.)
+if [[ "$COMP_NOTIFY" == "true" && -f "$STAGING_DIR/notify.conf" ]]; then
+    mkdir -p /etc/pihole-ha
+    if ! cmp -s "$STAGING_DIR/notify.conf" /etc/pihole-ha/notify.conf 2>/dev/null; then
+        cp "$STAGING_DIR/notify.conf" /etc/pihole-ha/notify.conf
+        chmod 600 /etc/pihole-ha/notify.conf 2>/dev/null || true
+        log_info "event=apply component=notify status=ok"
+        APPLIED_SOMETHING=true
+    else
+        log_info "event=apply component=notify status=unchanged"
+    fi
+fi
+
+# Apply sync.conf (SYNC_INTERVAL + component toggles). When the interval
+# changes, push the new value to the systemd timer drop-ins so the next
+# cycle uses it. Skipped if the file is byte-identical.
+if [[ "$COMP_SYNCCONF" == "true" && -f "$STAGING_DIR/sync.conf" ]]; then
+    mkdir -p /etc/pihole-ha
+    if ! cmp -s "$STAGING_DIR/sync.conf" /etc/pihole-ha/sync.conf 2>/dev/null; then
+        # Capture old interval before overwrite so we can detect a change
+        _old_interval=""
+        [[ -f /etc/pihole-ha/sync.conf ]] && _old_interval="$(grep -E '^SYNC_INTERVAL=' /etc/pihole-ha/sync.conf | cut -d= -f2)"
+        cp "$STAGING_DIR/sync.conf" /etc/pihole-ha/sync.conf
+        _new_interval="$(grep -E '^SYNC_INTERVAL=' /etc/pihole-ha/sync.conf | cut -d= -f2)"
+        if [[ -n "$_new_interval" && "$_new_interval" != "$_old_interval" ]]; then
+            platform_sync_set_interval "$_new_interval" 2>/dev/null || true
+            log_info "event=apply component=syncconf status=ok interval=${_new_interval}min (was=${_old_interval:-unset}min)"
+        else
+            log_info "event=apply component=syncconf status=ok interval=${_new_interval:-unchanged}"
+        fi
+        APPLIED_SOMETHING=true
+    else
+        log_info "event=apply component=syncconf status=unchanged"
+    fi
+fi
+
+# Check if gravity.db changed before overwriting
+GRAVITY_RESTARTED=false
+if [[ "$COMP_GRAVITY" == "true" && -f "$STAGING_DIR/gravity.db" ]]; then
+    OLD_MD5="$(md5sum /etc/pihole/gravity.db 2>/dev/null | awk '{print $1}')"
+    NEW_MD5="$(md5sum "$STAGING_DIR/gravity.db" 2>/dev/null | awk '{print $1}')"
+
+    if [[ "$OLD_MD5" != "$NEW_MD5" ]]; then
+        # Atomic swap: FTL is still live, so copy into place then rename to avoid
+        # a query hitting a half-written gravity.db.
+        cp "$STAGING_DIR/gravity.db" /etc/pihole/gravity.db.tmp
+        chown pihole:pihole /etc/pihole/gravity.db.tmp 2>/dev/null || true
+        mv -f /etc/pihole/gravity.db.tmp /etc/pihole/gravity.db
+        platform_ftl_restart
+        GRAVITY_RESTARTED=true
+        log_info "event=apply component=gravity status=ok ftl=restarted"
+        APPLIED_SOMETHING=true
+    else
+        log_info "event=apply component=gravity status=unchanged"
+    fi
+fi
+
+# Apply FTL settings AFTER gravity-triggered restart so the values are
+# written into a freshly-loaded FTL (not into a daemon that's about to
+# restart and clobber them). If FTL was just restarted, give it a moment
+# to come back up before pushing config writes at it.
+if $GRAVITY_RESTARTED; then
+    for _i in 1 2 3 4 5 6 7 8 9 10; do
+        pihole-FTL --config dns.port >/dev/null 2>&1 && break
+        sleep 1
+    done
+fi
+apply_settings
+
+# Restart FTL after settings apply so the running daemon (and admin UI)
+# reflects the new values. pihole-FTL --config writes to pihole.toml but
+# the live daemon keeps its in-memory copy until restart, so the UI
+# would otherwise show stale values until the next FTL restart from
+# any other cause. Fires even when gravity already restarted FTL —
+# settings are applied AFTER that restart, so a fresh restart is still
+# needed to pick them up.
+if [[ "$SETTINGS_APPLIED" == "true" ]]; then
+    platform_ftl_restart
+    log_info "event=ftl_restart reason=\"settings applied\""
+fi
+
+# Cleanup
+rm -rf "$STAGING_DIR"
+
+# Save hash
+echo "$REMOTE_HASH" > "$LAST_HASH_FILE"
+
+# Increment generation counter (persists across reboots — used for bootstrap detection)
+GEN_FILE="/etc/pihole-ha/sync-generation"
+mkdir -p /etc/pihole-ha
+_cur_gen="$(cat "$GEN_FILE" 2>/dev/null || echo 0)"
+echo "$(( _cur_gen + 1 ))" > "$GEN_FILE"
+
+if [[ "$APPLIED_SOMETHING" == "true" ]]; then
+    log_info "event=pull_complete status=applied primary=$SYNC_PRIMARY ts=$REMOTE_TS"
+    notify "<b><font color='#3498db'>Pi-hole Config Synced</font></b> <br> $MY_ROLE ($LOCAL_IP) pulled from $SYNC_PRIMARY <br> <font color='#95a5a6'>$REMOTE_TS</font>"
+else
+    log_info "event=pull_complete status=unchanged ts=$REMOTE_TS"
+fi

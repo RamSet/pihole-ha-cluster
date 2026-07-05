@@ -1,0 +1,1002 @@
+#!/bin/bash
+# pihole-ha-dash — Web dashboard for Pi-hole HA cluster
+# Serves on port 8887 via socat
+
+PORT=8887
+STATUS_FILE="/run/pihole-ha/status.json"
+
+if [[ "${1:-}" == "--handle" ]]; then
+    # Load platform abstraction (systemd vs Docker)
+    for _p in /usr/local/lib/pihole-ha/pihole-ha-platform ./pihole-ha-platform; do
+        [[ -f "$_p" ]] && { . "$_p"; break; }
+    done
+
+    # Load node config (with backwards-compatible defaults)
+    _NODES_CONF="/etc/pihole-ha/nodes.conf"
+    _GATEWAY="" _VIP="" _VIP_ENABLED="" _HA_NODES=""
+    [[ -f "$_NODES_CONF" ]] && . "$_NODES_CONF"
+    # nodes.conf sets GATEWAY/VIP/HA_NODES (no prefix) — map to prefixed vars
+    _GATEWAY="${_GATEWAY:-${GATEWAY:-}}"
+    _VIP="${_VIP:-${VIP:-}}"
+    _VIP_ENABLED="${_VIP_ENABLED:-${VIP_ENABLED:-}}"
+    _HA_NODES="${_HA_NODES:-${HA_NODES:-}}"
+    if [[ -z "$_GATEWAY" || -z "$_HA_NODES" ]]; then
+        # Auto-detect defaults so dash stays alive for /api/nodes/join
+        _LOCAL_IP_DEFAULT="$(ip -o route get 1.0.0.0 2>/dev/null | sed -n 's/.*src \([^ ]*\).*/\1/p')"
+        _GATEWAY="${_GATEWAY:-$(ip -o route get 1.0.0.0 2>/dev/null | sed -n 's/.*via \([^ ]*\).*/\1/p')}"
+        _HA_NODES="${_HA_NODES:-${_LOCAL_IP_DEFAULT:-127.0.0.1}}"
+        echo "WARN: nodes.conf incomplete — using defaults (gateway=$_GATEWAY nodes=$_HA_NODES)" >&2
+    fi
+    _VIP="${_VIP:-}"
+    _VIP_ENABLED="${_VIP_ENABLED:-true}"
+    # Parse HA_NODES: supports IP or IP:PORT (default port 80)
+    IFS=',' read -ra _RAW_NODES <<< "$_HA_NODES"
+    _HA_NODES=()
+    declare -A _NODE_PORTS
+    for _rn in "${_RAW_NODES[@]}"; do
+        if [[ "$_rn" == *:* ]]; then
+            _HA_NODES+=("${_rn%%:*}")
+            _NODE_PORTS["${_rn%%:*}"]="${_rn##*:}"
+        else
+            _HA_NODES+=("$_rn")
+            _NODE_PORTS["$_rn"]=80
+        fi
+    done
+    _ROLE_NAMES=("PRIMARY" "SECONDARY" "TERTIARY")
+    _NODE_COUNT=${#_HA_NODES[@]}
+    _ROLES=()
+    for (( _ri=0; _ri<_NODE_COUNT; _ri++ )); do
+        if (( _ri < ${#_ROLE_NAMES[@]} )); then _ROLES+=("${_ROLE_NAMES[$_ri]}"); else _ROLES+=("NODE$((_ri+1))"); fi
+    done
+
+    # is_valid_ip() comes from pihole-ha-platform sourced above.
+
+    _conf_set() {
+        # Update KEY=VALUE in nodes.conf (create/append if missing)
+        local key="$1" val="$2"
+        mkdir -p "$(dirname "$_NODES_CONF")"
+        if [[ -f "$_NODES_CONF" ]] && grep -q "^${key}=" "$_NODES_CONF"; then
+            sed -i "s|^${key}=.*|${key}=${val}|" "$_NODES_CONF"
+        else
+            echo "${key}=${val}" >> "$_NODES_CONF"
+        fi
+    }
+
+    _is_known_node() {
+        local ip="$1"
+        for _n in "${_HA_NODES[@]}"; do
+            [[ "$_n" == "$ip" ]] && return 0
+        done
+        return 1
+    }
+
+    read -r method path _rest
+    path="${path%$'\r'}"
+    while IFS= read -r hdr; do
+        hdr="${hdr%$'\r'}"
+        [[ -z "$hdr" ]] && break
+    done
+
+    send_headers() {
+        printf "HTTP/1.1 %s\r\n" "$1"
+        printf "Content-Type: %s\r\n" "$2"
+        printf "Cache-Control: no-cache\r\n"
+        printf "Connection: close\r\n\r\n"
+    }
+
+    # Auth: validate against local Pi-hole's API
+    _AUTH_CHECKED="" _AUTH_REQUIRED=""
+    # Override local node's port from env var or FTL query
+    _LOCAL_IP="$(platform_get_local_ip)"
+    if [[ -n "${PIHOLE_WEB_PORT:-}" ]]; then
+        _NODE_PORTS["$_LOCAL_IP"]="$PIHOLE_WEB_PORT"
+    elif _ftl_port="$(pihole-FTL --config webserver.port 2>/dev/null | grep -o '^[0-9]*')" && [[ -n "$_ftl_port" ]]; then
+        _NODE_PORTS["$_LOCAL_IP"]="$_ftl_port"
+    fi
+    _PIHOLE_PORT="${_NODE_PORTS[$_LOCAL_IP]:-80}"
+    _PIHOLE_BASE="http://localhost:${_PIHOLE_PORT}"
+    _pihole_has_auth() {
+        local resp
+        resp="$(curl -s --max-time 2 "${_PIHOLE_BASE}/api/dns/blocking" 2>/dev/null)" || return 1
+        echo "$resp" | grep -q '"unauthorized"'
+    }
+    _validate_sid() {
+        local sid="$1"
+        [[ -z "$sid" ]] && return 1
+        local resp
+        resp="$(curl -s --max-time 2 "${_PIHOLE_BASE}/api/dns/blocking?sid=$sid" 2>/dev/null)" || return 1
+        ! echo "$resp" | grep -q '"unauthorized"'
+    }
+    _check_auth() {
+        local qs="$1"
+        if [[ -z "$_AUTH_CHECKED" ]]; then
+            _pihole_has_auth && _AUTH_REQUIRED="true" || _AUTH_REQUIRED="false"
+            _AUTH_CHECKED="1"
+        fi
+        [[ "$_AUTH_REQUIRED" != "true" ]] && return 0
+        local sid=""
+        IFS='&' read -ra _ap <<< "$qs"
+        for _a in "${_ap[@]}"; do [[ "$_a" == sid=* ]] && sid="${_a#sid=}"; done
+        _validate_sid "$sid"
+    }
+    _send_401() {
+        send_headers "401 Unauthorized" "application/json"
+        echo '{"error":"unauthorized","auth_required":true}'
+    }
+
+    # Get SID for propagation to peer nodes
+    _get_peer_sid() {
+        local ip="$1"
+        local _AUTH_CONF="/etc/pihole-ha/auth.conf" _pass="" _key
+        _key="PASS_${ip//\./_}"
+        if [[ -f "$_AUTH_CONF" ]]; then
+            while IFS='=' read -r _k _v; do
+                [[ "$_k" == "$_key" ]] && _pass="$_v"
+            done < "$_AUTH_CONF"
+        fi
+        [[ -z "$_pass" ]] && return
+        local resp sid
+        resp="$(curl -s --max-time 3 -X POST "http://$ip/api/auth" \
+            -H "Content-Type: application/json" \
+            -d "{\"password\":\"$_pass\"}" 2>/dev/null)" || return
+        sid="$(echo "$resp" | grep -o '"sid":"[^"]*"' | cut -d'"' -f4)"
+        [[ -n "$sid" && "$sid" != "null" ]] && echo "$sid"
+    }
+    _urlencode() {
+        python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1],safe=''))" "$1" 2>/dev/null \
+            || printf '%s' "$1" | sed 's/ /%20/g'
+    }
+    _propagate_url() {
+        local ip="$1" path="$2"
+        local sid
+        sid="$(_get_peer_sid "$ip")"
+        if [[ -n "$sid" ]]; then
+            echo "http://$ip:8887${path}&sid=$sid"
+        else
+            echo "http://$ip:8887${path}"
+        fi
+    }
+
+    SYNC_MANIFEST="/run/pihole-ha/sync-manifest.json"
+    SYNC_PAYLOAD="/run/pihole-ha/sync-payload.tar.gz"
+    SYNC_CONF="/etc/pihole-ha/sync.conf"
+
+    case "$path" in
+        /api/status)
+            send_headers "200 OK" "application/json"
+            cat "$STATUS_FILE" 2>/dev/null || echo '{"error":"no status file"}'
+            ;;
+        /api/auth/check)
+            send_headers "200 OK" "application/json"
+            if [[ -z "$_AUTH_CHECKED" ]]; then
+                _pihole_has_auth && _AUTH_REQUIRED="true" || _AUTH_REQUIRED="false"
+                _AUTH_CHECKED="1"
+            fi
+            printf '{"auth_required":%s}\n' "$_AUTH_REQUIRED"
+            ;;
+        /api/sync/manifest)
+            if [[ -f "$SYNC_MANIFEST" ]]; then
+                send_headers "200 OK" "application/json"
+                cat "$SYNC_MANIFEST"
+            else
+                send_headers "404 Not Found" "application/json"
+                echo '{"error":"no sync manifest"}'
+            fi
+            ;;
+        /api/sync/generation)
+            _gen="$(cat /etc/pihole-ha/sync-generation 2>/dev/null || echo 0)"
+            send_headers "200 OK" "application/json"
+            printf '{"generation":%s}\n' "$_gen"
+            ;;
+        /api/sync/payload)
+            if [[ -f "$SYNC_PAYLOAD" ]]; then
+                printf "HTTP/1.1 200 OK\r\n"
+                printf "Content-Type: application/gzip\r\n"
+                printf "Content-Length: %d\r\n" "$(stat -c%s "$SYNC_PAYLOAD")"
+                printf "Connection: close\r\n\r\n"
+                cat "$SYNC_PAYLOAD"
+            else
+                send_headers "404 Not Found" "application/json"
+                echo '{"error":"no sync payload"}'
+            fi
+            ;;
+        /api/sync/config)
+            # Read sync config, return as JSON
+            SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true SYNC_PRIMARY="${_HA_NODES[0]}" SYNC_INTERVAL=15
+            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            send_headers "200 OK" "application/json"
+            printf '{"enabled":%s,"gravity":%s,"dhcp":%s,"dns":%s,"settings":%s,"primary":"%s","interval":%s}\n' \
+                "$SYNC_ENABLED" "$SYNC_GRAVITY" "$SYNC_DHCP" "$SYNC_DNS" "$SYNC_SETTINGS" "$SYNC_PRIMARY" "$SYNC_INTERVAL"
+            ;;
+        /api/sync/toggle/enabled*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            mkdir -p /etc/pihole-ha
+            SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true
+            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            if [[ "$SYNC_ENABLED" == "true" ]]; then NEW="false"; else NEW="true"; fi
+            if [[ -f "$SYNC_CONF" ]]; then
+                sed -i "s/^SYNC_ENABLED=.*/SYNC_ENABLED=$NEW/" "$SYNC_CONF"
+            else
+                printf 'SYNC_ENABLED=%s\nSYNC_GRAVITY=true\nSYNC_DHCP=true\nSYNC_DNS=true\nSYNC_SETTINGS=true\n' "$NEW" > "$SYNC_CONF"
+            fi
+            send_headers "200 OK" "application/json"
+            printf '{"enabled":%s}\n' "$NEW"
+            ;;
+        /api/sync/toggle/gravity*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            mkdir -p /etc/pihole-ha
+            SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true
+            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            if [[ "$SYNC_GRAVITY" == "true" ]]; then NEW="false"; else NEW="true"; fi
+            if [[ -f "$SYNC_CONF" ]]; then
+                sed -i "s/^SYNC_GRAVITY=.*/SYNC_GRAVITY=$NEW/" "$SYNC_CONF"
+            else
+                printf 'SYNC_ENABLED=true\nSYNC_GRAVITY=%s\nSYNC_DHCP=true\nSYNC_DNS=true\nSYNC_SETTINGS=true\n' "$NEW" > "$SYNC_CONF"
+            fi
+            send_headers "200 OK" "application/json"
+            printf '{"gravity":%s}\n' "$NEW"
+            ;;
+        /api/sync/toggle/dhcp*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            mkdir -p /etc/pihole-ha
+            SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true
+            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            if [[ "$SYNC_DHCP" == "true" ]]; then NEW="false"; else NEW="true"; fi
+            if [[ -f "$SYNC_CONF" ]]; then
+                sed -i "s/^SYNC_DHCP=.*/SYNC_DHCP=$NEW/" "$SYNC_CONF"
+            else
+                printf 'SYNC_ENABLED=true\nSYNC_GRAVITY=true\nSYNC_DHCP=%s\nSYNC_DNS=true\nSYNC_SETTINGS=true\n' "$NEW" > "$SYNC_CONF"
+            fi
+            send_headers "200 OK" "application/json"
+            printf '{"dhcp":%s}\n' "$NEW"
+            ;;
+        /api/sync/toggle/dns*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            mkdir -p /etc/pihole-ha
+            SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true
+            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            if [[ "$SYNC_DNS" == "true" ]]; then NEW="false"; else NEW="true"; fi
+            if [[ -f "$SYNC_CONF" ]]; then
+                sed -i "s/^SYNC_DNS=.*/SYNC_DNS=$NEW/" "$SYNC_CONF"
+            else
+                printf 'SYNC_ENABLED=true\nSYNC_GRAVITY=true\nSYNC_DHCP=true\nSYNC_DNS=%s\nSYNC_SETTINGS=true\n' "$NEW" > "$SYNC_CONF"
+            fi
+            send_headers "200 OK" "application/json"
+            printf '{"dns":%s}\n' "$NEW"
+            ;;
+        /api/sync/toggle/settings*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            mkdir -p /etc/pihole-ha
+            SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true
+            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            if [[ "$SYNC_SETTINGS" == "true" ]]; then NEW="false"; else NEW="true"; fi
+            if [[ -f "$SYNC_CONF" ]]; then
+                if grep -q "^SYNC_SETTINGS=" "$SYNC_CONF"; then
+                    sed -i "s/^SYNC_SETTINGS=.*/SYNC_SETTINGS=$NEW/" "$SYNC_CONF"
+                else
+                    echo "SYNC_SETTINGS=$NEW" >> "$SYNC_CONF"
+                fi
+            else
+                printf 'SYNC_ENABLED=true\nSYNC_GRAVITY=true\nSYNC_DHCP=true\nSYNC_DNS=true\nSYNC_SETTINGS=%s\n' "$NEW" > "$SYNC_CONF"
+            fi
+            send_headers "200 OK" "application/json"
+            printf '{"settings":%s}\n' "$NEW"
+            ;;
+        /api/sync/interval*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            _interval="" _propagated=""
+            IFS='&' read -ra _ip <<< "$_qs"
+            for _p in "${_ip[@]}"; do
+                case "$_p" in
+                    minutes=*) _interval="${_p#minutes=}" ;;
+                    propagated=*) _propagated="${_p#propagated=}" ;;
+                esac
+            done
+            # Validate: must be integer 1-1440
+            if [[ "$_interval" =~ ^[0-9]+$ ]] && (( _interval >= 1 && _interval <= 1440 )); then
+                mkdir -p /etc/pihole-ha
+                if [[ -f "$SYNC_CONF" ]] && grep -q "^SYNC_INTERVAL=" "$SYNC_CONF"; then
+                    sed -i "s/^SYNC_INTERVAL=.*/SYNC_INTERVAL=$_interval/" "$SYNC_CONF"
+                elif [[ -f "$SYNC_CONF" ]]; then
+                    echo "SYNC_INTERVAL=$_interval" >> "$SYNC_CONF"
+                else
+                    echo "SYNC_INTERVAL=$_interval" > "$SYNC_CONF"
+                fi
+                # Apply to systemd timers
+                platform_sync_set_interval "$_interval"
+                # Propagate to peer nodes
+                if [[ "$_propagated" != "true" ]]; then
+                    LOCAL_IP="$(platform_get_local_ip)"
+                    for _node in "${_HA_NODES[@]}"; do
+                        [[ "$_node" == "$LOCAL_IP" ]] && continue
+                        _peer_url="$(_propagate_url "$_node" "/api/sync/interval?minutes=$_interval&propagated=true")"
+                        curl -s --max-time 4 "$_peer_url" &>/dev/null &
+                    done
+                fi
+                send_headers "200 OK" "application/json"
+                printf '{"interval":%s}\n' "$_interval"
+            else
+                send_headers "400 Bad Request" "application/json"
+                echo '{"error":"interval must be 1-1440 minutes"}'
+            fi
+            ;;
+        /api/sync/now*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            LOCAL_IP="$(platform_get_local_ip)"
+            SYNC_PRIMARY="${_HA_NODES[0]}"
+            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            if [[ "$LOCAL_IP" == "$SYNC_PRIMARY" ]]; then
+                /usr/local/bin/pihole-ha-sync --force &>/dev/null &
+                echo '{"ok":true,"action":"build"}'
+            else
+                /usr/local/bin/pihole-ha-sync-pull --force &>/dev/null &
+                echo '{"ok":true,"action":"pull"}'
+            fi
+            ;;
+        /api/sync/promote*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _promote_ip="" _propagated=""
+            IFS='&' read -ra _pp <<< "$_qs"
+            for _p in "${_pp[@]}"; do
+                case "$_p" in
+                    ip=*) _promote_ip="${_p#ip=}" ;;
+                    propagated=*) _propagated="${_p#propagated=}" ;;
+                esac
+            done
+            # Validate IP format and is a known node
+            if ! is_valid_ip "$_promote_ip" || ! _is_known_node "$_promote_ip"; then
+                echo '{"error":"invalid node IP"}'
+            else
+                LOCAL_IP="$(platform_get_local_ip)"
+                # Update local sync.conf
+                mkdir -p /etc/pihole-ha
+                if [[ -f "$SYNC_CONF" ]] && grep -q "^SYNC_PRIMARY=" "$SYNC_CONF"; then
+                    sed -i "s/^SYNC_PRIMARY=.*/SYNC_PRIMARY=$_promote_ip/" "$SYNC_CONF"
+                else
+                    echo "SYNC_PRIMARY=$_promote_ip" >> "$SYNC_CONF"
+                fi
+                # Manage local timers
+                if [[ "$LOCAL_IP" == "$_promote_ip" ]]; then
+                    platform_sync_enable
+                    platform_sync_pull_disable
+                else
+                    platform_sync_disable
+                    platform_sync_pull_enable
+                fi
+                # Propagate to other nodes (unless this is a propagated call)
+                if [[ "$_propagated" != "1" ]]; then
+                    for _node in "${_HA_NODES[@]}"; do
+                        [[ "$_node" == "$LOCAL_IP" ]] && continue
+                        curl -sf --max-time 5 "$(_propagate_url "$_node" "/api/sync/promote?ip=$_promote_ip&propagated=1")" &>/dev/null &
+                    done
+                fi
+                echo "{\"ok\":true,\"primary\":\"$_promote_ip\"}"
+            fi
+            ;;
+        /api/dhcp/master-config)
+            # Read current DHCP master override setting
+            _MASTER_CONF="/etc/pihole-ha/master.conf"
+            _DHCP_MASTER="auto"
+            if [[ -f "$_MASTER_CONF" ]]; then
+                while IFS='=' read -r _mk _mv; do
+                    [[ "$_mk" == "DHCP_MASTER" ]] && _DHCP_MASTER="$_mv"
+                done < "$_MASTER_CONF"
+            fi
+            send_headers "200 OK" "application/json"
+            printf '{"dhcp_master":"%s"}\n' "$_DHCP_MASTER"
+            ;;
+        /api/dhcp/master*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _MASTER_CONF="/etc/pihole-ha/master.conf"
+            _master_ip="" _master_propagated=""
+            IFS='&' read -ra _mparams <<< "$_qs"
+            for _mp in "${_mparams[@]}"; do
+                case "$_mp" in
+                    ip=*) _master_ip="${_mp#ip=}" ;;
+                    propagated=*) _master_propagated="${_mp#propagated=}" ;;
+                esac
+            done
+            # Validate: must be "auto" or a valid known node IP
+            if [[ "$_master_ip" != "auto" ]] && { ! is_valid_ip "$_master_ip" || ! _is_known_node "$_master_ip"; }; then
+                echo '{"error":"invalid node IP"}'
+            else
+                mkdir -p /etc/pihole-ha
+                echo "DHCP_MASTER=$_master_ip" > "$_MASTER_CONF"
+                # Propagate to other nodes (unless this is a propagated call)
+                if [[ "$_master_propagated" != "1" ]]; then
+                    LOCAL_IP="$(platform_get_local_ip)"
+                    for _node in "${_HA_NODES[@]}"; do
+                        [[ "$_node" == "$LOCAL_IP" ]] && continue
+                        curl -sf --max-time 5 "$(_propagate_url "$_node" "/api/dhcp/master?ip=$_master_ip&propagated=1")" &>/dev/null &
+                    done
+                fi
+                echo "{\"ok\":true,\"dhcp_master\":\"$_master_ip\"}"
+            fi
+            ;;
+        /api/auth/set*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _AUTH_CONF="/etc/pihole-ha/auth.conf"
+            _auth_ip="" _auth_pass=""
+            IFS='&' read -ra _params <<< "$_qs"
+            for _p in "${_params[@]}"; do
+                case "$_p" in
+                    ip=*) _auth_ip="${_p#ip=}" ;;
+                    password=*) _auth_pass="${_p#password=}" ;;
+                esac
+            done
+            # URL-decode the password (ha-api.lp percent-encodes it before proxying)
+            _auth_pass="$(printf '%b' "${_auth_pass//%/\\x}")"
+            # Validate IP format and is one of our known nodes
+            if ! is_valid_ip "$_auth_ip" || ! _is_known_node "$_auth_ip"; then
+                echo '{"error":"invalid node IP"}'
+            elif [[ -z "$_auth_pass" ]]; then
+                # Empty password = remove entry
+                _key="PASS_${_auth_ip//\./_}"
+                mkdir -p /etc/pihole-ha
+                touch "$_AUTH_CONF"
+                grep -v "^$_key=" "$_AUTH_CONF" > "$_AUTH_CONF.tmp" 2>/dev/null || true
+                mv "$_AUTH_CONF.tmp" "$_AUTH_CONF"
+                chmod 600 "$_AUTH_CONF" 2>/dev/null || true
+                echo "{\"ok\":true,\"ip\":\"$_auth_ip\",\"action\":\"removed\"}"
+            else
+                _key="PASS_${_auth_ip//\./_}"
+                mkdir -p /etc/pihole-ha
+                touch "$_AUTH_CONF"
+                grep -v "^$_key=" "$_AUTH_CONF" > "$_AUTH_CONF.tmp" 2>/dev/null || true
+                echo "$_key=$_auth_pass" >> "$_AUTH_CONF.tmp"
+                mv "$_AUTH_CONF.tmp" "$_AUTH_CONF"
+                chmod 600 "$_AUTH_CONF" 2>/dev/null || true
+                echo "{\"ok\":true,\"ip\":\"$_auth_ip\",\"action\":\"saved\"}"
+            fi
+            ;;
+        /api/ha/config)
+            # Read current HA enabled state from nodes.conf
+            _HA_ENABLED="true"
+            if [[ -f "$_NODES_CONF" ]]; then
+                while IFS='=' read -r _hk _hv; do
+                    _hv="${_hv#\"}"; _hv="${_hv%\"}"
+                    _hv="${_hv#\'}"; _hv="${_hv%\'}"
+                    [[ "$_hk" == "HA_ENABLED" ]] && _HA_ENABLED="$_hv"
+                done < "$_NODES_CONF"
+            fi
+            send_headers "200 OK" "application/json"
+            printf '{"ha_enabled":%s}\n' "$_HA_ENABLED"
+            ;;
+        /api/ha/toggle*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _ha_propagated=""
+            IFS='&' read -ra _hparams <<< "$_qs"
+            for _hp in "${_hparams[@]}"; do
+                case "$_hp" in
+                    propagated=*) _ha_propagated="${_hp#propagated=}" ;;
+                esac
+            done
+            # Read current value
+            _HA_ENABLED="true"
+            if [[ -f "$_NODES_CONF" ]]; then
+                while IFS='=' read -r _hk _hv; do
+                    _hv="${_hv#\"}"; _hv="${_hv%\"}"
+                    _hv="${_hv#\'}"; _hv="${_hv%\'}"
+                    [[ "$_hk" == "HA_ENABLED" ]] && _HA_ENABLED="$_hv"
+                done < "$_NODES_CONF"
+            fi
+            if [[ "$_HA_ENABLED" == "true" ]]; then _NEW_HA="false"; else _NEW_HA="true"; fi
+            # Update nodes.conf
+            if [[ -f "$_NODES_CONF" ]] && grep -q "^HA_ENABLED=" "$_NODES_CONF"; then
+                sed -i "s/^HA_ENABLED=.*/HA_ENABLED=$_NEW_HA/" "$_NODES_CONF"
+            else
+                echo "HA_ENABLED=$_NEW_HA" >> "$_NODES_CONF"
+            fi
+            # Propagate to other nodes
+            if [[ "$_ha_propagated" != "1" ]]; then
+                LOCAL_IP="$(platform_get_local_ip)"
+                for _node in "${_HA_NODES[@]}"; do
+                    [[ "$_node" == "$LOCAL_IP" ]] && continue
+                    curl -sf --max-time 5 "$(_propagate_url "$_node" "/api/ha/toggle?propagated=1")" &>/dev/null &
+                done
+            fi
+            printf '{"ha_enabled":%s}\n' "$_NEW_HA"
+            ;;
+        /api/priority/config)
+            send_headers "200 OK" "application/json"
+            printf '{"nodes":"%s"}\n' "$(IFS=,; echo "${_HA_NODES[*]}")"
+            ;;
+        /api/priority/set*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _prio_nodes="" _prio_propagated=""
+            IFS='&' read -ra _pparams <<< "$_qs"
+            for _pp in "${_pparams[@]}"; do
+                case "$_pp" in
+                    nodes=*) _prio_nodes="${_pp#nodes=}" ;;
+                    propagated=*) _prio_propagated="${_pp#propagated=}" ;;
+                esac
+            done
+            # Validate: parse CSV, check all IPs are known and count matches
+            IFS=',' read -ra _new_order <<< "$_prio_nodes"
+            _prio_valid="true"
+            if [[ ${#_new_order[@]} -ne $_NODE_COUNT ]]; then
+                _prio_valid="false"
+            else
+                for _nip in "${_new_order[@]}"; do
+                    is_valid_ip "$_nip" && _is_known_node "$_nip" || { _prio_valid="false"; break; }
+                done
+            fi
+            if [[ "$_prio_valid" != "true" ]]; then
+                echo '{"error":"invalid node list"}'
+            else
+                # Update HA_NODES in nodes.conf
+                if [[ -f "$_NODES_CONF" ]] && grep -q "^HA_NODES=" "$_NODES_CONF"; then
+                    sed -i "s/^HA_NODES=.*/HA_NODES=$_prio_nodes/" "$_NODES_CONF"
+                else
+                    echo "HA_NODES=$_prio_nodes" >> "$_NODES_CONF"
+                fi
+                # Reload local array
+                IFS=',' read -ra _HA_NODES <<< "$_prio_nodes"
+                # Propagate to other nodes
+                if [[ "$_prio_propagated" != "1" ]]; then
+                    LOCAL_IP="$(platform_get_local_ip)"
+                    for _node in "${_HA_NODES[@]}"; do
+                        [[ "$_node" == "$LOCAL_IP" ]] && continue
+                        curl -sf --max-time 5 "$(_propagate_url "$_node" "/api/priority/set?nodes=$_prio_nodes&propagated=1")" &>/dev/null &
+                    done
+                fi
+                printf '{"ok":true,"nodes":"%s"}\n' "$_prio_nodes"
+            fi
+            ;;
+        /api/role/demote*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _new_primary=""
+            IFS='&' read -ra _dparams <<< "$_qs"
+            for _dp in "${_dparams[@]}"; do
+                case "$_dp" in
+                    new_primary=*) _new_primary="${_dp#new_primary=}" ;;
+                esac
+            done
+            if [[ -z "$_new_primary" ]]; then
+                echo '{"error":"missing new_primary parameter"}'
+            elif ! is_valid_ip "$_new_primary" || ! _is_known_node "$_new_primary"; then
+                echo '{"error":"new_primary is not a known node"}'
+            else
+                _LOCAL_IP="$(platform_get_local_ip)"
+                # Reorder HA_NODES: new_primary first, then the rest in original order
+                _new_nodes="$_new_primary"
+                IFS=',' read -ra _cur_nodes <<< "$(IFS=,; echo "${_HA_NODES[*]}")"
+                for _dn in "${_cur_nodes[@]}"; do
+                    [[ "$_dn" == "$_new_primary" ]] && continue
+                    _new_nodes+=",$_dn"
+                done
+                # Update HA_NODES in nodes.conf
+                if [[ -f "$_NODES_CONF" ]] && grep -q "^HA_NODES=" "$_NODES_CONF"; then
+                    sed -i "s/^HA_NODES=.*/HA_NODES=$_new_nodes/" "$_NODES_CONF"
+                fi
+                # Update SYNC_PRIMARY in sync.conf
+                _SYNC_CONF="/etc/pihole-ha/sync.conf"
+                if [[ -f "$_SYNC_CONF" ]] && grep -q "^SYNC_PRIMARY=" "$_SYNC_CONF"; then
+                    sed -i "s/^SYNC_PRIMARY=.*/SYNC_PRIMARY=$_new_primary/" "$_SYNC_CONF"
+                elif [[ -f "$_SYNC_CONF" ]]; then
+                    echo "SYNC_PRIMARY=$_new_primary" >> "$_SYNC_CONF"
+                fi
+                # Disable DHCP on this node (now a standby)
+                pihole-FTL --config dhcp.active false &>/dev/null || true
+                # Swap sync timers: stop building, start pulling
+                platform_sync_disable
+                platform_sync_pull_enable
+                # Reload local array
+                IFS=',' read -ra _HA_NODES <<< "$_new_nodes"
+                # Restart daemon to pick up new priority
+                platform_ha_daemon_restart
+                printf '{"ok":true,"demoted":"%s","new_primary":"%s","nodes":"%s"}\n' \
+                    "$_LOCAL_IP" "$_new_primary" "$_new_nodes"
+            fi
+            ;;
+        /api/vip/config)
+            # Read current VIP settings from nodes.conf
+            _VIP="" _VIP_ENABLED=""
+            if [[ -f "$_NODES_CONF" ]]; then
+                while IFS='=' read -r _vk _vv; do
+                    _vv="${_vv#\"}"; _vv="${_vv%\"}"
+                    _vv="${_vv#\'}"; _vv="${_vv%\'}"
+                    case "$_vk" in
+                        VIP)         _VIP="$_vv" ;;
+                        VIP_ENABLED) _VIP_ENABLED="$_vv" ;;
+                    esac
+                done < "$_NODES_CONF"
+            fi
+            _VIP="${_VIP:-}"
+            _VIP_ENABLED="${_VIP_ENABLED:-true}"
+            # Check if this node is the active DHCP master
+            _is_dhcp_master="false"
+            if [[ -f "$STATUS_FILE" ]]; then
+                grep -q '"dhcp_active":true' "$STATUS_FILE" 2>/dev/null && _is_dhcp_master="true"
+            fi
+            send_headers "200 OK" "application/json"
+            printf '{"vip":"%s","vip_enabled":%s,"is_master":%s}\n' "$_VIP" "$_VIP_ENABLED" "$_is_dhcp_master"
+            ;;
+        /api/vip/toggle*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _vip_propagated=""
+            IFS='&' read -ra _vparams <<< "$_qs"
+            for _vp in "${_vparams[@]}"; do
+                case "$_vp" in
+                    propagated=*) _vip_propagated="${_vp#propagated=}" ;;
+                esac
+            done
+            # Only allow toggle from DHCP master (propagated calls bypass this)
+            _vip_allowed="true"
+            if [[ "$_vip_propagated" != "1" ]]; then
+                _is_dhcp_master="false"
+                if [[ -f "$STATUS_FILE" ]]; then
+                    grep -q '"dhcp_active":true' "$STATUS_FILE" 2>/dev/null && _is_dhcp_master="true"
+                fi
+                [[ "$_is_dhcp_master" != "true" ]] && _vip_allowed="false"
+            fi
+            if [[ "$_vip_allowed" != "true" ]]; then
+                printf '{"error":"Only the active DHCP master can toggle VIP"}\n'
+            else
+                # Read current value
+                _VIP_ENABLED="true"
+                if [[ -f "$_NODES_CONF" ]]; then
+                    while IFS='=' read -r _vk _vv; do
+                        _vv="${_vv#\"}"; _vv="${_vv%\"}"
+                        _vv="${_vv#\'}"; _vv="${_vv%\'}"
+                        [[ "$_vk" == "VIP_ENABLED" ]] && _VIP_ENABLED="$_vv"
+                    done < "$_NODES_CONF"
+                fi
+                if [[ "$_VIP_ENABLED" == "true" ]]; then _NEW_VIP="false"; else _NEW_VIP="true"; fi
+                # Update nodes.conf
+                if [[ -f "$_NODES_CONF" ]] && grep -q "^VIP_ENABLED=" "$_NODES_CONF"; then
+                    sed -i "s/^VIP_ENABLED=.*/VIP_ENABLED=$_NEW_VIP/" "$_NODES_CONF"
+                else
+                    echo "VIP_ENABLED=$_NEW_VIP" >> "$_NODES_CONF"
+                fi
+                # Propagate to other nodes
+                if [[ "$_vip_propagated" != "1" ]]; then
+                    LOCAL_IP="$(platform_get_local_ip)"
+                    for _node in "${_HA_NODES[@]}"; do
+                        [[ "$_node" == "$LOCAL_IP" ]] && continue
+                        curl -sf --max-time 5 "$(_propagate_url "$_node" "/api/vip/toggle?propagated=1")" &>/dev/null &
+                    done
+                fi
+                printf '{"vip_enabled":%s}\n' "$_NEW_VIP"
+            fi
+            ;;
+        /api/notify/config)
+            # Read Pushover notify config, return as JSON
+            _NOTIFY_CONF="/etc/pihole-ha/notify.conf"
+            _PO_ENABLED=false _PO_USER="" _PO_TOKEN="" _PO_TITLE="pihole-ha"
+            _DHCP_NOTIFY_ENABLED=true _DHCP_NOTIFY_IGNORED_MACS=""
+            if [[ -f "$_NOTIFY_CONF" ]]; then
+                while IFS='=' read -r _nk _nv; do
+                    [[ -z "$_nk" || "$_nk" == \#* ]] && continue
+                    case "$_nk" in
+                        PO_ENABLED)               _PO_ENABLED="$_nv" ;;
+                        PO_USER)                  _PO_USER="$_nv" ;;
+                        PO_TOKEN)                 _PO_TOKEN="$_nv" ;;
+                        PO_TITLE)                 _PO_TITLE="$_nv" ;;
+                        DHCP_NOTIFY_ENABLED)      _DHCP_NOTIFY_ENABLED="$_nv" ;;
+                        DHCP_NOTIFY_IGNORED_MACS) _DHCP_NOTIFY_IGNORED_MACS="$_nv" ;;
+                    esac
+                done < "$_NOTIFY_CONF"
+            fi
+            send_headers "200 OK" "application/json"
+            _has_user="false"; [[ -n "$_PO_USER" ]] && _has_user="true"
+            _has_token="false"; [[ -n "$_PO_TOKEN" ]] && _has_token="true"
+            printf '{"enabled":%s,"has_user":%s,"has_token":%s,"title":"%s","dhcp_enabled":%s,"dhcp_ignored_macs":"%s"}\n' \
+                "$_PO_ENABLED" "$_has_user" "$_has_token" "$_PO_TITLE" \
+                "$_DHCP_NOTIFY_ENABLED" "$_DHCP_NOTIFY_IGNORED_MACS"
+            ;;
+        /api/notify/save*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _NOTIFY_CONF="/etc/pihole-ha/notify.conf"
+            _ns_enabled="" _ns_user="" _ns_token="" _ns_title=""
+            _ns_dhcp_enabled="true" _ns_dhcp_macs="" _ns_propagated=""
+            IFS='&' read -ra _nparams <<< "$_qs"
+            for _np in "${_nparams[@]}"; do
+                case "$_np" in
+                    enabled=*)      _ns_enabled="${_np#enabled=}" ;;
+                    user=*)         _ns_user="${_np#user=}" ;;
+                    token=*)        _ns_token="${_np#token=}" ;;
+                    title=*)        _ns_title="${_np#title=}" ;;
+                    dhcp_enabled=*) _ns_dhcp_enabled="${_np#dhcp_enabled=}" ;;
+                    dhcp_macs=*)    _ns_dhcp_macs="${_np#dhcp_macs=}" ;;
+                    propagated=*)   _ns_propagated="${_np#propagated=}" ;;
+                esac
+            done
+            # URL-decode
+            _ns_user="$(printf '%b' "${_ns_user//%/\\x}")"
+            _ns_token="$(printf '%b' "${_ns_token//%/\\x}")"
+            _ns_title="$(printf '%b' "${_ns_title//%/\\x}")"
+            _ns_dhcp_macs="$(printf '%b' "${_ns_dhcp_macs//%/\\x}")"
+            # Validate booleans
+            [[ "$_ns_enabled" != "true" && "$_ns_enabled" != "false" ]] && _ns_enabled="false"
+            [[ "$_ns_dhcp_enabled" != "true" && "$_ns_dhcp_enabled" != "false" ]] && _ns_dhcp_enabled="true"
+            # Preserve existing credentials if not supplied
+            if [[ -z "$_ns_user" || -z "$_ns_token" ]] && [[ -f "$_NOTIFY_CONF" ]]; then
+                _ex_user="" _ex_token=""
+                while IFS='=' read -r _ek _ev; do
+                    case "$_ek" in PO_USER) _ex_user="$_ev" ;; PO_TOKEN) _ex_token="$_ev" ;; esac
+                done < "$_NOTIFY_CONF"
+                [[ -z "$_ns_user" ]] && _ns_user="$_ex_user"
+                [[ -z "$_ns_token" ]] && _ns_token="$_ex_token"
+            fi
+            mkdir -p /etc/pihole-ha
+            cat > "$_NOTIFY_CONF" <<NEOF
+# Pushover notifications
+PO_ENABLED=$_ns_enabled
+PO_USER=$_ns_user
+PO_TOKEN=$_ns_token
+PO_TITLE=${_ns_title:-pihole-ha}
+DHCP_NOTIFY_ENABLED=$_ns_dhcp_enabled
+DHCP_NOTIFY_IGNORED_MACS=$_ns_dhcp_macs
+NEOF
+            # Propagate to peers (unless already a propagated call)
+            if [[ "$_ns_propagated" != "1" ]]; then
+                LOCAL_IP="$(platform_get_local_ip)"
+                _enc_user="$(_urlencode "$_ns_user")"
+                _enc_token="$(_urlencode "$_ns_token")"
+                _enc_title="$(_urlencode "$_ns_title")"
+                _enc_macs="$(_urlencode "$_ns_dhcp_macs")"
+                for _node in "${_HA_NODES[@]}"; do
+                    [[ "$_node" == "$LOCAL_IP" ]] && continue
+                    _peer_url="$(_propagate_url "$_node" "/api/notify/save?enabled=$_ns_enabled&user=$_enc_user&token=$_enc_token&title=$_enc_title&dhcp_enabled=$_ns_dhcp_enabled&dhcp_macs=$_enc_macs&propagated=1")"
+                    curl -sf --max-time 5 "$_peer_url" &>/dev/null &
+                done
+            fi
+            echo '{"ok":true}'
+            ;;
+        /api/notify/toggle*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            _NOTIFY_CONF="/etc/pihole-ha/notify.conf"
+            _PO_ENABLED=false
+            if [[ -f "$_NOTIFY_CONF" ]]; then
+                while IFS='=' read -r _nk _nv; do
+                    [[ "$_nk" == "PO_ENABLED" ]] && _PO_ENABLED="$_nv"
+                done < "$_NOTIFY_CONF"
+            fi
+            if [[ "$_PO_ENABLED" == "true" ]]; then _NEW_EN="false"; else _NEW_EN="true"; fi
+            if [[ -f "$_NOTIFY_CONF" ]]; then
+                sed -i "s/^PO_ENABLED=.*/PO_ENABLED=$_NEW_EN/" "$_NOTIFY_CONF"
+            else
+                mkdir -p /etc/pihole-ha
+                cat > "$_NOTIFY_CONF" <<NEOF
+# Pushover notifications
+PO_ENABLED=$_NEW_EN
+PO_USER=
+PO_TOKEN=
+PO_TITLE=pihole-ha
+NEOF
+            fi
+            send_headers "200 OK" "application/json"
+            printf '{"enabled":%s}\n' "$_NEW_EN"
+            ;;
+        /api/notify/test*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _NOTIFY_CONF="/etc/pihole-ha/notify.conf"
+            _PO_USER="" _PO_TOKEN="" _PO_TITLE="pihole-ha"
+            if [[ -f "$_NOTIFY_CONF" ]]; then
+                while IFS='=' read -r _nk _nv; do
+                    [[ -z "$_nk" || "$_nk" == \#* ]] && continue
+                    case "$_nk" in
+                        PO_USER)  _PO_USER="$_nv" ;;
+                        PO_TOKEN) _PO_TOKEN="$_nv" ;;
+                        PO_TITLE) _PO_TITLE="$_nv" ;;
+                    esac
+                done < "$_NOTIFY_CONF"
+            fi
+            if [[ -z "$_PO_USER" || -z "$_PO_TOKEN" ]]; then
+                echo '{"error":"user and token required"}'
+            else
+                _test_resp="$(curl -s --max-time 5 -X POST "https://api.pushover.net/1/messages.json" \
+                    -d "token=$_PO_TOKEN" -d "user=$_PO_USER" \
+                    -d "html=1" -d "title=$_PO_TITLE" \
+                    --data-urlencode "message=<b>Test notification</b> from Pi-hole HA on $(platform_get_local_ip)" 2>&1)"
+                if echo "$_test_resp" | grep -q '"status":1'; then
+                    echo '{"ok":true}'
+                else
+                    echo "{\"error\":\"Pushover API error\"}"
+                fi
+            fi
+            ;;
+        /api/dhcp/hosts)
+            send_headers "200 OK" "application/json"
+            _raw="$(pihole-FTL --config dhcp.hosts 2>/dev/null)"
+            _inner="${_raw#\[ }"; _inner="${_inner% \]}"
+            _out="["
+            _first=true
+            IFS=',' read -ra _htokens <<< "$_inner"
+            _i=0; _hmac=""; _hip=""; _hname=""
+            for _ht in "${_htokens[@]}"; do
+                _ht="${_ht# }"; _ht="${_ht% }"
+                case $(( _i % 3 )) in
+                    0) _hmac="$_ht" ;;
+                    1) _hip="$_ht" ;;
+                    2) _hname="$_ht"
+                       [[ "$_first" == "true" ]] && _first=false || _out+=","
+                       _out+="{\"mac\":\"$_hmac\",\"ip\":\"$_hip\",\"name\":\"$_hname\"}"
+                       ;;
+                esac
+                (( _i++ ))
+            done
+            _out+="]"
+            echo "$_out"
+            ;;
+        /api/nodes/join*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _join_node=""
+            IFS='&' read -ra _jparams <<< "$_qs"
+            for _jp in "${_jparams[@]}"; do
+                case "$_jp" in
+                    node=*) _join_node="${_jp#node=}" ;;
+                esac
+            done
+            if [[ -z "$_join_node" ]]; then
+                echo '{"error":"missing node parameter (e.g. ?node=10.0.0.5 or ?node=10.0.0.5:8080)"}'
+            else
+                # Extract IP and port for validation. $_join_node is written verbatim
+                # into HA_NODES (a sourced config file), so BOTH parts must be strictly
+                # validated to prevent shell injection via the port suffix.
+                _join_ip="${_join_node%%:*}"
+                _join_port_part=""
+                [[ "$_join_node" == *:* ]] && _join_port_part="${_join_node##*:}"
+                if ! is_valid_ip "$_join_ip"; then
+                    echo '{"error":"invalid IP address"}'
+                elif [[ -n "$_join_port_part" ]] && { [[ ! "$_join_port_part" =~ ^[0-9]+$ ]] || (( 10#$_join_port_part < 1 || 10#$_join_port_part > 65535 )); }; then
+                    echo '{"error":"invalid port"}'
+                elif _is_known_node "$_join_ip"; then
+                    # Already in the cluster — update port if changed, otherwise no-op
+                    _existing_port="${_NODE_PORTS[$_join_ip]:-80}"
+                    if [[ "$_join_node" == *:* ]]; then
+                        _join_port="${_join_node##*:}"
+                    else
+                        _join_port=80
+                    fi
+                    if [[ "$_existing_port" != "$_join_port" ]]; then
+                        # Rebuild HA_NODES with updated port
+                        _new_nodes=""
+                        for (( _ji=0; _ji<_NODE_COUNT; _ji++ )); do
+                            [[ -n "$_new_nodes" ]] && _new_nodes+=","
+                            if [[ "${_HA_NODES[$_ji]}" == "$_join_ip" ]]; then
+                                if [[ "$_join_port" == "80" ]]; then
+                                    _new_nodes+="$_join_ip"
+                                else
+                                    _new_nodes+="${_join_ip}:${_join_port}"
+                                fi
+                                _NODE_PORTS["$_join_ip"]="$_join_port"
+                            else
+                                _p="${_NODE_PORTS[${_HA_NODES[$_ji]}]:-80}"
+                                if [[ "$_p" == "80" ]]; then
+                                    _new_nodes+="${_HA_NODES[$_ji]}"
+                                else
+                                    _new_nodes+="${_HA_NODES[$_ji]}:${_p}"
+                                fi
+                            fi
+                        done
+                        _conf_set "HA_NODES" "$_new_nodes"
+                        _conf_set "GATEWAY" "$_GATEWAY"
+                        platform_ha_daemon_restart
+                        printf '{"ok":true,"action":"port_updated","node":"%s","nodes":"%s"}\n' "$_join_node" "$_new_nodes"
+                    else
+                        printf '{"ok":true,"action":"already_member","node":"%s"}\n' "$_join_ip"
+                    fi
+                else
+                    # New node — append to HA_NODES
+                    _new_nodes=""
+                    for (( _ji=0; _ji<_NODE_COUNT; _ji++ )); do
+                        [[ -n "$_new_nodes" ]] && _new_nodes+=","
+                        _p="${_NODE_PORTS[${_HA_NODES[$_ji]}]:-80}"
+                        if [[ "$_p" == "80" ]]; then
+                            _new_nodes+="${_HA_NODES[$_ji]}"
+                        else
+                            _new_nodes+="${_HA_NODES[$_ji]}:${_p}"
+                        fi
+                    done
+                    _new_nodes+=",${_join_node}"
+                    _conf_set "HA_NODES" "$_new_nodes"
+                    _conf_set "GATEWAY" "$_GATEWAY"
+                    # Reload local arrays
+                    _HA_NODES+=("$_join_ip")
+                    if [[ "$_join_node" == *:* ]]; then
+                        _NODE_PORTS["$_join_ip"]="${_join_node##*:}"
+                    else
+                        _NODE_PORTS["$_join_ip"]=80
+                    fi
+                    _NODE_COUNT=${#_HA_NODES[@]}
+                    if (( _NODE_COUNT - 1 < ${#_ROLE_NAMES[@]} )); then
+                        _ROLES+=("${_ROLE_NAMES[$((_NODE_COUNT-1))]}")
+                    else
+                        _ROLES+=("NODE${_NODE_COUNT}")
+                    fi
+                    platform_ha_daemon_restart
+                    printf '{"ok":true,"action":"joined","node":"%s","nodes":"%s"}\n' "$_join_node" "$_new_nodes"
+                fi
+            fi
+            ;;
+        /api/nodes/leave*)
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _leave_node="" _leave_propagated=""
+            IFS='&' read -ra _lparams <<< "$_qs"
+            for _lp in "${_lparams[@]}"; do
+                case "$_lp" in
+                    node=*) _leave_node="${_lp#node=}" ;;
+                    propagated=*) _leave_propagated="1" ;;
+                esac
+            done
+            if [[ -z "$_leave_node" ]]; then
+                echo '{"error":"missing node parameter"}'
+            else
+                _leave_ip="${_leave_node%%:*}"
+                if ! _is_known_node "$_leave_ip"; then
+                    printf '{"ok":true,"action":"not_member","node":"%s"}\n' "$_leave_ip"
+                elif [[ $_NODE_COUNT -le 1 ]]; then
+                    echo '{"error":"cannot remove last node"}'
+                else
+                    # Rebuild HA_NODES without the leaving node
+                    _new_nodes=""
+                    _new_ha_nodes=()
+                    for (( _li=0; _li<_NODE_COUNT; _li++ )); do
+                        [[ "${_HA_NODES[$_li]}" == "$_leave_ip" ]] && continue
+                        [[ -n "$_new_nodes" ]] && _new_nodes+=","
+                        _p="${_NODE_PORTS[${_HA_NODES[$_li]}]:-80}"
+                        if [[ "$_p" == "80" ]]; then
+                            _new_nodes+="${_HA_NODES[$_li]}"
+                        else
+                            _new_nodes+="${_HA_NODES[$_li]}:${_p}"
+                        fi
+                        _new_ha_nodes+=("${_HA_NODES[$_li]}")
+                    done
+                    _conf_set "HA_NODES" "$_new_nodes"
+                    # Reload local arrays
+                    _HA_NODES=("${_new_ha_nodes[@]}")
+                    unset "_NODE_PORTS[$_leave_ip]"
+                    _NODE_COUNT=${#_HA_NODES[@]}
+                    _ROLES=()
+                    for (( _ri=0; _ri<_NODE_COUNT; _ri++ )); do
+                        if (( _ri < ${#_ROLE_NAMES[@]} )); then _ROLES+=("${_ROLE_NAMES[$_ri]}"); else _ROLES+=("NODE$((_ri+1))"); fi
+                    done
+                    # Propagate to other nodes if not already propagated
+                    if [[ -z "$_leave_propagated" ]]; then
+                        for _ln in "${_new_ha_nodes[@]}"; do
+                            _LOCAL_IP="$(platform_get_local_ip)"
+                            [[ "$_ln" == "$_LOCAL_IP" ]] && continue
+                            curl -sf --max-time 5 "$(_propagate_url "$_ln" "/api/nodes/leave?node=$_leave_ip&propagated=1")" &>/dev/null &
+                        done
+                    fi
+                    platform_ha_daemon_restart
+                    printf '{"ok":true,"action":"removed","node":"%s","nodes":"%s"}\n' "$_leave_ip" "$_new_nodes"
+                fi
+            fi
+            ;;
+        /api/config)
+            send_headers "200 OK" "application/json"
+            _cfg_nodes="["
+            for (( _i=0; _i<_NODE_COUNT; _i++ )); do
+                (( _i > 0 )) && _cfg_nodes+=","
+                _cfg_nodes+="{\"ip\":\"${_HA_NODES[$_i]}\",\"role\":\"${_ROLES[$_i]}\",\"p\":$((_i+1)),\"port\":${_NODE_PORTS[${_HA_NODES[$_i]}]:-80}}"
+            done
+            _cfg_nodes+="]"
+            printf '{"nodes":%s,"gateway":"%s","pihole_port":%s}\n' "$_cfg_nodes" "$_GATEWAY" "$_PIHOLE_PORT"
+            ;;
+        /favicon.ico)
+            send_headers "204 No Content" "text/plain"
+            ;;
+        *)
+            # JSON API only; the UI is served by the Pi-hole admin tab (ha.lp).
+            send_headers "404 Not Found" "text/plain"; echo "Not Found"
+            ;;
+    esac
+    exit 0
+fi
+
+exec socat TCP-LISTEN:"$PORT",fork,reuseaddr EXEC:"$0 --handle",stderr

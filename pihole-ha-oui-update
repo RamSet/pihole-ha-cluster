@@ -1,0 +1,65 @@
+#!/bin/bash
+
+# pihole-ha-oui-update — refresh the local IEEE OUI (MAC vendor) database.
+#
+# Self-contained: fetches the canonical IEEE CSVs directly, so it works on every
+# node regardless of the distro's `ieee-data` package version. (Older packages
+# ship an update-ieee-data that points at a now-dead IEEE URL and silently fail.)
+#
+# Fetches all registry tiers, not just the 24-bit OUI block (MA-L). Many devices
+# use smaller MA-M (28-bit) / MA-S (36-bit) / IAB assignments whose 24-bit prefix
+# only resolves to "IEEE Registration Authority"; the real vendor lives in these
+# finer files, so we keep them fresh too.
+#
+# Run monthly by pihole-ha-ieee-update.timer. Any failure is non-fatal — the
+# existing files stay in place and are retried next month.
+
+set -u
+
+DESTDIR="/var/lib/ieee-data"
+
+log() {
+    command -v logger >/dev/null 2>&1 && logger -t pihole-ha-oui-update "$*"
+    printf '%s\n' "$*"
+}
+
+mkdir -p "$DESTDIR" || { log "cannot create $DESTDIR"; exit 0; }
+
+# "URL  filename  min_rows" — min_rows guards against truncated/error responses
+# (real sizes: oui ~35k, mam ~6k, oui36 ~5k, iab ~4k rows).
+FILES=(
+    "https://standards-oui.ieee.org/oui/oui.csv      oui.csv     10000"
+    "https://standards-oui.ieee.org/oui28/mam.csv    mam.csv      1000"
+    "https://standards-oui.ieee.org/oui36/oui36.csv  oui36.csv    1000"
+    "https://standards-oui.ieee.org/iab/iab.csv      iab.csv       500"
+)
+
+updated=0
+for entry in "${FILES[@]}"; do
+    read -r url name minrows <<< "$entry"
+    dest="$DESTDIR/$name"
+
+    tmp="$(mktemp "${dest}.XXXXXX")" || { log "mktemp failed for $name"; continue; }
+
+    if ! curl -fsS --connect-timeout 10 --max-time 180 "$url" -o "$tmp"; then
+        log "fetch failed for $name; keeping existing"
+        rm -f "$tmp"; continue
+    fi
+    if ! head -1 "$tmp" | grep -q '^Registry,Assignment,'; then
+        log "$name failed header check; keeping existing"
+        rm -f "$tmp"; continue
+    fi
+    rows="$(wc -l < "$tmp")"
+    if (( rows < minrows )); then
+        log "$name too small ($rows rows, need $minrows); keeping existing"
+        rm -f "$tmp"; continue
+    fi
+
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$dest"
+    log "updated $dest ($rows rows)"
+    updated=$((updated + 1))
+done
+
+log "refresh complete ($updated/${#FILES[@]} files updated)"
+exit 0

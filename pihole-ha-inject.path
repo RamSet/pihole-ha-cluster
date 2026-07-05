@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch Pi-hole sidebar for updates
+
+[Path]
+PathChanged=/var/www/html/admin/scripts/lua/sidebar.lp
+
+[Install]
+WantedBy=multi-user.target
