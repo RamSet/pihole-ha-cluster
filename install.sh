@@ -43,11 +43,26 @@ if [[ "${1:-}" == "--uninstall" || "${1:-}" == "-u" ]]; then
         [[ "$_u_ok" =~ ^[Yy] ]] || { printf "  Aborted.\\n"; exit 0; }
     fi
 
-    # Leave the cluster first (while the dash is still up) so peers drop this node
-    _u_self="$(hostname -I | awk '{print $1}')"
+    # Leave the cluster: notify every peer DIRECTLY to drop this node. Don't rely on
+    # the local dash to propagate — it's about to be stopped. Peers + this node's own
+    # cluster IP are read from nodes.conf.
     printf "  %b Leaving cluster..." "${INFO}"
-    curl -sf --max-time 5 "http://localhost:8887/api/nodes/leave?node=${_u_self}" >/dev/null 2>&1 || true
-    printf "%b  %b Cluster leave requested\\n" "${OVER}" "${TICK}"
+    if [[ -f /etc/pihole-ha/nodes.conf ]]; then
+        _u_nodes="$(sed -n 's/^HA_NODES=//p' /etc/pihole-ha/nodes.conf)"
+        IFS=',' read -ra _u_peers <<< "$_u_nodes"
+        _u_self=""
+        for _u_e in "${_u_peers[@]}"; do
+            _u_eip="${_u_e%%:*}"
+            ip -o -4 addr show 2>/dev/null | grep -qw "$_u_eip" && { _u_self="$_u_eip"; break; }
+        done
+        [[ -z "$_u_self" ]] && _u_self="$(hostname -I | awk '{print $1}')"
+        for _u_e in "${_u_peers[@]}"; do
+            _u_pip="${_u_e%%:*}"
+            [[ "$_u_pip" == "$_u_self" ]] && continue
+            curl -sf --max-time 5 "http://$_u_pip:8887/api/nodes/leave?node=${_u_self}&propagated=1" >/dev/null 2>&1 || true
+        done
+    fi
+    printf "%b  %b Left cluster (peers notified)\\n" "${OVER}" "${TICK}"
 
     # Release the VIP if this node currently holds it
     if [[ -f /etc/pihole-ha/nodes.conf ]]; then
