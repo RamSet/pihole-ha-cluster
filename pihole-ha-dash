@@ -20,6 +20,7 @@ if [[ "${1:-}" == "--handle" ]]; then
     _VIP="${_VIP:-${VIP:-}}"
     _VIP_ENABLED="${_VIP_ENABLED:-${VIP_ENABLED:-}}"
     _HA_NODES="${_HA_NODES:-${HA_NODES:-}}"
+    _DHCP_HA="${DHCP_HA:-true}"
     if [[ -z "$_GATEWAY" || -z "$_HA_NODES" ]]; then
         # Auto-detect defaults so dash stays alive for /api/nodes/join
         _LOCAL_IP_DEFAULT="$(ip -o route get 1.0.0.0 2>/dev/null | sed -n 's/.*src \([^ ]*\).*/\1/p')"
@@ -986,7 +987,7 @@ NEOF
                 _cfg_nodes+="{\"ip\":\"${_HA_NODES[$_i]}\",\"role\":\"${_ROLES[$_i]}\",\"p\":$((_i+1)),\"port\":${_NODE_PORTS[${_HA_NODES[$_i]}]:-80}}"
             done
             _cfg_nodes+="]"
-            printf '{"nodes":%s,"gateway":"%s","pihole_port":%s}\n' "$_cfg_nodes" "$_GATEWAY" "$_PIHOLE_PORT"
+            printf '{"nodes":%s,"gateway":"%s","pihole_port":%s,"dhcp_ha":"%s"}\n' "$_cfg_nodes" "$_GATEWAY" "$_PIHOLE_PORT" "$_DHCP_HA"
             ;;
         /favicon.ico)
             send_headers "204 No Content" "text/plain"

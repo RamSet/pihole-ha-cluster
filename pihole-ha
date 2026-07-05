@@ -12,7 +12,7 @@ done
 
 # Load node config (with backwards-compatible defaults)
 NODES_CONF="/etc/pihole-ha/nodes.conf"
-GATEWAY="" VIP="" VIP_ENABLED="" HA_ENABLED="" HA_NODES=""
+GATEWAY="" VIP="" VIP_ENABLED="" HA_ENABLED="" HA_NODES="" DHCP_HA=""
 [[ -f "$NODES_CONF" ]] && . "$NODES_CONF"
 EXPECTED_CONFIG_VERSION=1
 CONFIG_VERSION="${CONFIG_VERSION:-0}"
@@ -22,6 +22,9 @@ if [[ -z "$GATEWAY" || -z "$HA_NODES" ]]; then
 fi
 VIP_ENABLED="${VIP_ENABLED:-true}"
 HA_ENABLED="${HA_ENABLED:-true}"
+# DHCP_HA=false => DNS-only deployment: this node's Pi-hole is not the DHCP
+# server, so never manage dhcp.active/VIP; just monitor peers and sync config.
+DHCP_HA="${DHCP_HA:-true}"
 # Parse HA_NODES: supports IP or IP:PORT (default port 80)
 IFS=',' read -ra _RAW_NODES <<< "$HA_NODES"
 NODES=()
@@ -141,6 +144,7 @@ reload_vip_conf() {
             VIP)         VIP="$val" ;;
             VIP_ENABLED) VIP_ENABLED="$val" ;;
             HA_ENABLED)  HA_ENABLED="$val" ;;
+            DHCP_HA)     DHCP_HA="$val" ;;
             HA_NODES)    HA_NODES="$val" ;;
         esac
     done < "$NODES_CONF"
@@ -583,6 +587,14 @@ while true; do
 
     # Always run health checks so dashboard shows real peer state
     for ip in "${NODES[@]}"; do check_peer "$ip"; done
+
+    # DNS-only deployment: another server handles DHCP. Monitor peers and let
+    # config sync run, but never manage dhcp.active or the VIP — and stay that way
+    # regardless of the HA_ENABLED UI toggle.
+    if [[ "$DHCP_HA" != "true" ]]; then
+        write_status "DNS-only (DHCP not managed)"
+        continue
+    fi
 
     if [[ "$HA_ENABLED" != "true" ]]; then
         write_status "HA disabled"

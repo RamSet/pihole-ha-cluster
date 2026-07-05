@@ -2,6 +2,15 @@
 
 DHCP high availability and config sync for a Pi-hole cluster. Automatic failover, manual master override, config synchronization, and a web UI in Pi-hole's admin page — all over HTTP with no SSH keys or external dependencies. Runs on bare metal (systemd) or Docker (sidecar container).
 
+## Deployment Modes
+
+pihole-ha auto-detects how your network does DHCP and installs to match — it will **not** enable Pi-hole DHCP behind your back:
+
+- **DHCP-HA** — *Pi-hole is your DHCP server.* Full failover: a standby takes over DHCP if the primary dies, with an optional floating VIP. Selected when Pi-hole DHCP is already active (or when you choose it at install).
+- **DNS-only** — *your router or another server does DHCP.* pihole-ha **never touches DHCP**; it keeps your Pi-holes' config (blocklists, custom DNS, FTL settings) in sync and monitors peer health — redundant DNS without any DHCP failover.
+
+At install it checks whether Pi-hole DHCP is active, probes the LAN for another DHCP server, inherits the mode from the cluster when joining one, and asks if it's ambiguous (defaulting to the safe **DNS-only**). So installing on a DNS-only network won't create a second, conflicting DHCP server.
+
 ## What It Does
 
 - **DHCP Failover** — If the primary Pi-hole goes down, a secondary node automatically takes over DHCP within ~40-80 seconds. When the primary recovers, the secondary yields back. Clients never lose DHCP.

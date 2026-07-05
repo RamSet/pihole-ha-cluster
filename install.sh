@@ -445,17 +445,57 @@ else
     role_name="STANDBY (P${priority})"
 fi
 
-# --- 10. VIP ---
-printf "\\n"
-printf "  %b ${COL_BOLD}Virtual IP (VIP)${COL_NC}\\n" "${INFO}"
-printf "      A VIP is a floating IP that moves to whichever node is serving DHCP.\\n"
-printf "      It can be used as a DNS address that survives failover.\\n"
-printf "\\n"
-if [[ -n "$cluster_vip" ]]; then
+# --- 9b. Deployment mode: DHCP-HA vs DNS-only (a cluster-wide property) ---
+# DHCP-HA: Pi-hole serves DHCP with failover. DNS-only: another server does DHCP
+# and we never touch dhcp.active/VIP (just sync + monitor). Installing DHCP-HA on
+# a DNS-only LAN would create a second DHCP server, so detect and default safe.
+_dhcp_mode="dhcp"
+if [[ ${#discovered_nodes[@]} -gt 0 ]]; then
+    # Joining an existing cluster — inherit its mode. A standby's own dhcp.active
+    # is always false and would misfire, so the cluster decides. Peers on an older
+    # dash won't report dhcp_ha; default to DHCP-HA (what pre-existing clusters are).
+    for _mp in "${discovered_nodes[@]}"; do
+        _mode_ha="$(curl -sf --max-time 5 "http://$_mp:8887/api/config" 2>/dev/null | sed -n 's/.*"dhcp_ha":"\([a-z]*\)".*/\1/p')"
+        if [[ -n "$_mode_ha" ]]; then
+            [[ "$_mode_ha" == "false" ]] && _dhcp_mode="dns"
+            break
+        fi
+    done
+    printf "  %b Deployment: %b%s%b (inherited from cluster)\\n" "${TICK}" "${COL_BOLD}" "$([[ "$_dhcp_mode" == "dns" ]] && echo DNS-only || echo DHCP-HA)" "${COL_NC}"
+elif [[ "$(pihole-FTL --config dhcp.active 2>/dev/null)" == "true" ]]; then
+    printf "  %b Pi-hole DHCP is active — %bDHCP-HA%b deployment\\n" "${TICK}" "${COL_BOLD}" "${COL_NC}"
+else
+    _ext_dhcp=""
+    if command -v nmap >/dev/null 2>&1; then
+        _ext_dhcp="$(nmap --script broadcast-dhcp-discover 2>/dev/null | sed -n 's/.*Server Identifier: \([0-9.]*\).*/\1/p' | grep -vx "$local_ip" | head -1)"
+    fi
+    if [[ -n "$_ext_dhcp" ]]; then
+        _dhcp_mode="dns"
+        printf "  %b Another DHCP server found at %b%s%b — %bDNS-only%b deployment (Pi-hole DHCP left off)\\n" "${INFO}" "${COL_BOLD}" "$_ext_dhcp" "${COL_NC}" "${COL_BOLD}" "${COL_NC}"
+    else
+        printf "\\n  %b Pi-hole is not currently serving DHCP. Choose deployment:\\n" "${INFO}"
+        printf "      ${COL_BOLD}1)${COL_NC} DHCP-HA   — Pi-hole becomes your DHCP server, with failover + VIP\\n"
+        printf "      ${COL_BOLD}2)${COL_NC} DNS-only  — another server does DHCP; config sync + redundancy only\\n"
+        read -erp "  Deployment type [2]: " _mode_choice
+        [[ "$_mode_choice" == "1" ]] && _dhcp_mode="dhcp" || _dhcp_mode="dns"
+    fi
+fi
+_dhcp_ha_val="true"; [[ "$_dhcp_mode" == "dns" ]] && _dhcp_ha_val="false"
+
+# --- 10. VIP (DHCP-HA only; a VIP follows the DHCP master) ---
+if [[ "$_dhcp_mode" == "dns" ]]; then
+    vip_enabled="false"; vip=""
+    printf "  %b VIP skipped (DNS-only deployment)\\n" "${INFO}"
+elif [[ -n "$cluster_vip" ]]; then
     printf "  %b Cluster VIP detected: %b%s%b\\n" "${TICK}" "${COL_BOLD}" "$cluster_vip" "${COL_NC}"
     vip_enabled="true"
     vip="$cluster_vip"
 else
+    printf "\\n"
+    printf "  %b ${COL_BOLD}Virtual IP (VIP)${COL_NC}\\n" "${INFO}"
+    printf "      A VIP is a floating IP that moves to whichever node is serving DHCP.\\n"
+    printf "      It can be used as a DNS address that survives failover.\\n"
+    printf "\\n"
     read -erp "  Enable VIP? (must type 'yes') [yes/NO]: " vip_choice
     if [[ "$vip_choice" == "yes" ]]; then
         vip_enabled="true"
@@ -566,21 +606,27 @@ GATEWAY=$gateway
 VIP=$vip
 VIP_ENABLED=$vip_enabled
 HA_ENABLED=true
+DHCP_HA=$_dhcp_ha_val
 HA_NODES=$ha_nodes_str
 NCONF
 printf "%b  %b Configuration written to /etc/pihole-ha/nodes.conf\\n" "${OVER}" "${TICK}"
 
 # --- 16. Configure DHCP role ---
-printf "  %b Configuring DHCP role..." "${INFO}"
-if [[ "$is_primary" == "true" ]]; then
-    pihole-FTL --config dhcp.active true >/dev/null 2>&1
-    printf "%b  %b DHCP enabled (primary)\\n" "${OVER}" "${TICK}"
+if [[ "$_dhcp_mode" == "dns" ]]; then
+    printf "  %b DNS-only deployment — leaving Pi-hole DHCP untouched\\n" "${INFO}"
 else
-    pihole-FTL --config dhcp.active false >/dev/null 2>&1
-    printf "%b  %b DHCP disabled (standby — auto-activates on failover)\\n" "${OVER}" "${TICK}"
+    printf "  %b Configuring DHCP role..." "${INFO}"
+    if [[ "$is_primary" == "true" ]]; then
+        pihole-FTL --config dhcp.active true >/dev/null 2>&1
+        printf "%b  %b DHCP enabled (primary)\\n" "${OVER}" "${TICK}"
+    else
+        pihole-FTL --config dhcp.active false >/dev/null 2>&1
+        printf "%b  %b DHCP disabled (standby — auto-activates on failover)\\n" "${OVER}" "${TICK}"
+    fi
 fi
 
-# --- 17. Configure DHCP options ---
+# --- 17. Configure DHCP options (DHCP-HA only) ---
+if [[ "$_dhcp_mode" != "dns" ]]; then
 if [[ "$vip_enabled" == "true" && -n "$vip" ]]; then
     printf "  %b Configuring DHCP options (DNS=%s)..." "${INFO}" "$vip"
     cat > /etc/dnsmasq.d/09-pihole-ha.conf <<DNSCONF
@@ -602,6 +648,7 @@ DNSCONF
 fi
 printf "%b  %b DHCP options configured\\n" "${OVER}" "${TICK}"
 systemctl restart pihole-FTL 2>/dev/null || true
+fi
 
 # --- 17b. Pin DNS to localhost on every active resolver path ---
 # Critical: if /etc/resolv.conf points at the VIP and the VIP holder dies,
@@ -704,9 +751,12 @@ fi
 
 # DHCP static hosts — configured by user via Pi-hole admin panel or sync from primary
 
-# dhcp-script hook — dedicated dnsmasq.d file (survives Pi-hole updates)
+# dhcp-script hook — new-device notifications fire on DHCP lease events, so only
+# relevant when Pi-hole serves DHCP. Skip entirely in DNS-only deployments.
 _dhcp_script_conf="/etc/dnsmasq.d/10-pihole-ha-dhcp-script.conf"
-if [[ ! -f "$_dhcp_script_conf" ]]; then
+if [[ "$_dhcp_mode" == "dns" ]]; then
+    printf "  %b DHCP script hook skipped (DNS-only)\\n" "${INFO}"
+elif [[ ! -f "$_dhcp_script_conf" ]]; then
     printf "dhcp-script=/usr/local/bin/new_dhcp_device\\n" > "$_dhcp_script_conf"
     pihole-FTL --config misc.etc_dnsmasq_d true >/dev/null 2>&1
     # Clear any legacy misc.dnsmasq_lines entry for this hook
