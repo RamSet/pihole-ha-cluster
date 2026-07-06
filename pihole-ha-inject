@@ -40,35 +40,26 @@ if grep -q 'HA Cluster' "$SIDEBAR"; then
     exit 0
 fi
 
-# Patch using Python for clean multi-line insertion
-python3 - "$SIDEBAR" <<'PYEOF'
-import sys
-
-path = sys.argv[1]
-with open(path, 'r') as f:
-    content = f.read()
-
-# Add 'ha' to the Tools treeview in_array check so parent menu opens
-content = content.replace(
-    "'network'})",
-    "'network', 'ha'})"
-)
-
-# Insert HA menu entry before "Update Gravity"
-ha_entry = """                        <!-- HA Cluster -->
+# Patch the sidebar with sed/awk — no python3 dependency. python3 is not
+# guaranteed on minimal installs and is absent from the Alpine-based Pi-hole
+# Docker image, where the old python3-based patch silently failed and the
+# "HA Cluster" menu link never appeared.
+# 1) add 'ha' to the Tools treeview in_array check so the parent menu opens
+sed -i "s/'network'})/'network', 'ha'})/" "$SIDEBAR"
+# 2) insert the HA Cluster menu entry before "Update Gravity"
+_ha_entry="$(mktemp)"
+cat > "$_ha_entry" <<'HAEOF'
+                        <!-- HA Cluster -->
                         <li<? if scriptname == 'ha' then ?> class="active"<? end ?>>
                             <a href="<?=webhome?>ha">
                                 <i class="fa fa-fw menu-icon fa-server"></i> <span>HA Cluster</span>
                             </a>
                         </li>
-"""
-content = content.replace(
-    '                        <!-- Update Gravity -->',
-    ha_entry + '                        <!-- Update Gravity -->'
-)
-
-with open(path, 'w') as f:
-    f.write(content)
-PYEOF
+HAEOF
+awk -v f="$_ha_entry" '
+    /<!-- Update Gravity -->/ && !ins { while ((getline l < f) > 0) print l; close(f); ins=1 }
+    { print }
+' "$SIDEBAR" > "$SIDEBAR.tmp" && mv "$SIDEBAR.tmp" "$SIDEBAR"
+rm -f "$_ha_entry"
 
 log "Sidebar patched — HA Cluster menu added under Tools"
