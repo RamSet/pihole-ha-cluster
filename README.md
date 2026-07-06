@@ -15,7 +15,7 @@ At install it checks whether Pi-hole DHCP is active, probes the LAN for another 
 
 - **DHCP Failover** — If the primary Pi-hole goes down, a secondary node automatically takes over DHCP within ~40-80 seconds. When the primary recovers, the secondary yields back. Clients never lose DHCP.
 - **Virtual IP (VIP)** — Optional floating IP. In DHCP-HA mode it follows the active DHCP node (clients get it as their DNS server and DHCP server-id, so renewals always reach the right node). In DNS-only mode it follows the highest-priority node that's answering DNS, giving health-based DNS failover. When disabled, clients get all node IPs as DNS servers instead.
-- **Config Sync** — The sync primary builds a tarball of gravity DB, DHCP static leases, custom DNS records, and FTL settings. Standby nodes pull it over HTTP every 15 minutes. No SSH keys needed.
+- **Config Sync** — The sync primary bundles gravity DB, DHCP static leases, custom DNS records, and FTL settings — and rebuilds that bundle **only when something actually changes**. Standbys check the primary every ~15 minutes and download + apply **only when the config differs** (and even then, FTL only restarts on real changes) — plus an on-demand **Sync Now** button. So nothing transfers or restarts on unchanged data, and no SSH keys are needed.
 - **Manual DHCP Master Override** — Force any node to be the DHCP server with one click. The others yield automatically. If the designated master goes down, remaining nodes fall back to priority order.
 - **HA Kill-Switch** — Disable all DHCP failover, health checks, and VIP management cluster-wide with one toggle. Propagates to all nodes automatically.
 - **Pushover Notifications** — Optional alerts on failover events (activation, deactivation, sync).
@@ -256,8 +256,8 @@ The HA page is injected into Pi-hole's sidebar under **Tools > HA Cluster**. A s
 |--------|---------|
 | `pihole-ha` | Core DHCP failover daemon |
 | `pihole-ha-dash` | Cluster API server (port 8887) — status, sync payloads, cluster actions |
-| `pihole-ha-sync` | Build sync payload (primary only, every 15 min) |
-| `pihole-ha-sync-pull` | Pull sync payload (standbys only, every 15 min) |
+| `pihole-ha-sync` | Build sync payload (primary only; checks every 15 min, rebuilds only on change) |
+| `pihole-ha-sync-pull` | Pull sync payload (standbys only; checks every 15 min, pulls only on change) |
 | `pihole-ha-inject` | Inject HA page into Pi-hole web UI (bare metal) |
 | `pihole-ha-platform` | Platform abstraction layer (`/usr/local/lib/pihole-ha/`) — detects systemd vs Docker, provides unified functions for FTL restart, sync timer management, etc. |
 
