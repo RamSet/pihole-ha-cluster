@@ -310,12 +310,18 @@ fi
 load_notify_conf
 get_dhcp() { pihole-FTL --config dhcp.active 2>/dev/null || echo "false"; }
 
-# Get SID for authenticated API access; caches per peer
-get_sid() {
+# Ensure we hold a valid cached SID for $ip, authenticating only if we don't
+# already have one. MUST be called directly, never inside $(...): the whole point
+# is that the peer_sid write below persists in the daemon process so we reuse one
+# session per peer. (Pi-hole renews a session's validity on each use, so a session
+# we keep using never expires.) Calling it in a command substitution would run it
+# in a subshell, discard the cache write, and re-authenticate on every single API
+# call — creating a brand-new Pi-hole session each time until the peer runs out of
+# API session seats ("API seats exceeded").
+ensure_sid() {
     local ip="$1"
     [[ -z "${peer_password[$ip]:-}" ]] && return  # no password configured
-    # Reuse cached SID if we have one (valid 30 min, we refresh every ~20s)
-    [[ -n "${peer_sid[$ip]:-}" ]] && echo "${peer_sid[$ip]}" && return
+    [[ -n "${peer_sid[$ip]:-}" ]] && return        # already have one — reuse it
     local resp
     local port="${NODE_PORTS[$ip]:-80}"
     # JSON-escape password: backslashes before quotes, then literal quotes.
@@ -327,10 +333,7 @@ get_sid() {
         -d "{\"password\":\"${_pw}\"}" 2>/dev/null)" || return
     local sid
     sid="$(echo "$resp" | grep -o '"sid":"[^"]*"' | cut -d'"' -f4)"
-    if [[ -n "$sid" && "$sid" != "null" ]]; then
-        peer_sid[$ip]="$sid"
-        echo "$sid"
-    fi
+    [[ -n "$sid" && "$sid" != "null" ]] && peer_sid[$ip]="$sid"
 }
 
 # Override local node's port from env var or FTL query (Docker may differ from nodes.conf)
@@ -340,12 +343,13 @@ elif _ftl_port="$(pihole-FTL --config webserver.port 2>/dev/null | grep -o '^[0-
     NODE_PORTS["$LOCAL_IP"]="$_ftl_port"
 fi
 
-# Build URL with SID query param if peer needs auth
+# Build URL with SID query param if peer needs auth. Pure formatter — safe to
+# call inside $(). It only reads the cached SID; ensure_sid (called directly by
+# check_peer) is responsible for populating/refreshing it.
 api_url() {
     local ip="$1" path="$2"
     local port="${NODE_PORTS[$ip]:-80}"
-    local sid
-    sid="$(get_sid "$ip")"
+    local sid="${peer_sid[$ip]:-}"
     if [[ -n "$sid" ]]; then
         echo "http://$ip:${port}$path?sid=$sid"
     else
@@ -432,13 +436,15 @@ check_peer() {
         return
     fi
     local resp url
+    ensure_sid "$ip"   # authenticate once (cached); direct call so the cache persists
     url="$(api_url "$ip" /api/config/dhcp/active)"
     resp="$(curl -s --max-time "$HEALTH_TIMEOUT" "$url" 2>/dev/null)" || {
         peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="null"; return
     }
-    # If 401, clear cached SID and retry once
+    # If 401, our SID expired/was evicted — drop it, re-auth once, and retry.
     if echo "$resp" | grep -q '"unauthorized"'; then
         unset "peer_sid[$ip]"
+        ensure_sid "$ip"
         url="$(api_url "$ip" /api/config/dhcp/active)"
         resp="$(curl -s --max-time "$HEALTH_TIMEOUT" "$url" 2>/dev/null)" || {
             peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="\"denied\""; return
