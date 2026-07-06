@@ -342,6 +342,14 @@ $(function () {
                     '<i class="fa fa-key"></i> Save</button></div></td></tr>';
             }
 
+            // Don't clobber an input the user is actively typing into (e.g. the
+            // auth password field): if focus is inside this table, skip its
+            // re-render this cycle. Other nodes still update normally.
+            var active = document.activeElement;
+            if (active && $tbody[0] && $tbody[0].contains(active)) {
+                return;
+            }
+
             $tbody.html(html);
         });
     }
