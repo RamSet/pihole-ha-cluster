@@ -46,6 +46,7 @@ $(function () {
     pollMaster();
     pollVip();
     pollHa();
+    pollVersion();  // once on load; the backend caches the upstream check daily
 
     // Periodic polling
     setInterval(pollStatus, 5000);
@@ -936,6 +937,28 @@ $(function () {
         })
         .fail(function () { haCfg = null; })
         .always(renderHa);
+    }
+
+    // ---- Version / update indicator ----
+    function pollVersion() {
+        $.ajax({
+            url: API + "?action=version",
+            timeout: 6000,
+            dataType: "json"
+        })
+        .done(function (d) {
+            if (!d || !d.local) return;
+            $("#ha-version-local").text("v" + d.local);
+            if (d.update_available && d.latest) {
+                $("#ha-version-update").html(
+                    ' &middot; <span style="color:#f0ad4e"><i class="fa fa-arrow-circle-up"></i> ' +
+                    'update available (v' + escapeHtml(d.latest) + ')</span> &mdash; ' +
+                    'run <code>sudo ./install.sh --update</code>'
+                );
+            } else {
+                $("#ha-version-update").html(' &middot; <span style="color:#00a65a">up to date</span>');
+            }
+        });
     }
 
     // ---- Render: HA panel ----

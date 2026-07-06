@@ -642,6 +642,11 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
     </div>
 </div>
 
+<!-- Version / update indicator (populated by ha.js from /api/version) -->
+<div id="ha-version" style="text-align:center;color:#999;font-size:12px;margin:10px 0 4px">
+    Pi-hole HA <span id="ha-version-local">&hellip;</span><span id="ha-version-update"></span>
+</div>
+
 <div id="ha-config" style="display:none"
     data-nodes='[<? for i, node_ip in ipairs(ha_nodes) do local role = ha_roles[i] or ("NODE" .. i) local sep = (i < node_count) and "," or "" ?>{"ip":"<?=node_ip?>","role":"<?=role?>","priority":<?=i?>}<?=sep?><? end ?>]'
     data-gateway="<?=ha_gateway?>"

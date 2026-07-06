@@ -148,7 +148,7 @@ if [[ "${1:-}" == "--update" ]]; then
     fi
     # web UI source (admin panel; www/ only exists in the internal build)
     mkdir -p /usr/local/share/pihole-ha
-    for _w in ha.lp ha-api.lp ha.js; do [[ -f "$_src/$_w" ]] && cp "$_src/$_w" "/usr/local/share/pihole-ha/$_w"; done
+    for _w in ha.lp ha-api.lp ha.js VERSION; do [[ -f "$_src/$_w" ]] && cp "$_src/$_w" "/usr/local/share/pihole-ha/$_w"; done
     if [[ -d "$_src/www" ]]; then
         mkdir -p /usr/local/share/pihole-ha/www
         cp "$_src/www/"* /usr/local/share/pihole-ha/www/ 2>/dev/null || true
@@ -602,6 +602,7 @@ mkdir -p /usr/local/share/pihole-ha
 cp "$SCRIPT_DIR/ha.lp" /usr/local/share/pihole-ha/ha.lp
 cp "$SCRIPT_DIR/ha-api.lp" /usr/local/share/pihole-ha/ha-api.lp
 cp "$SCRIPT_DIR/ha.js" /usr/local/share/pihole-ha/ha.js
+[[ -f "$SCRIPT_DIR/VERSION" ]] && cp "$SCRIPT_DIR/VERSION" /usr/local/share/pihole-ha/VERSION
 printf "%b  %b Web UI files installed\\n" "${OVER}" "${TICK}"
 
 printf "  %b Installing systemd services..." "${INFO}"

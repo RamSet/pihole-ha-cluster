@@ -4,6 +4,11 @@
 
 PORT=8887
 STATUS_FILE="/run/pihole-ha/status.json"
+VERSION_FILE="/usr/local/share/pihole-ha/VERSION"
+# Raw URL of the upstream VERSION file used for the "update available" check.
+# Public build points at the public repo; empty disables the online check
+# (the panel then just shows the installed version, no phone-home).
+UPDATE_CHECK_URL="https://raw.githubusercontent.com/RamSet/pihole-ha-cluster/main/VERSION"
 
 if [[ "${1:-}" == "--handle" ]]; then
     # Load platform abstraction (systemd vs Docker)
@@ -190,6 +195,28 @@ if [[ "${1:-}" == "--handle" ]]; then
         /api/status)
             send_headers "200 OK" "application/json"
             cat "$STATUS_FILE" 2>/dev/null || echo '{"error":"no status file"}'
+            ;;
+        /api/version)
+            # Installed version, plus the latest upstream version if the online
+            # check is enabled. Best-effort: any failure just omits "latest".
+            _ver_local="$(tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null)"
+            _ver_local="${_ver_local:-unknown}"
+            _ver_latest="" _ver_cache="/run/pihole-ha/version-latest"
+            if [[ -n "$UPDATE_CHECK_URL" ]]; then
+                # Refetch at most once a day (cache-file mtime gates it).
+                if [[ ! -f "$_ver_cache" ]] || [[ -n "$(find "$_ver_cache" -mmin +1440 2>/dev/null)" ]]; then
+                    _fetched="$(curl -s --max-time 4 "$UPDATE_CHECK_URL" 2>/dev/null | tr -d '[:space:]')"
+                    [[ "$_fetched" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && printf '%s' "$_fetched" > "$_ver_cache" 2>/dev/null
+                fi
+                _ver_latest="$(tr -d '[:space:]' < "$_ver_cache" 2>/dev/null)"
+            fi
+            _update="false"
+            if [[ "$_ver_local" != "unknown" && "$_ver_latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                _newest="$(printf '%s\n%s\n' "$_ver_local" "$_ver_latest" | sort -V | tail -1)"
+                [[ "$_ver_latest" != "$_ver_local" && "$_newest" == "$_ver_latest" ]] && _update="true"
+            fi
+            send_headers "200 OK" "application/json"
+            printf '{"local":"%s","latest":"%s","update_available":%s}\n' "$_ver_local" "$_ver_latest" "$_update"
             ;;
         /api/auth/check)
             send_headers "200 OK" "application/json"

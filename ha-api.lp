@@ -123,6 +123,10 @@ if action == "status" then
     local content = read_file("/run/pihole-ha/status.json")
     mg.write(content or '{"error":"no status file"}')
 
+elseif action == "version" then
+    local content = curl_local("/api/version")
+    mg.write(content or '{"local":"unknown","latest":"","update_available":false}')
+
 elseif action == "sync-config" then
     -- Proxy to local dash API (handles config parsing)
     local content = curl_local("/api/sync/config")
