@@ -1,0 +1,46 @@
+#!/bin/bash
+# release — bump the VERSION file, commit, tag, and push to every remote.
+# The VERSION file drives the "update available" badge in the HA panel, so
+# bump it whenever you ship a release worth signalling to users.
+#
+# Usage:
+#   ./release patch        1.0.0 -> 1.0.1   (bug fixes)
+#   ./release minor        1.0.0 -> 1.1.0   (new features, backwards-compatible)
+#   ./release major        1.0.0 -> 2.0.0   (breaking changes)
+#   ./release 1.4.2        set an explicit version
+set -euo pipefail
+cd "$(dirname "$0")"
+
+[[ -f VERSION ]] || { echo "no VERSION file here"; exit 1; }
+cur="$(tr -d '[:space:]' < VERSION)"
+[[ "$cur" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION is not semver: '$cur'"; exit 1; }
+IFS=. read -r MA MI PA <<< "$cur"
+
+case "${1:-}" in
+    major) new="$((MA+1)).0.0" ;;
+    minor) new="${MA}.$((MI+1)).0" ;;
+    patch) new="${MA}.${MI}.$((PA+1))" ;;
+    [0-9]*.[0-9]*.[0-9]*) new="$1" ;;
+    *) echo "usage: ./release <major|minor|patch|X.Y.Z>   (current: $cur)"; exit 1 ;;
+esac
+[[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid version: $new"; exit 1; }
+
+# Require a clean tree so the release commit contains only the version bump.
+if [[ -n "$(git status --porcelain)" ]]; then
+    echo "working tree is dirty — commit or stash first:"; git status --short; exit 1
+fi
+if git rev-parse "v$new" >/dev/null 2>&1; then
+    echo "tag v$new already exists"; exit 1
+fi
+
+printf '%s\n' "$new" > VERSION
+git add VERSION
+git commit -q -m "Release v$new"
+git tag -a "v$new" -m "Release v$new"
+echo "  $cur -> $new  (committed + tagged v$new)"
+
+for r in $(git remote); do
+    echo "  pushing to $r ..."
+    git push -q "$r" HEAD --follow-tags
+done
+echo "released v$new"
