@@ -147,14 +147,20 @@ if [[ "${1:-}" == "--handle" ]]; then
         python3 -c "import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1],safe=''))" "$1" 2>/dev/null \
             || printf '%s' "$1" | sed 's/ /%20/g'
     }
-    _propagate_url() {
-        local ip="$1" path="$2"
-        local sid
+    # Propagate a call to a peer's :8887 dash. We authenticate with a short-lived
+    # Pi-hole session and DELETE it immediately after, so propagation never leaves
+    # an API session seat occupied on the peer. Fire-and-forget: call as
+    # `_propagate "$ip" "$path" &`. The path already carries a query string, so the
+    # session id is appended with "&sid=".
+    _propagate() {
+        local ip="$1" path="$2" sid
         sid="$(_get_peer_sid "$ip")"
         if [[ -n "$sid" ]]; then
-            echo "http://$ip:8887${path}&sid=$sid"
+            curl -sf --max-time 5 "http://$ip:8887${path}&sid=$sid" &>/dev/null
+            # Best-effort logout of the session we just created.
+            curl -s --max-time 3 -X DELETE "http://$ip/api/auth?sid=$sid" &>/dev/null
         else
-            echo "http://$ip:8887${path}"
+            curl -sf --max-time 5 "http://$ip:8887${path}" &>/dev/null
         fi
     }
 
@@ -310,8 +316,7 @@ if [[ "${1:-}" == "--handle" ]]; then
                     LOCAL_IP="$(platform_get_local_ip)"
                     for _node in "${_HA_NODES[@]}"; do
                         [[ "$_node" == "$LOCAL_IP" ]] && continue
-                        _peer_url="$(_propagate_url "$_node" "/api/sync/interval?minutes=$_interval&propagated=true")"
-                        curl -s --max-time 4 "$_peer_url" &>/dev/null &
+                        _propagate "$_node" "/api/sync/interval?minutes=$_interval&propagated=true" &
                     done
                 fi
                 send_headers "200 OK" "application/json"
@@ -370,7 +375,7 @@ if [[ "${1:-}" == "--handle" ]]; then
                 if [[ "$_propagated" != "1" ]]; then
                     for _node in "${_HA_NODES[@]}"; do
                         [[ "$_node" == "$LOCAL_IP" ]] && continue
-                        curl -sf --max-time 5 "$(_propagate_url "$_node" "/api/sync/promote?ip=$_promote_ip&propagated=1")" &>/dev/null &
+                        _propagate "$_node" "/api/sync/promote?ip=$_promote_ip&propagated=1" &
                     done
                 fi
                 echo "{\"ok\":true,\"primary\":\"$_promote_ip\"}"
@@ -411,7 +416,7 @@ if [[ "${1:-}" == "--handle" ]]; then
                     LOCAL_IP="$(platform_get_local_ip)"
                     for _node in "${_HA_NODES[@]}"; do
                         [[ "$_node" == "$LOCAL_IP" ]] && continue
-                        curl -sf --max-time 5 "$(_propagate_url "$_node" "/api/dhcp/master?ip=$_master_ip&propagated=1")" &>/dev/null &
+                        _propagate "$_node" "/api/dhcp/master?ip=$_master_ip&propagated=1" &
                     done
                 fi
                 echo "{\"ok\":true,\"dhcp_master\":\"$_master_ip\"}"
@@ -498,7 +503,7 @@ if [[ "${1:-}" == "--handle" ]]; then
                 LOCAL_IP="$(platform_get_local_ip)"
                 for _node in "${_HA_NODES[@]}"; do
                     [[ "$_node" == "$LOCAL_IP" ]] && continue
-                    curl -sf --max-time 5 "$(_propagate_url "$_node" "/api/ha/toggle?propagated=1")" &>/dev/null &
+                    _propagate "$_node" "/api/ha/toggle?propagated=1" &
                 done
             fi
             printf '{"ha_enabled":%s}\n' "$_NEW_HA"
@@ -544,7 +549,7 @@ if [[ "${1:-}" == "--handle" ]]; then
                     LOCAL_IP="$(platform_get_local_ip)"
                     for _node in "${_HA_NODES[@]}"; do
                         [[ "$_node" == "$LOCAL_IP" ]] && continue
-                        curl -sf --max-time 5 "$(_propagate_url "$_node" "/api/priority/set?nodes=$_prio_nodes&propagated=1")" &>/dev/null &
+                        _propagate "$_node" "/api/priority/set?nodes=$_prio_nodes&propagated=1" &
                     done
                 fi
                 printf '{"ok":true,"nodes":"%s"}\n' "$_prio_nodes"
@@ -663,7 +668,7 @@ if [[ "${1:-}" == "--handle" ]]; then
                     LOCAL_IP="$(platform_get_local_ip)"
                     for _node in "${_HA_NODES[@]}"; do
                         [[ "$_node" == "$LOCAL_IP" ]] && continue
-                        curl -sf --max-time 5 "$(_propagate_url "$_node" "/api/vip/toggle?propagated=1")" &>/dev/null &
+                        _propagate "$_node" "/api/vip/toggle?propagated=1" &
                     done
                 fi
                 printf '{"vip_enabled":%s}\n' "$_NEW_VIP"
@@ -748,8 +753,7 @@ NEOF
                 _enc_macs="$(_urlencode "$_ns_dhcp_macs")"
                 for _node in "${_HA_NODES[@]}"; do
                     [[ "$_node" == "$LOCAL_IP" ]] && continue
-                    _peer_url="$(_propagate_url "$_node" "/api/notify/save?enabled=$_ns_enabled&user=$_enc_user&token=$_enc_token&title=$_enc_title&dhcp_enabled=$_ns_dhcp_enabled&dhcp_macs=$_enc_macs&propagated=1")"
-                    curl -sf --max-time 5 "$_peer_url" &>/dev/null &
+                    _propagate "$_node" "/api/notify/save?enabled=$_ns_enabled&user=$_enc_user&token=$_enc_token&title=$_enc_title&dhcp_enabled=$_ns_dhcp_enabled&dhcp_macs=$_enc_macs&propagated=1" &
                 done
             fi
             echo '{"ok":true}'
@@ -971,7 +975,7 @@ NEOF
                         for _ln in "${_new_ha_nodes[@]}"; do
                             _LOCAL_IP="$(platform_get_local_ip)"
                             [[ "$_ln" == "$_LOCAL_IP" ]] && continue
-                            curl -sf --max-time 5 "$(_propagate_url "$_ln" "/api/nodes/leave?node=$_leave_ip&propagated=1")" &>/dev/null &
+                            _propagate "$_ln" "/api/nodes/leave?node=$_leave_ip&propagated=1" &
                         done
                     fi
                     platform_ha_daemon_restart
