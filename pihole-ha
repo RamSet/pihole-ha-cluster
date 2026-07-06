@@ -556,10 +556,13 @@ is_dns_healthy() {
     [[ "${peer_ping[$ip]}" == "true" ]] && [[ "${peer_dns[$ip]}" == "true" ]]
 }
 
-# Priority election for the DNS VIP: hold it only if no higher-priority node is
-# answering DNS. (No manual-master concept here — that's DHCP-specific.)
+# Priority election for the DNS VIP. Hold it only if this node can itself answer
+# DNS *and* no higher-priority node is answering DNS. The local-health check is
+# essential: without it a primary whose own DNS is down (but whose daemon is
+# still up) would keep the VIP while a secondary also claims it — split-brain.
+# (No manual-master concept here — that's DHCP-specific.)
 should_i_hold_vip() {
-    (( MY_IDX == 0 )) && return 0
+    is_dns_healthy "$LOCAL_IP" || return 1
     local i
     for (( i=0; i<MY_IDX; i++ )); do
         is_dns_healthy "${NODES[$i]}" && return 1

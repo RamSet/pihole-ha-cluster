@@ -497,19 +497,25 @@ else
 fi
 _dhcp_ha_val="true"; [[ "$_dhcp_mode" == "dns" ]] && _dhcp_ha_val="false"
 
-# --- 10. VIP (DHCP-HA only; a VIP follows the DHCP master) ---
-if [[ "$_dhcp_mode" == "dns" ]]; then
-    vip_enabled="false"; vip=""
-    printf "  %b VIP skipped (DNS-only deployment)\\n" "${INFO}"
-elif [[ -n "$cluster_vip" ]]; then
-    printf "  %b Cluster VIP detected: %b%s%b\\n" "${TICK}" "${COL_BOLD}" "$cluster_vip" "${COL_NC}"
+# --- 10. VIP (optional in both modes) ---
+# DHCP-HA: the VIP follows the DHCP master. DNS-only: the VIP follows whichever
+# node is answering DNS, so clients that use it as their DNS server get real
+# health-based failover (a plain two-server resolv.conf can't do that). Optional.
+if [[ -n "$cluster_vip" ]]; then
+    printf "  %b Cluster VIP detected: %b%s%b (inherited)\\n" "${TICK}" "${COL_BOLD}" "$cluster_vip" "${COL_NC}"
     vip_enabled="true"
     vip="$cluster_vip"
 else
     printf "\\n"
     printf "  %b ${COL_BOLD}Virtual IP (VIP)${COL_NC}\\n" "${INFO}"
-    printf "      A VIP is a floating IP that moves to whichever node is serving DHCP.\\n"
-    printf "      It can be used as a DNS address that survives failover.\\n"
+    if [[ "$_dhcp_mode" == "dns" ]]; then
+        printf "      A VIP is a floating IP that moves to whichever node is answering DNS.\\n"
+        printf "      Point your clients' DNS at it (via your DHCP server) and lookups keep\\n"
+        printf "      working when a node goes down — better than listing both Pi-holes.\\n"
+    else
+        printf "      A VIP is a floating IP that moves to whichever node is serving DHCP.\\n"
+        printf "      It can be used as a DNS address that survives failover.\\n"
+    fi
     printf "\\n"
     read -erp "  Enable VIP? (must type 'yes') [yes/NO]: " vip_choice
     if [[ "$vip_choice" == "yes" ]]; then
