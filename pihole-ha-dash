@@ -168,7 +168,11 @@ if [[ "${1:-}" == "--handle" ]]; then
     SYNC_PAYLOAD="/run/pihole-ha/sync-payload.tar.gz"
     SYNC_CONF="/etc/pihole-ha/sync.conf"
 
-    case "$path" in
+    # Route on the path only, stripping any ?query. The web proxy appends the
+    # caller's session as ?sid=… to authenticated calls, which would otherwise
+    # stop exact-match routes (e.g. /api/notify/config) from matching. Handlers
+    # that need query params still read them from "$path" via ${path#*\?}.
+    case "${path%%\?*}" in
         /api/status)
             send_headers "200 OK" "application/json"
             cat "$STATUS_FILE" 2>/dev/null || echo '{"error":"no status file"}'
