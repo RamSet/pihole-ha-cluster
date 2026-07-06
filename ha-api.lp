@@ -36,7 +36,35 @@ local function read_file(path)
     return content
 end
 
+-- The caller's Pi-hole session id. This page is already auth-gated by Pi-hole
+-- (an unauthenticated request is redirected to the login page and never reaches
+-- this code), so whatever we find here belongs to a logged-in admin. The :8887
+-- backend independently re-validates it against the local Pi-hole before it will
+-- perform any write, so we must forward it. The browser sends it as the HttpOnly
+-- "sid" cookie; some clients use the X-FTL-SID header or a sid query param.
+local function get_sid()
+    local ri = mg.request_info or {}
+    local h = ri.http_headers or {}
+    local sid = h["X-FTL-SID"] or h["X-Ftl-Sid"] or h["x-ftl-sid"]
+    if sid and #sid > 0 then return sid end
+    local cookie = h["Cookie"] or h["cookie"]
+    if cookie then
+        local c = cookie:match("sid=([^;]+)")
+        if c and #c > 0 then return c end
+    end
+    local q = get_param("sid")
+    if q and #q > 0 then return q end
+    return nil
+end
+
 local function curl_local(endpoint)
+    -- Forward the caller's session so the :8887 backend authorizes writes on
+    -- password-protected Pi-holes. Harmless on endpoints that don't require it.
+    local sid = get_sid()
+    if sid then
+        local sep = endpoint:find("?", 1, true) and "&" or "?"
+        endpoint = endpoint .. sep .. "sid=" .. url_encode(sid)
+    end
     local handle = io.popen("curl -s --max-time 4 'http://127.0.0.1:8887" .. endpoint .. "' 2>/dev/null")
     if not handle then return nil end
     local result = handle:read("*a")
