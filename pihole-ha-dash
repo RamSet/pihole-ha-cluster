@@ -168,6 +168,20 @@ if [[ "${1:-}" == "--handle" ]]; then
     SYNC_PAYLOAD="/run/pihole-ha/sync-payload.tar.gz"
     SYNC_CONF="/etc/pihole-ha/sync.conf"
 
+    # Who may enable/disable the VIP from the UI:
+    #  - DHCP-HA mode: the node currently serving DHCP (dhcp_active:true), since
+    #    the VIP follows the DHCP master.
+    #  - DNS-only mode: the primary (first node in HA_NODES). There is no DHCP
+    #    master, so authority is by priority — without this the VIP toggle would
+    #    be permanently disabled in DNS-only clusters.
+    _is_vip_authority() {
+        if [[ "$_DHCP_HA" != "true" ]]; then
+            [[ "$_LOCAL_IP" == "${_HA_NODES[0]}" ]]
+            return
+        fi
+        [[ -f "$STATUS_FILE" ]] && grep -q '"dhcp_active":true' "$STATUS_FILE" 2>/dev/null
+    }
+
     # Route on the path only, stripping any ?query. The web proxy appends the
     # caller's session as ?sid=… to authenticated calls, which would otherwise
     # stop exact-match routes (e.g. /api/notify/config) from matching. Handlers
@@ -621,13 +635,10 @@ if [[ "${1:-}" == "--handle" ]]; then
             fi
             _VIP="${_VIP:-}"
             _VIP_ENABLED="${_VIP_ENABLED:-true}"
-            # Check if this node is the active DHCP master
-            _is_dhcp_master="false"
-            if [[ -f "$STATUS_FILE" ]]; then
-                grep -q '"dhcp_active":true' "$STATUS_FILE" 2>/dev/null && _is_dhcp_master="true"
-            fi
+            # is_master = may this node drive the VIP toggle (mode-aware)
+            _is_master="false"; _is_vip_authority && _is_master="true"
             send_headers "200 OK" "application/json"
-            printf '{"vip":"%s","vip_enabled":%s,"is_master":%s}\n' "$_VIP" "$_VIP_ENABLED" "$_is_dhcp_master"
+            printf '{"vip":"%s","vip_enabled":%s,"is_master":%s}\n' "$_VIP" "$_VIP_ENABLED" "$_is_master"
             ;;
         /api/vip/toggle*)
             _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
@@ -639,17 +650,13 @@ if [[ "${1:-}" == "--handle" ]]; then
                     propagated=*) _vip_propagated="${_vp#propagated=}" ;;
                 esac
             done
-            # Only allow toggle from DHCP master (propagated calls bypass this)
+            # Only the VIP authority may initiate a toggle (propagated calls bypass this)
             _vip_allowed="true"
             if [[ "$_vip_propagated" != "1" ]]; then
-                _is_dhcp_master="false"
-                if [[ -f "$STATUS_FILE" ]]; then
-                    grep -q '"dhcp_active":true' "$STATUS_FILE" 2>/dev/null && _is_dhcp_master="true"
-                fi
-                [[ "$_is_dhcp_master" != "true" ]] && _vip_allowed="false"
+                _is_vip_authority || _vip_allowed="false"
             fi
             if [[ "$_vip_allowed" != "true" ]]; then
-                printf '{"error":"Only the active DHCP master can toggle VIP"}\n'
+                printf '{"error":"Only the primary (DNS-only) or DHCP master can toggle VIP"}\n'
             else
                 # Read current value
                 _VIP_ENABLED="true"
