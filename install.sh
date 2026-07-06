@@ -618,6 +618,25 @@ cp "$SCRIPT_DIR/pihole-ha-ieee-update.timer" /etc/systemd/system/
 systemctl daemon-reload
 printf "%b  %b Systemd services installed\\n" "${OVER}" "${TICK}"
 
+# --- 14b. System DNS pinning (opt-out) ---
+# By default pihole-ha points THIS host's resolver at 127.0.0.1 (its local
+# Pi-hole) so the node can always resolve — even while it holds a VIP that later
+# fails over. Users whose resolver lives elsewhere (a separate Pi-hole, unbound
+# on a custom port, etc.) can decline; then pihole-ha never touches system DNS.
+printf "\\n"
+printf "  %b ${COL_BOLD}System DNS${COL_NC}\\n" "${INFO}"
+printf "      pihole-ha can pin this host's DNS to 127.0.0.1 (its own Pi-hole) so it\\n"
+printf "      always resolves, independent of the VIP. Decline if your resolver is\\n"
+printf "      elsewhere and you don't want /etc/resolv.conf touched.\\n"
+read -erp "  Pin system DNS to 127.0.0.1? [Y/n]: " _pin_choice
+if [[ "$_pin_choice" =~ ^[Nn] ]]; then
+    pin_dns_val="false"
+    printf "  %b Leaving system DNS unchanged\\n" "${TICK}"
+else
+    pin_dns_val="true"
+    printf "  %b Will pin system DNS to 127.0.0.1\\n" "${TICK}"
+fi
+
 # --- 15. Write /etc/pihole-ha/nodes.conf ---
 printf "  %b Writing configuration..." "${INFO}"
 mkdir -p /etc/pihole-ha
@@ -628,6 +647,7 @@ VIP=$vip
 VIP_ENABLED=$vip_enabled
 HA_ENABLED=true
 DHCP_HA=$_dhcp_ha_val
+PIN_DNS=$pin_dns_val
 HA_NODES=$ha_nodes_str
 NCONF
 printf "%b  %b Configuration written to /etc/pihole-ha/nodes.conf\\n" "${OVER}" "${TICK}"
@@ -678,6 +698,10 @@ fi
 # Critical: if /etc/resolv.conf points at the VIP and the VIP holder dies,
 # the surviving node loses its own DNS (notifications fail, scripts break).
 # Each Pi-hole runs FTL on 127.0.0.1#53 — always resolve locally.
+# Skipped when the user declined (PIN_DNS=false); the daemon honors it too.
+if [[ "$pin_dns_val" != "true" ]]; then
+    printf "  %b System DNS pin skipped — your resolver is left as-is\\n" "${INFO}"
+else
 printf "  %b Pinning system DNS to 127.0.0.1..." "${INFO}"
 _pinned=()
 
@@ -741,6 +765,7 @@ elif getent hosts pi-hole.net >/dev/null 2>&1; then
 else
     printf "%b  %b WARNING: 127.0.0.1 not resolving — check pihole-FTL\\n" "${OVER}" "${CROSS}"
 fi
+fi  # end of PIN_DNS block
 
 # --- 17c. Seed Pi-hole defaults (adlists, DHCP hosts, dnsmasq scripts) ---
 printf "  %b Configuring Pi-hole defaults..." "${INFO}"

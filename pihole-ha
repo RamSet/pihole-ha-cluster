@@ -25,6 +25,9 @@ HA_ENABLED="${HA_ENABLED:-true}"
 # DHCP_HA=false => DNS-only deployment: this node's Pi-hole is not the DHCP
 # server, so never manage dhcp.active/VIP; just monitor peers and sync config.
 DHCP_HA="${DHCP_HA:-true}"
+# PIN_DNS=false => leave this host's system resolver alone. Default true pins it
+# to 127.0.0.1 (local Pi-hole) so the node always resolves independent of the VIP.
+PIN_DNS="${PIN_DNS:-true}"
 # Parse HA_NODES: supports IP or IP:PORT (default port 80)
 IFS=',' read -ra _RAW_NODES <<< "$HA_NODES"
 NODES=()
@@ -197,7 +200,10 @@ is_valid_ip "$GATEWAY" || { echo "Invalid gateway IP: $GATEWAY" >&2; exit 1; }
 # points only at the VIP, when this node holds the VIP and dies, surviving
 # peers can't resolve anything — including pushover.net for failover alerts.
 # Re-pin every startup so reboots that pick up DHCP-supplied DNS self-heal.
+# Skipped entirely when the user opted out with PIN_DNS=false — we never touch
+# their resolver, and updates preserve that (PIN_DNS lives in nodes.conf).
 enforce_dns_pin() {
+    [[ "$PIN_DNS" != "true" ]] && return 0
     local first_ns
     first_ns="$(grep -E '^nameserver[[:space:]]+' /etc/resolv.conf 2>/dev/null | head -1 | awk '{print $2}')"
     [[ "$first_ns" == "127.0.0.1" ]] && return 0
