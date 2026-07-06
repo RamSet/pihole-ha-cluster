@@ -25,8 +25,12 @@ bare_metal_found=false
 
 # Check for Docker Pi-hole container
 if command -v docker &>/dev/null; then
-    pihole_container="$(docker ps --filter ancestor=pihole/pihole --format '{{.Names}}' 2>/dev/null | head -1)"
-    [[ -z "$pihole_container" ]] && pihole_container="$(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -i pihole | head -1 | awk '{print $1}')"
+    # `|| true`: if the Docker daemon isn't running (e.g. docker installed but
+    # inactive on stock Pi OS), `docker ps` exits non-zero and pipefail+set -e
+    # would abort the whole installer. Degrade to "no container" and fall
+    # through to bare-metal detection instead.
+    pihole_container="$(docker ps --filter ancestor=pihole/pihole --format '{{.Names}}' 2>/dev/null | head -1 || true)"
+    [[ -z "$pihole_container" ]] && pihole_container="$(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -i pihole | head -1 | awk '{print $1}' || true)"
     [[ -n "$pihole_container" ]] && docker_found=true
 fi
 
