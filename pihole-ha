@@ -547,6 +547,39 @@ yielded_to() {
     echo "${parts%, }"
 }
 
+# --- DNS-only VIP failover helpers ---
+# Health for DNS failover deliberately excludes the Pi-hole API and DHCP: all we
+# need to know is whether the node can answer DNS (port 53). Requiring the API
+# would let a password-locked peer look "down" and trigger a false takeover.
+is_dns_healthy() {
+    local ip="$1"
+    [[ "${peer_ping[$ip]}" == "true" ]] && [[ "${peer_dns[$ip]}" == "true" ]]
+}
+
+# Priority election for the DNS VIP: hold it only if no higher-priority node is
+# answering DNS. (No manual-master concept here — that's DHCP-specific.)
+should_i_hold_vip() {
+    (( MY_IDX == 0 )) && return 0
+    local i
+    for (( i=0; i<MY_IDX; i++ )); do
+        is_dns_healthy "${NODES[$i]}" && return 1
+    done
+    return 0
+}
+
+build_dns_reason() {
+    if (( MY_IDX == 0 )); then
+        echo "Primary holding DNS VIP"
+        return
+    fi
+    local parts="" i
+    for (( i=0; i<MY_IDX; i++ )); do
+        [[ -n "$parts" ]] && parts+=" | "
+        parts+="${ROLES[$i]} ${NODES[$i]}: $(get_fail_reason "${NODES[$i]}")"
+    done
+    echo "$parts"
+}
+
 write_status() {
     local reason="${1:-}" gw="${2:-true}" dhcp
     dhcp="$(get_dhcp)"
@@ -574,6 +607,69 @@ write_status() {
     mv "$tmp" "$STATUS_FILE"
 }
 
+# DNS-only deployment cycle. DHCP is never touched. If a VIP is configured, the
+# highest-priority DNS-healthy node holds it, giving clients pointed at the VIP
+# real health-based DNS failover — the piece a plain two-server resolv.conf
+# can't do. With no VIP configured this is a no-op beyond monitoring + sync, so
+# existing DNS-only installs behave exactly as before.
+dns_only_vip_cycle() {
+    # No VIP, or HA kill-switch off → monitor only (original behavior).
+    if [[ "$VIP_ENABLED" != "true" || -z "$VIP" ]]; then
+        write_status "DNS-only (DHCP not managed)"
+        return
+    fi
+    if [[ "$HA_ENABLED" != "true" ]]; then
+        has_vip && remove_vip
+        write_status "DNS-only - HA disabled"
+        return
+    fi
+    # LAN outage: don't hold a VIP we can't serve on.
+    if ! ping -c1 -W"$HEALTH_TIMEOUT" "$GATEWAY" >/dev/null 2>&1; then
+        activate_count=0; deactivate_count=0
+        has_vip && remove_vip
+        write_status "DNS-only - LAN outage - gateway unreachable" "false"
+        return
+    fi
+
+    if should_i_hold_vip; then
+        deactivate_count=0
+        if has_vip; then
+            activate_count=0
+            write_status "DNS-only - holding VIP $VIP"
+            return
+        fi
+        (( activate_count++ )) || true
+        if (( activate_count >= ACTIVATE_AFTER )); then
+            local reason; reason="$(build_dns_reason)"
+            log_info "event=vip_claim mode=dns-only reason=\"$reason\""
+            if add_vip; then
+                notify "<b><font color='#2ecc71'>$ROLE DNS VIP ACQUIRED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> now holds VIP <b>$VIP</b> <br> <font color='#e74c3c'>$reason</font>" &
+            fi
+            activate_count=0
+            write_status "DNS-only - holding VIP $VIP"
+        else
+            write_status "DNS-only - claiming VIP ($activate_count/$ACTIVATE_AFTER)"
+        fi
+    else
+        activate_count=0
+        if ! has_vip; then
+            deactivate_count=0
+            write_status "DNS-only - standby"
+            return
+        fi
+        (( deactivate_count++ )) || true
+        if (( deactivate_count >= DEACTIVATE_AFTER )); then
+            log_info "event=vip_release mode=dns-only"
+            remove_vip
+            notify "<b><font color='#f39c12'>$ROLE DNS VIP RELEASED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> released VIP <b>$VIP</b>, yielding to higher-priority node" &
+            deactivate_count=0
+            write_status "DNS-only - standby"
+        else
+            write_status "DNS-only - releasing VIP ($deactivate_count/$DEACTIVATE_AFTER)"
+        fi
+    fi
+}
+
 # --- Main Loop ---
 log_info "event=startup ip=$LOCAL_IP priority=$PRIORITY interval=${CHECK_INTERVAL}s activate_after=$ACTIVATE_AFTER deactivate_after=$DEACTIVATE_AFTER"
 log_info "event=startup checks=\"ping dns:53 api dhcp\""
@@ -590,11 +686,11 @@ while true; do
     # Always run health checks so dashboard shows real peer state
     for ip in "${NODES[@]}"; do check_peer "$ip"; done
 
-    # DNS-only deployment: another server handles DHCP. Monitor peers and let
-    # config sync run, but never manage dhcp.active or the VIP — and stay that way
-    # regardless of the HA_ENABLED UI toggle.
+    # DNS-only deployment: another server handles DHCP. Never manage dhcp.active;
+    # run config sync and (if a VIP is configured) health-based VIP failover so
+    # clients pointed at the VIP get real DNS redundancy.
     if [[ "$DHCP_HA" != "true" ]]; then
-        write_status "DNS-only (DHCP not managed)"
+        dns_only_vip_cycle
         continue
     fi
 
