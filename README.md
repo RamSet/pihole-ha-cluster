@@ -7,14 +7,14 @@ DHCP high availability and config sync for a Pi-hole cluster. Automatic failover
 pihole-ha auto-detects how your network does DHCP and installs to match — it will **not** enable Pi-hole DHCP behind your back:
 
 - **DHCP-HA** — *Pi-hole is your DHCP server.* Full failover: a standby takes over DHCP if the primary dies, with an optional floating VIP. Selected when Pi-hole DHCP is already active (or when you choose it at install).
-- **DNS-only** — *your router or another server does DHCP.* pihole-ha **never touches DHCP**; it keeps your Pi-holes' config (blocklists, custom DNS, FTL settings) in sync and monitors peer health — redundant DNS without any DHCP failover.
+- **DNS-only** — *your router or another server does DHCP.* pihole-ha **never touches DHCP**; it keeps your Pi-holes' config (blocklists, custom DNS, FTL settings) in sync and monitors peer health. If you configure a VIP, it also floats that IP to whichever node is answering DNS — so clients pointed at the VIP get real health-based DNS failover, not just two static DNS servers that stall on a dead one.
 
 At install it checks whether Pi-hole DHCP is active, probes the LAN for another DHCP server, inherits the mode from the cluster when joining one, and asks if it's ambiguous (defaulting to the safe **DNS-only**). So installing on a DNS-only network won't create a second, conflicting DHCP server.
 
 ## What It Does
 
 - **DHCP Failover** — If the primary Pi-hole goes down, a secondary node automatically takes over DHCP within ~40-80 seconds. When the primary recovers, the secondary yields back. Clients never lose DHCP.
-- **Virtual IP (VIP)** — Optional floating IP held by the active DHCP node. When enabled, clients get the VIP as their only DNS server and DHCP server identifier, so renewals always reach the right node. When disabled, clients get all node IPs as DNS servers instead.
+- **Virtual IP (VIP)** — Optional floating IP. In DHCP-HA mode it follows the active DHCP node (clients get it as their DNS server and DHCP server-id, so renewals always reach the right node). In DNS-only mode it follows the highest-priority node that's answering DNS, giving health-based DNS failover. When disabled, clients get all node IPs as DNS servers instead.
 - **Config Sync** — The sync primary builds a tarball of gravity DB, DHCP static leases, custom DNS records, and FTL settings. Standby nodes pull it over HTTP every 15 minutes. No SSH keys needed.
 - **Manual DHCP Master Override** — Force any node to be the DHCP server with one click. The others yield automatically. If the designated master goes down, remaining nodes fall back to priority order.
 - **HA Kill-Switch** — Disable all DHCP failover, health checks, and VIP management cluster-wide with one toggle. Propagates to all nodes automatically.
@@ -87,10 +87,11 @@ sudo ./setup.sh
 1. **Scans the subnet** in parallel (~1 second) for existing pihole-ha nodes on port 8887
 2. **Auto-detects role** — if an existing cluster is found, this node joins as the next standby; if no cluster exists, this node becomes PRIMARY
 3. **Preserves cluster priority** — discovered nodes keep their existing order, the new node is appended last
-4. **Detects deployment mode** (DHCP-HA vs DNS-only) and, for DHCP-HA, **asks about VIP** — requires typing "yes" explicitly to enable. It never enables Pi-hole DHCP on a DNS-only network.
-5. **Registers with the cluster** — calls `/api/nodes/join` on each existing node so they immediately learn about the new node
-6. **Installs and starts services** — scripts, systemd units (bare metal) or Docker compose stack
-7. **Injects the HA page** into Pi-hole's admin UI
+4. **Detects deployment mode** (DHCP-HA vs DNS-only) and **asks about a VIP** (optional in both modes) — requires typing "yes" explicitly to enable. It never enables Pi-hole DHCP on a DNS-only network.
+5. **Asks whether to pin system DNS to `127.0.0.1`** (recommended, so the node always resolves independent of the VIP) — decline if your resolver lives elsewhere and you don't want `/etc/resolv.conf` touched. Recorded as `PIN_DNS` and preserved across updates.
+6. **Registers with the cluster** — calls `/api/nodes/join` on each existing node so they immediately learn about the new node
+7. **Installs and starts services** — scripts, systemd units (bare metal) or Docker compose stack
+8. **Injects the HA page** into Pi-hole's admin UI
 
 For manual Docker setup without the installer, see [Docker README](docker/README.md).
 
@@ -113,6 +114,8 @@ GATEWAY=192.168.1.1
 VIP=192.168.1.123
 VIP_ENABLED=true
 HA_ENABLED=true
+DHCP_HA=true
+PIN_DNS=true
 HA_NODES=192.168.1.3,192.168.1.5,192.168.1.55,192.168.1.81:8081
 DHCP_START=192.168.1.11
 DHCP_END=192.168.1.150
@@ -125,6 +128,8 @@ Nodes in `HA_NODES` can optionally include a `:PORT` suffix for the Pi-hole web 
 | `CONFIG_VERSION` | integer | `1` | Config format version (warns on mismatch, never blocks) |
 | `VIP_ENABLED` | `true`/`false` | `true` | Enable floating VIP management |
 | `HA_ENABLED` | `true`/`false` | `true` | Master kill-switch for all HA functions |
+| `DHCP_HA` | `true`/`false` | `true` | `true` = DHCP-HA mode (manage DHCP + VIP). `false` = DNS-only (never touch DHCP; VIP follows the DNS-healthy primary if set) |
+| `PIN_DNS` | `true`/`false` | `true` | Pin this host's resolver to `127.0.0.1`. `false` = never touch system DNS |
 | `HA_NODES` | CSV | *(required)* | Node IPs in priority order. Format: `IP` or `IP:PORT` |
 
 ## How It Works
@@ -183,7 +188,7 @@ The setting is live-reloaded every check cycle (10s) — no service restart need
 
 ### Virtual IP (VIP)
 
-The VIP is an optional floating IP address that moves between nodes with DHCP mastership. Controlled by `VIP_ENABLED` in `nodes.conf`.
+The VIP is an optional floating IP address, controlled by `VIP_ENABLED` in `nodes.conf`. In **DHCP-HA** mode it follows DHCP mastership (and its DHCP options are written to `09-pihole-ha.conf`, below). In **DNS-only** mode it follows the highest-priority node that's answering DNS, giving clients pointed at the VIP health-based DNS failover — no DHCP options are written; you point clients at the VIP via your own DHCP server. The UI toggle is driven by the DHCP master (DHCP-HA) or the primary node (DNS-only).
 
 | `VIP_ENABLED` | DHCP options written to `09-pihole-ha.conf` | Behavior |
 |---------------|----------------------------------------------|----------|
@@ -305,6 +310,7 @@ The HA page is injected into Pi-hole's sidebar under **Tools > HA Cluster**. A s
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/status` | GET | Node status JSON (health checks, DHCP state, peers) |
+| `/api/version` | GET | Installed version + latest upstream version + `update_available` flag |
 | `/api/dhcp/master-config` | GET | Current DHCP master override setting |
 | `/api/dhcp/master?ip=<auto\|ip>` | GET | Set DHCP master (propagates to all nodes) |
 | `/api/sync/config` | GET | Sync configuration (enabled, components, primary) |
@@ -433,7 +439,7 @@ curl "http://localhost:8887/api/nodes/leave?node=192.168.1.55"
 
 ## Updating
 
-Pull the latest and refresh the installed code in place — config and cluster membership are left untouched:
+The HA Cluster panel shows the installed version and flags when a newer release is available (checked once a day against this repo). To update, pull the latest and refresh the installed code in place — config and cluster membership (including your `PIN_DNS` choice) are left untouched:
 
 ```bash
 cd pihole-ha && git pull
