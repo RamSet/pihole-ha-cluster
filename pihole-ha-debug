@@ -1,0 +1,121 @@
+#!/bin/bash
+# pihole-ha-debug — collect a diagnostics bundle for troubleshooting.
+#
+#   sudo pihole-ha-debug            # print to screen (copy/paste when asking for help)
+#   sudo pihole-ha-debug > ha.txt   # save to a file to attach
+#
+# Passwords (auth.conf) and Pushover tokens (notify.conf) are redacted.
+# Read-only: this collects state, it changes nothing.
+
+CONF_DIR="/etc/pihole-ha"
+RUN_DIR="/run/pihole-ha"
+SHARE_DIR="/usr/local/share/pihole-ha"
+
+_hr()  { printf '\n===== %s =====\n' "$1"; }
+_run() { printf '$ %s\n' "$*"; "$@" 2>&1; printf '\n'; }
+_have(){ command -v "$1" >/dev/null 2>&1; }
+
+# Redact secrets from a config file: PASS_*, PO_TOKEN, PO_USER, WEBPASSWORD, api_password
+_redact() {
+    sed -E \
+        -e 's/^(PASS_[^=]*=).*/\1<redacted>/' \
+        -e 's/^(PO_TOKEN=).*/\1<redacted>/' \
+        -e 's/^(PO_USER=).*/\1<redacted>/' \
+        -e 's/([Pp]assword[^=:]*[=:]).*/\1<redacted>/g'
+}
+
+printf 'Pi-hole HA diagnostics\n'
+printf 'generated: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null)"
+
+_hr "VERSION / HOST"
+printf 'pihole-ha version: %s\n' "$(cat "$SHARE_DIR/VERSION" 2>/dev/null || echo unknown)"
+printf 'hostname:          %s\n' "$(hostname 2>/dev/null)"
+printf 'local IPs:         %s\n' "$(hostname -I 2>/dev/null)"
+_have pihole-FTL && printf 'pihole-FTL:        %s\n' "$(pihole-FTL --version 2>/dev/null | head -1)"
+printf 'uid:               %s\n' "$(id -u) ($(id -un 2>/dev/null))"
+[[ "$(id -u)" -ne 0 ]] && printf '  NOTE: not root — some fields will be blank. Re-run with sudo.\n'
+
+_hr "CONFIG (secrets redacted)"
+for f in nodes.conf sync.conf master.conf; do
+    printf '%s\n' "--- $f ---"
+    [[ -f "$CONF_DIR/$f" ]] && _redact < "$CONF_DIR/$f" || echo "(missing)"
+    printf '\n'
+done
+printf '%s\n' "--- auth.conf (keys only) ---"
+[[ -f "$CONF_DIR/auth.conf" ]] && sed -E 's/=.*/=<redacted>/' "$CONF_DIR/auth.conf" || echo "(none)"
+printf '\n'; printf '%s\n' "--- notify.conf (redacted) ---"
+[[ -f "$CONF_DIR/notify.conf" ]] && _redact < "$CONF_DIR/notify.conf" || echo "(none)"
+
+_hr "SERVICES"
+if _have systemctl; then
+    for s in pihole-ha pihole-ha-dash pihole-FTL; do
+        printf '%-16s %s\n' "$s:" "$(systemctl is-active "$s" 2>/dev/null) / $(systemctl is-enabled "$s" 2>/dev/null)"
+    done
+else
+    echo "(no systemd — Docker deployment? check container logs)"
+fi
+
+_hr "CLUSTER STATUS (from this node's daemon)"
+if [[ -f "$RUN_DIR/status.json" ]]; then
+    if _have python3; then python3 -m json.tool "$RUN_DIR/status.json" 2>/dev/null || cat "$RUN_DIR/status.json"
+    else cat "$RUN_DIR/status.json"; fi
+else
+    echo "(no status.json — daemon may not be running)"
+fi
+
+_hr "PI-HOLE DNS / DHCP CONFIG"
+if _have pihole-FTL; then
+    for k in dns.listeningMode webserver.port dhcp.active dhcp.start dhcp.end dhcp.router; do
+        printf '%-26s %s\n' "$k" "$(pihole-FTL --config "$k" 2>/dev/null)"
+    done
+    printf 'dns.upstreams              %s\n' "$(pihole-FTL --config dns.upstreams 2>/dev/null)"
+    printf 'dhcp.hosts (static leases) %s\n' "$(pihole-FTL --config dhcp.hosts 2>/dev/null)"
+fi
+
+_hr "VIP / NETWORK (does FTL answer on the VIP?)"
+VIP="$(sed -n 's/^VIP=//p' "$CONF_DIR/nodes.conf" 2>/dev/null)"
+printf 'configured VIP: %s\n\n' "${VIP:-<none>}"
+_run ip -4 addr show
+printf 'listeners on :53 (FTL should be bound so it answers on the VIP):\n'
+if _have ss; then ss -lntup 2>/dev/null | grep -E ':53\b' || echo "(nothing on :53?!)"
+elif _have netstat; then netstat -lntup 2>/dev/null | grep -E ':53\b'; fi
+printf '\n'
+if _have dig; then
+    printf 'dig @127.0.0.1 (local FTL):\n'; dig +short +timeout=3 +tries=1 @127.0.0.1 pi-hole.net A 2>&1 | head -3; printf '\n'
+    if [[ -n "$VIP" ]]; then
+        printf 'dig @%s (the VIP — if this hangs/fails but 127.0.0.1 works, FTL is not serving the VIP):\n' "$VIP"
+        dig +short +timeout=3 +tries=1 @"$VIP" pi-hole.net A 2>&1 | head -3; printf '\n'
+    fi
+else
+    echo "(dig not installed — install dnsutils/bind-tools to test resolution)"
+fi
+
+_hr "DNSMASQ FILES pihole-ha MANAGES"
+for f in /etc/dnsmasq.d/09-pihole-ha.conf /etc/dnsmasq.d/10-pihole-ha-hook.conf; do
+    printf '%s\n' "--- $f ---"; [[ -f "$f" ]] && cat "$f" || echo "(none)"; printf '\n'
+done
+printf '%s\n' "--- /etc/resolv.conf (this host's own resolver) ---"; cat /etc/resolv.conf 2>/dev/null
+
+_hr "PEER REACHABILITY (:8887 API)"
+NODES="$(sed -n 's/^HA_NODES=//p' "$CONF_DIR/nodes.conf" 2>/dev/null | tr ',' ' ')"
+for n in $NODES; do
+    ip="${n%%:*}"
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 "http://$ip:8887/api/status" 2>/dev/null)"
+    printf '%-18s /api/status -> %s\n' "$ip" "${code:-no-response}"
+done
+
+_hr "RECENT LOGS (last 40 lines each)"
+if _have journalctl; then
+    for s in pihole-ha pihole-ha-dash; do
+        printf '%s\n' "--- journalctl -u $s ---"
+        journalctl -u "$s" -n 40 --no-pager 2>/dev/null || echo "(no logs)"
+        printf '\n'
+    done
+    printf '%s\n' "--- errors/warnings across pihole-ha units (last 24h) ---"
+    journalctl -u pihole-ha -u pihole-ha-dash --since "24 hours ago" -p warning --no-pager 2>/dev/null | tail -40 || true
+else
+    echo "(no journalctl — on Docker, use: docker compose logs pihole-ha)"
+fi
+
+_hr "END"
+printf 'Paste everything above when reporting an issue. Secrets were redacted.\n'

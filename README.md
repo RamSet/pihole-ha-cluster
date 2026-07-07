@@ -259,6 +259,7 @@ The HA page is injected into Pi-hole's sidebar under **Tools > HA Cluster**. A s
 | `pihole-ha-sync` | Build sync payload (primary only; checks every 15 min, rebuilds only on change) |
 | `pihole-ha-sync-pull` | Pull sync payload (standbys only; checks every 15 min, pulls only on change) |
 | `pihole-ha-inject` | Inject HA page into Pi-hole web UI (bare metal) |
+| `pihole-ha-debug` | Diagnostics collector — `sudo pihole-ha-debug` prints a redacted support bundle |
 | `pihole-ha-platform` | Platform abstraction layer (`/usr/local/lib/pihole-ha/`) — detects systemd vs Docker, provides unified functions for FTL restart, sync timer management, etc. |
 
 ### Pi-hole Admin Integration (`/usr/local/share/pihole-ha/`)
@@ -362,6 +363,16 @@ journalctl -u pihole-ha-sync-pull
 ```
 
 ## Troubleshooting
+
+**Start here:** run the diagnostics collector and read (or share) its output — it gathers version, config (secrets redacted), service status, cluster/peer health, Pi-hole DNS/DHCP settings, VIP state, what FTL is listening on, `dig` tests against localhost **and** the VIP, and recent logs:
+
+```bash
+sudo pihole-ha-debug              # print to screen
+sudo pihole-ha-debug > ha.txt     # save to a file to attach when asking for help
+```
+
+A common failover gotcha it surfaces: if `dig @127.0.0.1` resolves but `dig @<VIP>` does not, FTL isn't answering on the VIP — check `dns.listeningMode` and that the VIP is on the interface.
+
 
 **Cluster API not responding on port 8887**
 ```bash
