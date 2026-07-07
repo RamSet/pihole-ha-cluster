@@ -947,17 +947,20 @@ $(function () {
             dataType: "json"
         })
         .done(function (d) {
-            if (!d || !d.local) return;
-            $("#ha-version-local").text("v" + d.local);
+            if (!d) return;
+            // The version number is rendered server-side (always present); only
+            // overwrite it with a valid value from the API, never with "unknown".
+            if (d.local && d.local !== "unknown") $("#ha-version-local").text("v" + d.local);
             if (d.update_available && d.latest) {
                 $("#ha-version-update").html(
                     ' &middot; <span style="color:#f0ad4e"><i class="fa fa-arrow-circle-up"></i> ' +
                     'update available (v' + escapeHtml(d.latest) + ')</span> &mdash; ' +
                     'run <code>sudo ./install.sh --update</code>'
                 );
-            } else {
+            } else if (d.latest) {
                 $("#ha-version-update").html(' &middot; <span style="color:#00a65a">up to date</span>');
             }
+            // check disabled/unreachable (no latest): leave suffix empty — version still shows
         });
     }
 

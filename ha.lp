@@ -14,6 +14,15 @@ local function esc(s)
     }))
 end
 
+-- Installed version, read server-side so the badge always shows it even if the
+-- async update-check can't reach the API (e.g. during an update/restart).
+local ha_version = "unknown"
+local vf = io.open("/usr/local/share/pihole-ha/VERSION", "r")
+if vf then
+    local v = vf:read("*l"); vf:close()
+    if v then ha_version = v:gsub("%s+", "") end
+end
+
 -- Read nodes.conf for dynamic node list
 local ha_nodes, ha_gateway, ha_vip = {}, "", ""
 local ha_vip_enabled = true
@@ -644,7 +653,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
 
 <!-- Version / update indicator (populated by ha.js from /api/version) -->
 <div id="ha-version" style="text-align:center;color:#999;font-size:12px;margin:10px 0 4px">
-    Pi-hole HA <span id="ha-version-local">&hellip;</span><span id="ha-version-update"></span>
+    Pi-hole HA <span id="ha-version-local">v<?=ha_version?></span><span id="ha-version-update"></span>
 </div>
 
 <div id="ha-config" style="display:none"
