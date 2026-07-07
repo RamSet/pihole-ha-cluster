@@ -390,19 +390,19 @@ ensure_iface() {
 add_vip() {
     [[ "$VIP_ENABLED" != "true" ]] && return 0
     if ! ensure_iface; then
-        notify "<b><font color='#e74c3c'>VIP CLAIM FAILED</font></b> <br> $LOCAL_IP: no network interface" &
+        notify "<b><font color='#e74c3c'>VIP CLAIM FAILED</font></b> <br> $LOCAL_IP: no network interface" "vip_claim_failed" &
         return 1
     fi
     has_vip && return 0
     local err
     err="$(ip addr add "$VIP/32" dev "$IFACE" 2>&1)" || {
         log_error "event=vip_add status=failed iface=$IFACE error=\"$err\""
-        notify "<b><font color='#e74c3c'>VIP CLAIM FAILED</font></b> <br> $LOCAL_IP iface=$IFACE <br> $err" &
+        notify "<b><font color='#e74c3c'>VIP CLAIM FAILED</font></b> <br> $LOCAL_IP iface=$IFACE <br> $err" "vip_claim_failed" &
         return 1
     }
     if ! has_vip; then
         log_error "event=vip_add status=verify_failed iface=$IFACE"
-        notify "<b><font color='#e74c3c'>VIP CLAIM VERIFY FAILED</font></b> <br> $LOCAL_IP: kernel did not bind $VIP on $IFACE" &
+        notify "<b><font color='#e74c3c'>VIP CLAIM VERIFY FAILED</font></b> <br> $LOCAL_IP: kernel did not bind $VIP on $IFACE" "vip_claim_failed" &
         return 1
     fi
     if command -v arping &>/dev/null; then
@@ -694,12 +694,13 @@ dns_only_vip_cycle() {
 # --- Main Loop ---
 log_info "event=startup ip=$LOCAL_IP priority=$PRIORITY interval=${CHECK_INTERVAL}s activate_after=$ACTIVATE_AFTER deactivate_after=$DEACTIVATE_AFTER"
 log_info "event=startup checks=\"ping dns:53 api dhcp\""
-notify "<b><font color='#3498db'>$ROLE</font> DHCP Monitor Started</b> <br> <font color='#95a5a6'>$LOCAL_IP</font> (P<b>$PRIORITY</b>) <br> Order: ${NODES[*]} <br> VIP: $VIP ($([[ "$VIP_ENABLED" == "true" ]] && echo enabled || echo disabled)) <br> HA: $([[ "$HA_ENABLED" == "true" ]] && echo enabled || echo disabled)" &
+notify "<b><font color='#3498db'>$ROLE</font> DHCP Monitor Started</b> <br> <font color='#95a5a6'>$LOCAL_IP</font> (P<b>$PRIORITY</b>) <br> Order: ${NODES[*]} <br> VIP: $VIP ($([[ "$VIP_ENABLED" == "true" ]] && echo enabled || echo disabled)) <br> HA: $([[ "$HA_ENABLED" == "true" ]] && echo enabled || echo disabled)" "daemon_lifecycle" &
 
 while true; do
     sleep "$CHECK_INTERVAL"
-    load_auth      # reload passwords in case user saved new ones via web UI
-    load_master    # reload DHCP master override (live config changes)
+    load_auth         # reload passwords in case user saved new ones via web UI
+    load_notify_conf  # reload notify settings so per-kind mute toggles take effect live
+    load_master       # reload DHCP master override (live config changes)
     if reload_vip_conf; then  # only update DNS option when VIP config actually changes
         ensure_dns_option
     fi
@@ -761,10 +762,10 @@ while true; do
                     if [[ "${peer_dhcp[$_nip]}" == "true" ]]; then _st+="<font color='#3fb950'>dhcp</font>"; elif [[ "${peer_dhcp[$_nip]}" == "false" ]]; then _st+="<font color='#d29922'>dhcp:off</font>"; else _st+="<font color='#f85149'>dhcp</font>"; fi
                     detail+=" <br> <font color='#8b949e'>${ROLES[$_ni]}</font> $_nip: $_st"
                 done
-                notify "<b><font color='#2ecc71'>$ROLE DHCP ACTIVATED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> now serving DHCP${vip_msg} <br> <font color='#e74c3c'>$reason</font>${detail}" &
+                notify "<b><font color='#2ecc71'>$ROLE DHCP ACTIVATED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> now serving DHCP${vip_msg} <br> <font color='#e74c3c'>$reason</font>${detail}" "dhcp_activated" &
                 log_info "event=dhcp_activate status=ok"
             else
-                notify "<b><font color='#e74c3c'>$ROLE DHCP ACTIVATION FAILED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> could not enable DHCP" &
+                notify "<b><font color='#e74c3c'>$ROLE DHCP ACTIVATION FAILED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> could not enable DHCP" "dhcp_failover_failed" &
                 log_error "event=dhcp_activate status=failed"
             fi
             activate_count=0
@@ -804,10 +805,10 @@ while true; do
                     if [[ "${peer_dhcp[$_nip]}" == "true" ]]; then _st+="<font color='#3fb950'>dhcp</font>"; elif [[ "${peer_dhcp[$_nip]}" == "false" ]]; then _st+="<font color='#d29922'>dhcp:off</font>"; else _st+="<font color='#f85149'>dhcp</font>"; fi
                     detail+=" <br> <font color='#8b949e'>${ROLES[$_ni]}</font> $_nip: $_st"
                 done
-                notify "<b><font color='#f39c12'>$ROLE DHCP DEACTIVATED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> yielding to <b><font color='#2ecc71'>$yielded_for</font></b>${vip_rel}${detail}" &
+                notify "<b><font color='#f39c12'>$ROLE DHCP DEACTIVATED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> yielding to <b><font color='#2ecc71'>$yielded_for</font></b>${vip_rel}${detail}" "dhcp_deactivated" &
                 log_info "event=dhcp_deactivate status=ok yielded_to=\"$yielded_for\""
             else
-                notify "<b><font color='#e74c3c'>$ROLE DHCP DEACTIVATION FAILED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> could not disable DHCP" &
+                notify "<b><font color='#e74c3c'>$ROLE DHCP DEACTIVATION FAILED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> could not disable DHCP" "dhcp_failover_failed" &
                 log_error "event=dhcp_deactivate status=failed"
             fi
             deactivate_count=0

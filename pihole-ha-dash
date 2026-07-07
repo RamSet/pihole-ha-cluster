@@ -717,6 +717,7 @@ if [[ "${1:-}" == "--handle" ]]; then
             _NOTIFY_CONF="/etc/pihole-ha/notify.conf"
             _PO_ENABLED=false _PO_USER="" _PO_TOKEN="" _PO_TITLE="pihole-ha"
             _DHCP_NOTIFY_ENABLED=true _DHCP_NOTIFY_IGNORED_MACS=""
+            _MUTED_TAGS=""
             if [[ -f "$_NOTIFY_CONF" ]]; then
                 while IFS='=' read -r _nk _nv; do
                     [[ -z "$_nk" || "$_nk" == \#* ]] && continue
@@ -727,15 +728,84 @@ if [[ "${1:-}" == "--handle" ]]; then
                         PO_TITLE)                 _PO_TITLE="$_nv" ;;
                         DHCP_NOTIFY_ENABLED)      _DHCP_NOTIFY_ENABLED="$_nv" ;;
                         DHCP_NOTIFY_IGNORED_MACS) _DHCP_NOTIFY_IGNORED_MACS="$_nv" ;;
+                        MUTED_TAGS)               _MUTED_TAGS="$_nv" ;;
                     esac
                 done < "$_NOTIFY_CONF"
             fi
             send_headers "200 OK" "application/json"
             _has_user="false"; [[ -n "$_PO_USER" ]] && _has_user="true"
             _has_token="false"; [[ -n "$_PO_TOKEN" ]] && _has_token="true"
-            printf '{"enabled":%s,"has_user":%s,"has_token":%s,"title":"%s","dhcp_enabled":%s,"dhcp_ignored_macs":"%s"}\n' \
+            # Render MUTED_TAGS (comma-separated) as a JSON array.
+            _tags_json='[]'
+            if [[ -n "$_MUTED_TAGS" ]]; then
+                _tags_json='['; _first=1
+                IFS=',' read -ra _tagarr <<< "$_MUTED_TAGS"
+                for _t in "${_tagarr[@]}"; do
+                    _t="${_t# }"; _t="${_t% }"
+                    [[ -z "$_t" ]] && continue
+                    (( _first )) && _first=0 || _tags_json+=','
+                    _tags_json+="\"$_t\""
+                done
+                _tags_json+=']'
+            fi
+            printf '{"enabled":%s,"has_user":%s,"has_token":%s,"title":"%s","dhcp_enabled":%s,"dhcp_ignored_macs":"%s","muted_tags":%s,"known_tags":["dhcp_new_device","dhcp_activated","dhcp_deactivated","dhcp_failover_failed","vip_claim_failed","sync_role_change","daemon_lifecycle","sync_payload_built","sync_payload_pulled"]}\n' \
                 "$_PO_ENABLED" "$_has_user" "$_has_token" "$_PO_TITLE" \
-                "$_DHCP_NOTIFY_ENABLED" "$_DHCP_NOTIFY_IGNORED_MACS"
+                "$_DHCP_NOTIFY_ENABLED" "$_DHCP_NOTIFY_IGNORED_MACS" "$_tags_json"
+            ;;
+        /api/notify/mute*)
+            # Set MUTED_TAGS (comma-separated) from the 'tags' query param,
+            # filtered against a known allow-list, then propagate to peers.
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _NOTIFY_CONF="/etc/pihole-ha/notify.conf"
+            _nm_tags="" _nm_propagated=""
+            IFS='&' read -ra _mparams <<< "$_qs"
+            for _mp in "${_mparams[@]}"; do
+                case "$_mp" in
+                    tags=*)       _nm_tags="${_mp#tags=}" ;;
+                    propagated=*) _nm_propagated="${_mp#propagated=}" ;;
+                esac
+            done
+            _nm_tags="$(printf '%b' "${_nm_tags//%/\\x}")"
+            _known_tags="dhcp_new_device dhcp_activated dhcp_deactivated dhcp_failover_failed vip_claim_failed sync_role_change daemon_lifecycle sync_payload_built sync_payload_pulled"
+            _cleaned=""
+            IFS=',' read -ra _tarr <<< "$_nm_tags"
+            for _t in "${_tarr[@]}"; do
+                _t="${_t# }"; _t="${_t% }"
+                [[ -z "$_t" ]] && continue
+                if [[ " $_known_tags " == *" $_t "* ]]; then
+                    [[ -n "$_cleaned" ]] && _cleaned+=","
+                    _cleaned+="$_t"
+                fi
+            done
+            mkdir -p /etc/pihole-ha
+            if [[ -f "$_NOTIFY_CONF" ]]; then
+                if grep -q '^MUTED_TAGS=' "$_NOTIFY_CONF"; then
+                    sed -i "s|^MUTED_TAGS=.*|MUTED_TAGS=$_cleaned|" "$_NOTIFY_CONF"
+                else
+                    printf 'MUTED_TAGS=%s\n' "$_cleaned" >> "$_NOTIFY_CONF"
+                fi
+            else
+                cat > "$_NOTIFY_CONF" <<NEOF
+# Pushover notifications
+PO_ENABLED=false
+PO_USER=
+PO_TOKEN=
+PO_TITLE=pihole-ha
+DHCP_NOTIFY_ENABLED=true
+DHCP_NOTIFY_IGNORED_MACS=
+MUTED_TAGS=$_cleaned
+NEOF
+            fi
+            if [[ "$_nm_propagated" != "1" ]]; then
+                LOCAL_IP="$(platform_get_local_ip)"
+                _enc_tags="$(_urlencode "$_cleaned")"
+                for _node in "${_HA_NODES[@]}"; do
+                    [[ "$_node" == "$LOCAL_IP" ]] && continue
+                    _propagate "$_node" "/api/notify/mute?tags=$_enc_tags&propagated=1" &
+                done
+            fi
+            printf '{"ok":true,"muted_tags":"%s"}\n' "$_cleaned"
             ;;
         /api/notify/save*)
             _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
@@ -763,11 +833,18 @@ if [[ "${1:-}" == "--handle" ]]; then
             # Validate booleans
             [[ "$_ns_enabled" != "true" && "$_ns_enabled" != "false" ]] && _ns_enabled="false"
             [[ "$_ns_dhcp_enabled" != "true" && "$_ns_dhcp_enabled" != "false" ]] && _ns_dhcp_enabled="true"
-            # Preserve existing credentials if not supplied
-            if [[ -z "$_ns_user" || -z "$_ns_token" ]] && [[ -f "$_NOTIFY_CONF" ]]; then
+            # Preserve existing credentials (if not supplied) and MUTED_TAGS
+            # — the per-kind mute list is owned by /api/notify/mute and must
+            # survive an unrelated save of the Pushover settings.
+            _ns_muted=""
+            if [[ -f "$_NOTIFY_CONF" ]]; then
                 _ex_user="" _ex_token=""
                 while IFS='=' read -r _ek _ev; do
-                    case "$_ek" in PO_USER) _ex_user="$_ev" ;; PO_TOKEN) _ex_token="$_ev" ;; esac
+                    case "$_ek" in
+                        PO_USER)    _ex_user="$_ev" ;;
+                        PO_TOKEN)   _ex_token="$_ev" ;;
+                        MUTED_TAGS) _ns_muted="$_ev" ;;
+                    esac
                 done < "$_NOTIFY_CONF"
                 [[ -z "$_ns_user" ]] && _ns_user="$_ex_user"
                 [[ -z "$_ns_token" ]] && _ns_token="$_ex_token"
@@ -781,6 +858,7 @@ PO_TOKEN=$_ns_token
 PO_TITLE=${_ns_title:-pihole-ha}
 DHCP_NOTIFY_ENABLED=$_ns_dhcp_enabled
 DHCP_NOTIFY_IGNORED_MACS=$_ns_dhcp_macs
+MUTED_TAGS=$_ns_muted
 NEOF
             # Propagate to peers (unless already a propagated call)
             if [[ "$_ns_propagated" != "1" ]]; then

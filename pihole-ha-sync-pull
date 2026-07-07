@@ -363,7 +363,7 @@ echo "$(( _cur_gen + 1 ))" > "$GEN_FILE"
 
 if [[ "$APPLIED_SOMETHING" == "true" ]]; then
     log_info "event=pull_complete status=applied primary=$SYNC_PRIMARY ts=$REMOTE_TS"
-    notify "<b><font color='#3498db'>Pi-hole Config Synced</font></b> <br> $MY_ROLE ($LOCAL_IP) pulled from $SYNC_PRIMARY <br> <font color='#95a5a6'>$REMOTE_TS</font>"
+    notify "<b><font color='#3498db'>Pi-hole Config Synced</font></b> <br> $MY_ROLE ($LOCAL_IP) pulled from $SYNC_PRIMARY <br> <font color='#95a5a6'>$REMOTE_TS</font>" "sync_payload_pulled"
 else
     log_info "event=pull_complete status=unchanged ts=$REMOTE_TS"
 fi

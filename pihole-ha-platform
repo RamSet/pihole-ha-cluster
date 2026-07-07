@@ -34,7 +34,7 @@ is_valid_ip() {
 # PO_ENABLED / PO_USER / PO_TOKEN / PO_TITLE. Safe when the file is absent.
 load_notify_conf() {
     local conf="${1:-/etc/pihole-ha/notify.conf}"
-    PO_ENABLED="false"; PO_USER=""; PO_TOKEN=""; PO_TITLE="pihole-ha"
+    PO_ENABLED="false"; PO_USER=""; PO_TOKEN=""; PO_TITLE="pihole-ha"; PO_MUTED_TAGS=""
     [[ -f "$conf" ]] || return 0
     local key val
     while IFS='=' read -r key val; do
@@ -44,8 +44,25 @@ load_notify_conf() {
             PO_USER)    PO_USER="$val" ;;
             PO_TOKEN)   PO_TOKEN="$val" ;;
             PO_TITLE)   PO_TITLE="$val" ;;
+            MUTED_TAGS) PO_MUTED_TAGS="$val" ;;
         esac
     done < "$conf"
+}
+
+# Per-kind mute helper. Returns 0 (muted) when $1 is a non-empty tag that
+# appears in PO_MUTED_TAGS (comma-separated). Untagged calls always pass.
+# Relies on the caller having loaded notify.conf this run; the daemon
+# re-reads it each loop so a dashboard toggle takes effect within seconds.
+_notify_tag_muted() {
+    local tag="${1:-}"
+    [[ -z "$tag" ]] && return 1
+    [[ -z "${PO_MUTED_TAGS:-}" ]] && return 1
+    local IFS=',' t
+    for t in $PO_MUTED_TAGS; do
+        t="${t# }"; t="${t% }"
+        [[ "$t" == "$tag" ]] && return 0
+    done
+    return 1
 }
 
 # Send a Pushover notification (synchronous). Resolves api.pushover.net
@@ -53,6 +70,15 @@ load_notify_conf() {
 # so notifications keep working during failover when local DNS is flapping.
 # Callers in long-running daemons should background with `notify "..." &`.
 notify() {
+    # Usage: notify "<message>" [tag]
+    # If a tag is given and it is in PO_MUTED_TAGS, the send is silently
+    # dropped so the dashboard's per-kind mute toggles take effect.
+    # Untagged callers always fire.
+    local _msg="$1" _tag="${2:-}"
+    if _notify_tag_muted "$_tag"; then
+        command -v log_info >/dev/null 2>&1 && log_info "event=notify_muted tag=$_tag"
+        return 0
+    fi
     [[ "$PO_ENABLED" == "true" && -n "$PO_USER" && -n "$PO_TOKEN" ]] || return 0
     local po_ip="" src="" peer
     po_ip="$(dig +short +timeout=2 +tries=1 @127.0.0.1 api.pushover.net A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | tail -1)"
@@ -78,7 +104,7 @@ notify() {
         -X POST "https://api.pushover.net/1/messages.json" \
         -d "token=$PO_TOKEN" -d "user=$PO_USER" \
         -d "html=1" -d "title=$PO_TITLE" \
-        --data-urlencode "message=$*" >/dev/null 2>&1
+        --data-urlencode "message=$_msg" >/dev/null 2>&1
 }
 
 platform_get_local_ip() {

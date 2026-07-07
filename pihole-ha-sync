@@ -319,4 +319,4 @@ rm -rf "$STAGING_DIR"
 echo "$CURRENT" > "$HASH_FILE"
 
 log_info "event=build_complete size=${PAYLOAD_SIZE} hash=$CURRENT gravity=$SYNC_GRAVITY dhcp=$SYNC_DHCP dns=$SYNC_DNS settings=$SYNC_SETTINGS adlists=true"
-notify "<b><font color='#3498db'>Pi-hole Sync Payload Ready</font></b> <br> Built on $MY_ROLE <font color='#95a5a6'>($LOCAL_IP)</font> <br> Config exported for standby nodes <br> <font color='#95a5a6'>${PAYLOAD_HUMAN}</font>"
+notify "<b><font color='#3498db'>Pi-hole Sync Payload Ready</font></b> <br> Built on $MY_ROLE <font color='#95a5a6'>($LOCAL_IP)</font> <br> Config exported for standby nodes <br> <font color='#95a5a6'>${PAYLOAD_HUMAN}</font>" "sync_payload_built"
