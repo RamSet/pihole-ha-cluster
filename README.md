@@ -33,7 +33,7 @@ At install it checks whether Pi-hole DHCP is active, probes the LAN for another 
 - Debian/Ubuntu-based OS (uses `apt`, `systemctl`)
 - Network connectivity between all nodes on port 8887 (HTTP)
 - Root access for installation
-- Packages (auto-installed): `socat`, `curl`, `netcat-openbsd`, `arping`
+- Packages (auto-installed): `socat`, `curl`, `netcat-openbsd`, `arping`, `openssl` (openssl is used to sign/verify config-sync payloads)
 
 ### Docker
 

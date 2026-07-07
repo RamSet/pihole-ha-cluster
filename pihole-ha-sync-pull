@@ -156,15 +156,19 @@ curl -sf --max-time 120 "$PRIMARY_URL/api/sync/payload" -o "$STAGING_DIR/payload
 # a MITM on the plain-HTTP transfer. No key on this node = unsigned mode (legacy
 # behavior); add /etc/pihole-ha/cluster.key to every node to enforce it.
 CLUSTER_KEY_FILE="/etc/pihole-ha/cluster.key"
-if [[ -f "$CLUSTER_KEY_FILE" ]] && command -v openssl >/dev/null 2>&1; then
-    _want_sig="$(echo "$MANIFEST" | grep -o '"signature":"[^"]*"' | cut -d'"' -f4)"
-    _have_sig="$(openssl dgst -sha256 -hmac "$(cat "$CLUSTER_KEY_FILE")" "$STAGING_DIR/payload.tar.gz" 2>/dev/null | awk '{print $NF}')"
-    if [[ -z "$_want_sig" || "$_want_sig" != "$_have_sig" ]]; then
-        log_error "event=pull_reject reason=\"payload signature invalid — rejecting (tampering, MITM, or an unkeyed primary)\" from=$_PULL_FROM"
-        rm -rf "$STAGING_DIR"
-        exit 1
+if [[ -f "$CLUSTER_KEY_FILE" ]]; then
+    if ! command -v openssl >/dev/null 2>&1; then
+        log_warn "event=signature_skip reason=\"cluster.key set but openssl missing — payload NOT verified; install openssl to enforce\""
+    else
+        _want_sig="$(echo "$MANIFEST" | grep -o '"signature":"[^"]*"' | cut -d'"' -f4)"
+        _have_sig="$(openssl dgst -sha256 -hmac "$(cat "$CLUSTER_KEY_FILE")" "$STAGING_DIR/payload.tar.gz" 2>/dev/null | awk '{print $NF}')"
+        if [[ -z "$_want_sig" || "$_want_sig" != "$_have_sig" ]]; then
+            log_error "event=pull_reject reason=\"payload signature invalid — rejecting (tampering, MITM, or an unkeyed primary)\" from=$_PULL_FROM"
+            rm -rf "$STAGING_DIR"
+            exit 1
+        fi
+        log_info "event=signature_ok from=$_PULL_FROM"
     fi
-    log_info "event=signature_ok from=$_PULL_FROM"
 fi
 
 # Extract payload

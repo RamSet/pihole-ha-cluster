@@ -563,7 +563,7 @@ read -erp "  Proceed with installation? [Y/n]: " proceed
 # --- 12. Install dependencies ---
 printf "\\n"
 _need_pkgs=()
-for pkg in socat curl netcat-openbsd arping; do
+for pkg in socat curl netcat-openbsd arping openssl; do
     dpkg -s "$pkg" &>/dev/null || _need_pkgs+=("$pkg")
 done
 if [[ ${#_need_pkgs[@]} -gt 0 ]]; then

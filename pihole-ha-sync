@@ -300,8 +300,12 @@ SYNCCONF_PRESENT=false
 # plain-HTTP transfer. HMAC-SHA256 over the exact tarball bytes.
 CLUSTER_KEY_FILE="/etc/pihole-ha/cluster.key"
 SIGNATURE=""
-if [[ -f "$CLUSTER_KEY_FILE" ]] && command -v openssl >/dev/null 2>&1; then
-    SIGNATURE="$(openssl dgst -sha256 -hmac "$(cat "$CLUSTER_KEY_FILE")" "$PAYLOAD_FILE" 2>/dev/null | awk '{print $NF}')"
+if [[ -f "$CLUSTER_KEY_FILE" ]]; then
+    if command -v openssl >/dev/null 2>&1; then
+        SIGNATURE="$(openssl dgst -sha256 -hmac "$(cat "$CLUSTER_KEY_FILE")" "$PAYLOAD_FILE" 2>/dev/null | awk '{print $NF}')"
+    else
+        log_warn "event=sign_skip reason=\"cluster.key set but openssl missing — payload built UNSIGNED; install openssl\""
+    fi
 fi
 printf '{"timestamp":"%s","hash":"%s","gravity_md5":"%s","size":%d,"signature":"%s","components":{"gravity":%s,"dhcp":%s,"dns":%s,"settings":%s,"notify":%s,"syncconf":%s,"adlists":true}}\n' \
     "$TIMESTAMP" "$CURRENT" "$GRAVITY_MD5" "$PAYLOAD_SIZE" "$SIGNATURE" \

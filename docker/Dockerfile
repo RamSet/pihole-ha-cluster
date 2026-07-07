@@ -11,6 +11,7 @@ RUN apk add --no-cache \
     bash \
     curl \
     socat \
+    openssl \
     iproute2 \
     arping \
     netcat-openbsd \
