@@ -952,10 +952,14 @@ $(function () {
             // overwrite it with a valid value from the API, never with "unknown".
             if (d.local && d.local !== "unknown") $("#ha-version-local").text("v" + d.local);
             if (d.update_available && d.latest) {
+                // Show the update command on its own line under the version so it
+                // isn't missed — people forget the exact command.
                 $("#ha-version-update").html(
                     ' &middot; <span style="color:#f0ad4e"><i class="fa fa-arrow-circle-up"></i> ' +
-                    'update available (v' + escapeHtml(d.latest) + ')</span> &mdash; ' +
-                    'run <code>sudo ./install.sh --update</code>'
+                    'update available (v' + escapeHtml(d.latest) + ')</span>' +
+                    '<br><span style="color:#f0ad4e;font-size:12px">To update, run: ' +
+                    '<code style="background:rgba(240,173,78,0.15);padding:1px 6px;border-radius:3px">' +
+                    'sudo ./install.sh --update</code></span>'
                 );
             } else if (d.latest) {
                 $("#ha-version-update").html(' &middot; <span style="color:#00a65a">up to date</span>');
