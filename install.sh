@@ -259,7 +259,31 @@ done
 rm -rf "$_scan_dir"
 
 if [[ ${#discovered_nodes[@]} -eq 0 ]]; then
-    printf "  %b No existing HA nodes found\\n" "${INFO}"
+    printf "  %b No existing HA nodes found on this subnet\\n" "${INFO}"
+    # Auto-discovery only scans the local /24. If the primary is on another
+    # subnet (or the scan was blocked), let the user point at it directly so
+    # they can still join instead of accidentally starting a second cluster.
+    printf "\\n"
+    read -erp "  Enter an existing node's IP to join it, or leave blank to start a new cluster: " _manual_ip
+    if [[ -n "$_manual_ip" ]]; then
+        if ! is_valid_ip "$_manual_ip"; then
+            printf "  %b %bInvalid IP: %s%b\\n" "${CROSS}" "${COL_RED}" "$_manual_ip" "${COL_NC}"; exit 1
+        fi
+        printf "  %b Probing %s:8887..." "${INFO}" "$_manual_ip"
+        _mprobe="$(curl -sf --connect-timeout 3 --max-time 5 "http://$_manual_ip:8887/api/status" 2>/dev/null)" || true
+        if [[ -z "$_mprobe" ]] || ! printf '%s' "$_mprobe" | grep -q '"node"'; then
+            printf "%b  %b %bNo pihole-ha node answered at %s:8887 — check the IP, that pihole-ha is installed and running there, and that :8887 is reachable (VLAN/firewall)%b\\n" "${OVER}" "${CROSS}" "${COL_RED}" "$_manual_ip" "${COL_NC}"; exit 1
+        fi
+        _mreal="$(printf '%s' "$_mprobe" | sed -n 's/.*"node":{[^}]*"ip":"\([^"]*\)".*/\1/p' | head -1)"; _mreal="${_mreal:-$_manual_ip}"
+        _mport="$(curl -sf --connect-timeout 2 --max-time 4 "http://$_manual_ip:8887/api/config" 2>/dev/null | sed -n 's/.*"pihole_port":\([0-9]*\).*/\1/p' | head -1)"; _mport="${_mport:-80}"
+        discovered_nodes+=("$_mreal"); discovered_ports+=("$_mport")
+        if [[ -z "$cluster_vip" ]]; then
+            _mvip="$(printf '%s' "$_mprobe" | sed -n 's/.*"vip":"\([^"]*\)".*/\1/p' | head -1)"
+            _mvipen="$(printf '%s' "$_mprobe" | sed -n 's/.*"vip_enabled":\([a-z]*\).*/\1/p' | head -1)"
+            [[ -n "$_mvip" && "$_mvipen" == "true" ]] && cluster_vip="$_mvip"
+        fi
+        printf "%b  %b Found %b%s%b — joining it\\n" "${OVER}" "${TICK}" "${COL_BOLD}" "$_mreal" "${COL_NC}"
+    fi
 fi
 
 # --- 6. Build node list ---
