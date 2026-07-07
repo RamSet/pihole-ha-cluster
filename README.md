@@ -84,8 +84,8 @@ sudo ./setup.sh
 
 ### What the Installer Does
 
-1. **Scans the subnet** in parallel (~1 second) for existing pihole-ha nodes on port 8887
-2. **Auto-detects role** — if an existing cluster is found, this node joins as the next standby; if no cluster exists, this node becomes PRIMARY
+1. **Scans the subnet** in parallel for existing pihole-ha nodes on port 8887
+2. **Auto-detects role** — if an existing cluster is found, this node joins as the next standby. If none are found (e.g. the other node is on a different subnet), it offers to **join by IP**: enter an existing node's address and it verifies + joins that node. Otherwise this node becomes PRIMARY.
 3. **Preserves cluster priority** — discovered nodes keep their existing order, the new node is appended last
 4. **Detects deployment mode** (DHCP-HA vs DNS-only) and **asks about a VIP** (optional in both modes) — requires typing "yes" explicitly to enable. It never enables Pi-hole DHCP on a DNS-only network.
 5. **Asks whether to pin system DNS to `127.0.0.1`** (recommended, so the node always resolves independent of the VIP) — decline if your resolver lives elsewhere and you don't want `/etc/resolv.conf` touched. Recorded as `PIN_DNS` and preserved across updates.
@@ -413,6 +413,11 @@ docker compose restart pihole-ha
 curl -s localhost:8887/api/status | python3 -m json.tool
 # Look at peers → ping/dns/api/dhcp fields
 ```
+
+**Installer says "No existing HA nodes found" (but the other node is up)**
+- Confirm both nodes are on the **same subnet** — auto-discovery only scans the local `/24`.
+- From the new node, check the other is reachable: `curl http://<other-ip>:8887/api/status` should return JSON.
+- If it's reachable but wasn't found, the scan may have timed out (slow hardware) — the installer will prompt to **enter the node's IP directly**; type it in to join. Re-run `sudo ./install.sh` if you already finished the install as a separate node.
 
 **Peer API checks failing (api: false)**
 - Check the peer's Pi-hole web port — if non-standard, add `:PORT` to the node in `HA_NODES`
