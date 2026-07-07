@@ -72,8 +72,14 @@ touch "$lock_file"
 # whose 24-bit prefix only resolves to "IEEE Registration Authority"; for those
 # we consult the finer registry files (mam.csv / oui36.csv / iab.csv).
 hex="${mac//[:-]/}"; hex="${hex^^}"
+hex="${hex//[^0-9A-F]/}"   # keep only hex — the MAC is attacker-supplied; never let it reach the SQL/URL below
 oui="${hex:0:6}"
 vendor=""
+
+# Escape a value for safe embedding in the html=1 Pushover message. The MAC,
+# hostname and IP come from the DHCP client (untrusted) — without this a device
+# could inject markup/links into the admin's notification.
+_htmlesc() { local s="${1//&/&amp;}"; s="${s//</&lt;}"; s="${s//>/&gt;}"; printf '%s' "$s"; }
 
 # Org name from field 3 of an IEEE CSV line (handles quoted names with commas).
 _csv_org() {
@@ -157,7 +163,7 @@ fi
 # --- Send Pushover notification ---
 tstamp="$(date '+%Y-%m-%d %H:%M:%S')"
 title="${PO_TITLE} [${node_role} ${local_ip}]"
-message="<b><font color='#3498db'>New device joined the network</font></b> <br><b>MAC:</b> <font color='#95a5a6'>$mac</font> <br><b>Vendor:</b> <font color='#2ecc71'>$vendor</font> <br><b>Assigned IP:</b> <font color='#f39c12'>$ip</font> <br><b>Hostname:</b> <font color='#9b59b6'>${hostname:-(none)}</font> <br><b>Time:</b> <font color='#95a5a6'>$tstamp</font>"
+message="<b><font color='#3498db'>New device joined the network</font></b> <br><b>MAC:</b> <font color='#95a5a6'>$(_htmlesc "$mac")</font> <br><b>Vendor:</b> <font color='#2ecc71'>$(_htmlesc "$vendor")</font> <br><b>Assigned IP:</b> <font color='#f39c12'>$(_htmlesc "$ip")</font> <br><b>Hostname:</b> <font color='#9b59b6'>$(_htmlesc "${hostname:-(none)}")</font> <br><b>Time:</b> <font color='#95a5a6'>$tstamp</font>"
 
 curl -s --max-time 10 \
     -X POST "https://api.pushover.net/1/messages.json" \

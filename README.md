@@ -238,6 +238,22 @@ The Pi-hole admin page (`/admin/ha`) is the only UI. Its JavaScript talks to a s
 
 > **Security note:** Port 8887 is an internal API. Reads are unauthenticated, and writes are unauthenticated too unless the local Pi-hole has an admin password set (in which case mutating calls require a valid Pi-hole session). Keep 8887 on a trusted LAN — do **not** port-forward it or expose it to the internet.
 
+## Security
+
+pihole-ha is designed for a **trusted LAN**. Two controls harden it beyond that baseline:
+
+**Control-plane authentication.** The `:8887` API's *read* endpoints are always open, but every *write* (toggles, master/priority/VIP changes, node join/leave, notify config, saving peer passwords) requires a valid Pi-hole session — **whenever the local Pi-hole has an admin password set**. So the simplest hardening is: give Pi-hole an admin password, and the cluster's control plane is authenticated automatically. On a password-less Pi-hole those writes are open to the LAN, so also consider firewalling `:8887` to just the cluster node IPs.
+
+**Signed config sync (recommended).** Standbys apply whatever config the sync payload contains (DNS records, FTL settings, gravity DB), so a rogue peer or a MITM on the plain-HTTP transfer could otherwise push malicious config. To prevent that, put the **same secret** in `/etc/pihole-ha/cluster.key` on **every** node:
+
+```bash
+# generate once, then copy the SAME file to every node (chmod 600):
+sudo sh -c 'umask 077; openssl rand -hex 32 > /etc/pihole-ha/cluster.key'
+sudo systemctl restart pihole-ha-sync.timer pihole-ha-sync-pull.timer   # or just wait for the next cycle
+```
+
+When the key is present, the primary HMAC-signs each payload and standbys **reject anything without a matching signature** — a rogue source can't forge it without the key. Add it to all nodes together (a keyed standby will reject an unkeyed primary's unsigned payloads). No key = legacy unsigned behavior.
+
 ## Web Interface
 
 ### Pi-hole Admin Page (`/admin/ha`)
