@@ -83,13 +83,32 @@ ftl_to_json() {
     local input
     input="$(cat)"
     [[ "$input" == "[]" || -z "$input" ]] && echo "[]" && return
-    # DHCP entries start with MAC (XX:), DNS entries start with IP (N.)
-    # Add quotes around each entry by splitting on ", " before a MAC or IP start
-    echo "$input" | sed -E \
-        -e 's/^\[ /["/' \
-        -e 's/ ?\]$/"]/'\
-        -e 's/, ([0-9a-fA-F]{2}:)/","\1/g' \
-        -e 's/, ([0-9]{1,3}\.[0-9])/","\1/g'
+    # Convert pihole-FTL's "[ a, b, c ]" list into a JSON array. Entries are
+    # grouped so a bare MAC that leads a multi-field record stays attached to it,
+    # and backslashes/quotes are escaped — robust against hostnames or values
+    # that contain commas.
+    awk -v s="$input" '
+    BEGIN {
+        sub(/^\[ /, "", s); sub(/ \]$/, "", s)
+        n = split(s, p, ", ")
+        out = "["; first = 1; pending = ""
+        for (i = 1; i <= n; i++) {
+            if (p[i] ~ /^[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]$/) {
+                pending = (pending == "") ? p[i] : pending ", " p[i]
+                continue
+            }
+            entry = (pending == "") ? p[i] : pending ", " p[i]
+            pending = ""
+            gsub(/\\/, "\\\\", entry); gsub(/"/, "\\\"", entry)
+            out = out (first ? "" : ",") "\"" entry "\""
+            first = 0
+        }
+        if (pending != "") {
+            gsub(/\\/, "\\\\", pending); gsub(/"/, "\\\"", pending)
+            out = out (first ? "" : ",") "\"" pending "\""
+        }
+        print out "]"
+    }'
 }
 
 # Compute current config fingerprint (only enabled components)

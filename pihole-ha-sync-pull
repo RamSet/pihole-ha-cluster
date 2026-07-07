@@ -62,9 +62,9 @@ SYNC_SETTINGS=true
 SYNC_PRIMARY="${NODES[0]}"
 [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
 
-# Support PULL_SOURCE override for bootstrap mode (primary pulling from standby)
-_PULL_FROM="${PULL_SOURCE:-$SYNC_PRIMARY}"
-PRIMARY_URL="http://$_PULL_FROM:8887"
+_fetch_manifest() {
+    curl -sf --max-time 10 "http://$1:8887/api/sync/manifest" 2>/dev/null
+}
 
 # Exit if sync disabled
 if [[ "$SYNC_ENABLED" != "true" ]]; then
@@ -78,11 +78,35 @@ if [[ "$LOCAL_IP" == "$SYNC_PRIMARY" && -z "${PULL_SOURCE:-}" ]]; then
     exit 0
 fi
 
-# Fetch manifest from primary
-MANIFEST="$(curl -sf --max-time 10 "$PRIMARY_URL/api/sync/manifest" 2>/dev/null)" || {
-    log_warn "event=skip reason=\"primary unreachable or no manifest\""
+# Fetch the manifest. Prefer the configured primary (or an explicit PULL_SOURCE),
+# but if the primary is unreachable, fall back to any other node that has one —
+# so a standby still gets config even while the primary is down.
+MANIFEST=""
+_PULL_FROM=""
+if [[ -n "${PULL_SOURCE:-}" ]]; then
+    _PULL_FROM="$PULL_SOURCE"
+    MANIFEST="$(_fetch_manifest "$_PULL_FROM")"
+else
+    if [[ -n "$SYNC_PRIMARY" && "$SYNC_PRIMARY" != "$LOCAL_IP" ]]; then
+        MANIFEST="$(_fetch_manifest "$SYNC_PRIMARY")" && _PULL_FROM="$SYNC_PRIMARY"
+    fi
+    if [[ -z "$MANIFEST" ]]; then
+        for _candidate in "${NODES[@]}"; do
+            [[ "$_candidate" == "$LOCAL_IP" ]] && continue
+            [[ "$_candidate" == "$SYNC_PRIMARY" ]] && continue
+            MANIFEST="$(_fetch_manifest "$_candidate")" && { _PULL_FROM="$_candidate"; break; }
+        done
+        if [[ -n "$_PULL_FROM" && "$_PULL_FROM" != "$SYNC_PRIMARY" ]]; then
+            log_info "event=fallback_source from=$SYNC_PRIMARY to=$_PULL_FROM reason=\"configured primary unreachable\""
+        fi
+    fi
+fi
+
+if [[ -z "$MANIFEST" ]]; then
+    log_warn "event=skip reason=\"no peer has a manifest\""
     exit 0
-}
+fi
+PRIMARY_URL="http://$_PULL_FROM:8887"
 
 # Parse hash from manifest
 REMOTE_HASH="$(echo "$MANIFEST" | grep -o '"hash":"[^"]*"' | cut -d'"' -f4)"
