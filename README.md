@@ -165,7 +165,7 @@ Two scripts handle config distribution:
 - Stores them in `/run/pihole-ha/` where the dashboard API serves them
 
 **`pihole-ha-sync-pull`** (runs on standby nodes, every 15 min via systemd timer or Docker supervisor):
-- Fetches the manifest from the sync primary via HTTP (`:8887/api/sync/manifest`)
+- Fetches the manifest from the sync primary via HTTP (`:8887/api/sync/manifest`); if the primary is unreachable, it falls back to any other node that has a manifest, so a standby still receives config while the primary is down
 - Compares the hash — if different, downloads the payload (`:8887/api/sync/payload`)
 - Applies each component:
   - **Gravity DB**: copies to `/etc/pihole/gravity.db`, restarts `pihole-FTL` only if the md5 changed
