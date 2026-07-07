@@ -55,9 +55,14 @@ done
 IFACE="$(ip -o route get "$GATEWAY" 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p')"
 [[ -z "$IFACE" ]] && IFACE="$(ip -o link show up | grep -v lo | head -1 | awk -F': ' '{print $2}')"
 
-CHECK_INTERVAL=10
-DEACTIVATE_AFTER=3
-HEALTH_TIMEOUT=2
+# Failover timing — override any of these in nodes.conf to tune speed vs. stability.
+# A standby takes over after ACTIVATE_AFTER consecutive failed checks, so
+# failover time ≈ CHECK_INTERVAL × ACTIVATE_AFTER. Lower = faster failover;
+# higher = more tolerant of a transient blip (a one-cycle glitch won't fail over).
+CHECK_INTERVAL="${CHECK_INTERVAL:-10}"     # seconds between peer health-check rounds
+DEACTIVATE_AFTER="${DEACTIVATE_AFTER:-3}"  # consecutive healthy checks before yielding back
+HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-2}"      # per-check timeout (ping/DNS/API)
+_ACTIVATE_BASE="${ACTIVATE_AFTER:-2}"      # base down-checks before a standby takes over
 STATUS_DIR="/run/pihole-ha"
 STATUS_FILE="$STATUS_DIR/status.json"
 
@@ -72,13 +77,14 @@ done
 PRIORITY=$((MY_IDX + 1))
 ROLE="${ROLES[$MY_IDX]}"
 
-# Staggered activation: primary=immediate, last node=4 checks, others=2
+# Staggered activation: primary=immediate, last node waits an extra 2 checks so
+# it can't grab at the same instant as a higher-priority standby, others=base.
 if (( MY_IDX == 0 )); then
     ACTIVATE_AFTER=0
 elif (( MY_IDX == NODE_COUNT - 1 && NODE_COUNT > 2 )); then
-    ACTIVATE_AFTER=4
+    ACTIVATE_AFTER=$(( _ACTIVATE_BASE + 2 ))
 else
-    ACTIVATE_AFTER=2
+    ACTIVATE_AFTER=$_ACTIVATE_BASE
 fi
 
 mkdir -p "$STATUS_DIR"

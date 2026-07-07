@@ -130,7 +130,13 @@ Nodes in `HA_NODES` can optionally include a `:PORT` suffix for the Pi-hole web 
 | `HA_ENABLED` | `true`/`false` | `true` | Master kill-switch for all HA functions |
 | `DHCP_HA` | `true`/`false` | `true` | `true` = DHCP-HA mode (manage DHCP + VIP). `false` = DNS-only (never touch DHCP; VIP follows the DNS-healthy primary if set) |
 | `PIN_DNS` | `true`/`false` | `true` | Pin this host's resolver to `127.0.0.1`. `false` = never touch system DNS |
+| `CHECK_INTERVAL` | seconds | `10` | How often each node health-checks its peers. Failover ≈ `CHECK_INTERVAL × ACTIVATE_AFTER` |
+| `ACTIVATE_AFTER` | integer | `2` | Consecutive failed checks before a standby takes over (the last node waits +2 to avoid a tie). Lower = faster failover, higher = ignores brief blips |
+| `DEACTIVATE_AFTER` | integer | `3` | Consecutive healthy checks before a standby yields back to a recovered primary |
+| `HEALTH_TIMEOUT` | seconds | `2` | Per-check timeout for ping / DNS:53 / API |
 | `HA_NODES` | CSV | *(required)* | Node IPs in priority order. Format: `IP` or `IP:PORT` |
+
+**Tuning failover speed:** the defaults are conservative (secondary takes over in ~20s) to avoid failing over on a transient blip. For faster failover, lower `CHECK_INTERVAL` — e.g. `CHECK_INTERVAL=3` gives ~6s (secondary) / ~12s (tertiary) while still requiring 2 consecutive down-checks. Going below ~2s or `ACTIVATE_AFTER=1` risks flapping on brief network hiccups.
 
 ## How It Works
 
