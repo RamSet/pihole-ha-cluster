@@ -70,11 +70,15 @@ _notify_tag_muted() {
 # so notifications keep working during failover when local DNS is flapping.
 # Callers in long-running daemons should background with `notify "..." &`.
 notify() {
-    # Usage: notify "<message>" [tag]
-    # If a tag is given and it is in PO_MUTED_TAGS, the send is silently
-    # dropped so the dashboard's per-kind mute toggles take effect.
-    # Untagged callers always fire.
-    local _msg="$1" _tag="${2:-}"
+    # Usage: notify "<message...>"
+    # The entire argument list is sent as the message (see "message=$*"
+    # below) so a mis-quoted or word-split value can never be truncated.
+    # To enable per-kind mute, set NOTIFY_TAG in the call's environment:
+    #     NOTIFY_TAG=vip_claim_failed notify "..."
+    # The tag is carried out-of-band, never as a positional argument, so it
+    # cannot be smuggled into (or truncate) the message. If NOTIFY_TAG is in
+    # PO_MUTED_TAGS the send is silently dropped; untagged callers always fire.
+    local _tag="${NOTIFY_TAG:-}"; NOTIFY_TAG=""
     if _notify_tag_muted "$_tag"; then
         command -v log_info >/dev/null 2>&1 && log_info "event=notify_muted tag=$_tag"
         return 0
@@ -104,7 +108,7 @@ notify() {
         -X POST "https://api.pushover.net/1/messages.json" \
         -d "token=$PO_TOKEN" -d "user=$PO_USER" \
         -d "html=1" -d "title=$PO_TITLE" \
-        --data-urlencode "message=$_msg" >/dev/null 2>&1
+        --data-urlencode "message=$*" >/dev/null 2>&1
 }
 
 platform_get_local_ip() {
