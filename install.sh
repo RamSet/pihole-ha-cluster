@@ -212,7 +212,10 @@ for octet in $(seq 1 254); do
     probe_ip="$subnet.$octet"
     [[ "$probe_ip" == "$local_ip" ]] && continue
     (
-        resp="$(curl -sf --connect-timeout 0.15 --max-time 0.5 "http://$probe_ip:8887/api/status" 2>/dev/null)" || exit 0
+        # max-time is generous on purpose: the :8887 dash is a bash+socat handler
+        # that can take well over half a second to answer on slower hardware (e.g.
+        # a Raspberry Pi), so a tight timeout would silently miss a live node.
+        resp="$(curl -sf --connect-timeout 0.5 --max-time 2 "http://$probe_ip:8887/api/status" 2>/dev/null)" || exit 0
         [[ -z "$resp" ]] && exit 0
         echo "$resp" > "$_scan_dir/$octet"
     ) &
@@ -249,7 +252,7 @@ for f in $(ls "$_scan_dir"/ 2>/dev/null | sort -n); do
             cluster_vip="$_probe_vip"
         fi
     fi
-    probe_port="$(curl -sf --connect-timeout 0.15 --max-time 0.5 "http://$probe_ip:8887/api/config" 2>/dev/null \
+    probe_port="$(curl -sf --connect-timeout 0.5 --max-time 3 "http://$probe_ip:8887/api/config" 2>/dev/null \
         | sed -n 's/.*"pihole_port":\([0-9]*\).*/\1/p' | head -1 || true)"
     probe_port="${probe_port:-80}"
     printf "  %b Found %b%s%b — %s (port %s)\\n" "${TICK}" "${COL_BOLD}" "$real_ip" "${COL_NC}" "$probe_role" "$probe_port"
@@ -429,7 +432,7 @@ if [[ ${#discovered_nodes[@]} -gt 0 ]]; then
     # Existing cluster found — this node joins as secondary automatically
     for i in "${!discovered_nodes[@]}"; do
         _check_ip="${discovered_nodes[$i]}"
-        _check_json="$(curl -sf --connect-timeout 0.15 --max-time 0.5 "http://$_check_ip:8887/api/status" 2>/dev/null || true)"
+        _check_json="$(curl -sf --connect-timeout 0.5 --max-time 3 "http://$_check_ip:8887/api/status" 2>/dev/null || true)"
         [[ -z "$_check_json" ]] && continue
         _check_role="$(echo "$_check_json" | sed -n 's/.*"node":{[^}]*"role":"\([^"]*\)".*/\1/p' | head -1)"
         if [[ "$_check_role" == "PRIMARY" ]]; then
