@@ -610,7 +610,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                     </div>
                     <div class="form-group" style="margin-bottom:10px">
                         <label>Pick from static hosts</label>
-                        <div id="dhcp-host-picker" style="max-width:420px;max-height:160px;overflow-y:auto;border:1px solid #d2d6de;border-radius:4px;padding:6px 8px;background:#fff">
+                        <div id="dhcp-host-picker" style="max-width:420px;max-height:160px;overflow-y:auto;border:1px solid rgba(128,128,128,0.3);border-radius:4px;padding:6px 8px">
                             <small class="text-muted"><i class="fa fa-spinner fa-spin"></i> Loading...</small>
                         </div>
                         <small class="text-muted">Click a host to add it to the ignored list</small>
