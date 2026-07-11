@@ -20,16 +20,18 @@ PO_TOKEN=""
 PO_TITLE="pihole-ha"
 DHCP_NOTIFY_ENABLED="true"
 DHCP_NOTIFY_IGNORED_MACS=""
+DHCP_NOTIFY_IGNORED_HOSTS=""
 if [[ -f "$NOTIFY_CONF" ]]; then
     while IFS='=' read -r key val; do
         [[ -z "$key" || "$key" == \#* ]] && continue
         case "$key" in
-            PO_ENABLED)               PO_ENABLED="$val" ;;
-            PO_USER)                  PO_USER="$val" ;;
-            PO_TOKEN)                 PO_TOKEN="$val" ;;
-            PO_TITLE)                 PO_TITLE="$val" ;;
-            DHCP_NOTIFY_ENABLED)      DHCP_NOTIFY_ENABLED="$val" ;;
-            DHCP_NOTIFY_IGNORED_MACS) DHCP_NOTIFY_IGNORED_MACS="$val" ;;
+            PO_ENABLED)                PO_ENABLED="$val" ;;
+            PO_USER)                   PO_USER="$val" ;;
+            PO_TOKEN)                  PO_TOKEN="$val" ;;
+            PO_TITLE)                  PO_TITLE="$val" ;;
+            DHCP_NOTIFY_ENABLED)       DHCP_NOTIFY_ENABLED="$val" ;;
+            DHCP_NOTIFY_IGNORED_MACS)  DHCP_NOTIFY_IGNORED_MACS="$val" ;;
+            DHCP_NOTIFY_IGNORED_HOSTS) DHCP_NOTIFY_IGNORED_HOSTS="$val" ;;
         esac
     done < "$NOTIFY_CONF"
 fi
@@ -41,6 +43,15 @@ IFS=',' read -ra _ignored <<< "$DHCP_NOTIFY_IGNORED_MACS"
 for _m in "${_ignored[@]}"; do
     [[ "${mac,,}" == "${_m,,}" ]] && exit 0
 done
+
+# --- Ignore hostnames from config (case-insensitive, exact match) ---
+if [[ -n "$hostname" ]]; then
+    IFS=',' read -ra _ignored_hosts <<< "$DHCP_NOTIFY_IGNORED_HOSTS"
+    for _h in "${_ignored_hosts[@]}"; do
+        [[ -z "$_h" ]] && continue
+        [[ "${hostname,,}" == "${_h,,}" ]] && exit 0
+    done
+fi
 
 # --- Node identity from pihole-ha status ---
 local_ip="$(hostname -I | awk '{print $1}')"

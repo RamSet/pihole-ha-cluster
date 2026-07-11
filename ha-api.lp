@@ -175,7 +175,8 @@ elseif action == "notify-save" then
     local title = get_param("title") or "pihole-ha"
     local dhcp_enabled = get_param("dhcp_enabled") or "true"
     local dhcp_macs = get_param("dhcp_macs") or ""
-    local content = curl_local("/api/notify/save?enabled=" .. url_encode(enabled) .. "&user=" .. url_encode(user) .. "&token=" .. url_encode(token) .. "&title=" .. url_encode(title) .. "&dhcp_enabled=" .. url_encode(dhcp_enabled) .. "&dhcp_macs=" .. url_encode(dhcp_macs))
+    local dhcp_hosts = get_param("dhcp_hosts") or ""
+    local content = curl_local("/api/notify/save?enabled=" .. url_encode(enabled) .. "&user=" .. url_encode(user) .. "&token=" .. url_encode(token) .. "&title=" .. url_encode(title) .. "&dhcp_enabled=" .. url_encode(dhcp_enabled) .. "&dhcp_macs=" .. url_encode(dhcp_macs) .. "&dhcp_hosts=" .. url_encode(dhcp_hosts))
     mg.write(content or '{"error":"save failed"}')
 
 elseif action == "notify-dhcp-hosts" then

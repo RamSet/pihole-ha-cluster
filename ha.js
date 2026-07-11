@@ -810,6 +810,9 @@ $(function () {
             if (notifyCfg.dhcp_ignored_macs && !$("#dhcp-ignored-macs").data("dirty")) {
                 $("#dhcp-ignored-macs").val(notifyCfg.dhcp_ignored_macs.replace(/,/g, "\n"));
             }
+            if (notifyCfg.dhcp_ignored_hosts && !$("#dhcp-ignored-hosts").data("dirty")) {
+                $("#dhcp-ignored-hosts").val(notifyCfg.dhcp_ignored_hosts.replace(/,/g, "\n"));
+            }
             loadDhcpHostPicker();
         } else {
             $("#dhcp-notify-fields").hide();
@@ -826,6 +829,9 @@ $(function () {
 
     // Mark textarea dirty when user edits it manually
     $(document).on("input", "#dhcp-ignored-macs", function () {
+        $(this).data("dirty", true);
+    });
+    $(document).on("input", "#dhcp-ignored-hosts", function () {
         $(this).data("dirty", true);
     });
 
@@ -859,6 +865,10 @@ $(function () {
             .split("\n").map(function (l) { return l.trim(); })
             .filter(function (l) { return l.length > 0; })
             .join(",");
+        var dhcpHosts = $("#dhcp-ignored-hosts").val()
+            .split("\n").map(function (l) { return l.trim(); })
+            .filter(function (l) { return l.length > 0; })
+            .join(",");
         if (user === "********") user = "";
         if (token === "********") token = "";
         var $res = $("#notify-result");
@@ -875,7 +885,8 @@ $(function () {
                 "&token=" + encodeURIComponent(token) +
                 "&title=" + encodeURIComponent(title) +
                 "&dhcp_enabled=" + dhcpEnabled +
-                "&dhcp_macs=" + encodeURIComponent(dhcpMacs),
+                "&dhcp_macs=" + encodeURIComponent(dhcpMacs) +
+                "&dhcp_hosts=" + encodeURIComponent(dhcpHosts),
             timeout: 4000,
             dataType: "json"
         })
@@ -883,6 +894,7 @@ $(function () {
             if (data && data.ok) {
                 $res.html('<span style="color:#00a65a"><i class="fa fa-check"></i> Saved</span>');
                 $("#dhcp-ignored-macs").data("dirty", false);
+                $("#dhcp-ignored-hosts").data("dirty", false);
                 pollNotify();
             } else {
                 $res.html('<span style="color:#dd4b39">Save failed</span>');

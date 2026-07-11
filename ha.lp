@@ -57,6 +57,7 @@ local po_has_user, po_has_token = false, false
 local po_title = "pihole-ha"
 local dhcp_notify_enabled = true
 local dhcp_notify_ignored_macs = ""
+local dhcp_notify_ignored_hosts = ""
 local nf = io.open("/etc/pihole-ha/notify.conf", "r")
 if nf then
     for line in nf:lines() do
@@ -67,12 +68,14 @@ if nf then
         elseif k == "PO_TITLE" then po_title = v or "pihole-ha"
         elseif k == "DHCP_NOTIFY_ENABLED" then dhcp_notify_enabled = (v ~= "false")
         elseif k == "DHCP_NOTIFY_IGNORED_MACS" then dhcp_notify_ignored_macs = v or ""
+        elseif k == "DHCP_NOTIFY_IGNORED_HOSTS" then dhcp_notify_ignored_hosts = v or ""
         end
     end
     nf:close()
 end
--- Convert comma-separated MACs to newline-separated for textarea display
+-- Convert comma-separated lists to newline-separated for textarea display
 local dhcp_ignored_textarea = dhcp_notify_ignored_macs:gsub(",", "\n")
+local dhcp_ignored_hosts_textarea = dhcp_notify_ignored_hosts:gsub(",", "\n")
 
 -- Read sync config server-side for initial checkbox state
 local sync_enabled, sync_gravity, sync_dhcp, sync_dns = true, true, true, true
@@ -614,6 +617,13 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                             <small class="text-muted"><i class="fa fa-spinner fa-spin"></i> Loading...</small>
                         </div>
                         <small class="text-muted">Click a host to add it to the ignored list</small>
+                    </div>
+                    <div class="form-group" style="margin-bottom:10px">
+                        <label>Ignored Hostnames</label>
+                        <textarea class="form-control input-sm" id="dhcp-ignored-hosts" rows="4"
+                            style="max-width:420px;font-family:monospace;font-size:12px"
+                            placeholder="One hostname per line, e.g.&#10;chromecast&#10;esp32-sensor"><?=dhcp_ignored_hosts_textarea?></textarea>
+                        <small class="text-muted">Devices whose hostname matches (case-insensitive) will never trigger a notification. One hostname per line.</small>
                     </div>
                 </div>
                 <div id="notify-fields" style="padding:0 10px<? if not po_enabled then ?>;display:none<? end ?>">

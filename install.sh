@@ -914,6 +914,7 @@ PO_TOKEN=
 PO_TITLE=pihole-ha
 DHCP_NOTIFY_ENABLED=false
 DHCP_NOTIFY_IGNORED_MACS=
+DHCP_NOTIFY_IGNORED_HOSTS=
 # Per-kind mute list (comma-separated tags), managed from the dashboard:
 # dhcp_new_device,dhcp_activated,dhcp_deactivated,dhcp_failover_failed,
 # vip_claim_failed,sync_role_change,daemon_lifecycle,sync_payload_built,sync_payload_pulled
@@ -933,6 +934,11 @@ if [[ ${#discovered_nodes[@]} -gt 0 ]]; then
         if [[ -n "$_peer_macs" ]]; then
             sed -i "s|^DHCP_NOTIFY_IGNORED_MACS=.*|DHCP_NOTIFY_IGNORED_MACS=$_peer_macs|" /etc/pihole-ha/notify.conf
             printf "  %b Pulled ignored MACs from %s\\n" "${TICK}" "$_peer"
+        fi
+        _peer_hosts="$(echo "$_peer_notify" | grep -o '"dhcp_ignored_hosts":"[^"]*"' | cut -d'"' -f4)"
+        if [[ -n "$_peer_hosts" ]]; then
+            sed -i "s|^DHCP_NOTIFY_IGNORED_HOSTS=.*|DHCP_NOTIFY_IGNORED_HOSTS=$_peer_hosts|" /etc/pihole-ha/notify.conf
+            printf "  %b Pulled ignored hostnames from %s\\n" "${TICK}" "$_peer"
         fi
         break
     done
