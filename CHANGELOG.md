@@ -1,204 +1,96 @@
 # Changelog
 
-All notable changes to pihole-ha, newest first. Versions follow the `vMAJOR.MINOR.PATCH` tags in git.
+All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
 ## v3.8.0 — 2026-07-11
-- Add hostname filter for new-device DHCP notifications
-- README: add unofficial third-party / non-affiliation notice
+- Filter new-device DHCP notifications by hostname (case-insensitive), alongside the existing MAC ignore list — a match on either silences the alert.
+- Added an unofficial / non-affiliation notice to the README.
 
 ## v3.7.1 — 2026-07-07
-- Keep the full-message Pushover hardening when tagging notifications
+- Hardened Pushover notifications: the full message is always sent, and the per-kind mute tag is carried out-of-band so it can neither truncate an alert nor be smuggled into one.
 
 ## v3.7.0 — 2026-07-07
-- Restore per-kind mute controls for Pushover notifications
+- Restored per-kind Pushover mute controls — silence individual notification types (failover, VIP, sync, new-device, …) without disabling Pushover entirely. Changes replicate to peers.
 
 ## v3.6.1 — 2026-07-07
-- Panel adapts to Pi-hole dark/light theme automatically
-- README: document join-by-IP fallback and 'node not found' troubleshooting
+- The HA panel now follows Pi-hole's light/dark theme automatically instead of forcing a light background.
+- Documented the join-by-IP fallback and "node not found" troubleshooting in the README.
 
 ## v3.6.0 — 2026-07-06
-- Panel: show the update command on its own line when behind
-- Installer: don't miss live nodes behind a slow :8887 (raise scan timeout)
+- Installer no longer misses live nodes sitting behind a slow `:8887` (raised the scan timeout).
+- The panel shows the update command on its own line when a node is behind.
 
 ## v3.5.0 — 2026-07-06
-- Installer: offer to join a node by IP when auto-discovery finds none
+- Installer offers to join a node by IP when auto-discovery finds no existing cluster.
 
 ## v3.4.1 — 2026-07-06
-- Ensure openssl is installed for sync signing; warn if it's missing
+- Ensure `openssl` is installed for sync signing, and warn clearly if it's missing.
 
 ## v3.4.0 — 2026-07-06
-- Harden: sign config-sync payloads, escape untrusted DHCP data
+- Config-sync payloads are now HMAC-signed and verified on pull; untrusted DHCP data is escaped before use.
 
 ## v3.3.0 — 2026-07-06
-- Make failover timing configurable in nodes.conf
-- Document sync manifest failover to a healthy peer
+- Failover timing is tunable in `nodes.conf` (check interval, activate/deactivate delays).
+- Documented sync-manifest failover to a healthy peer.
 
 ## v3.2.0 — 2026-07-06
-- Harden config sync: robust DHCP-host parsing and manifest failover
+- Hardened config sync with robust DHCP-host parsing and manifest failover.
 
 ## v3.1.1 — 2026-07-06
-- Render the HA version badge server-side so it never shows 'unknown'
+- Version badge is rendered server-side, so it never briefly shows "unknown".
 
 ## v3.1.0 — 2026-07-06
-- Add pihole-ha-debug diagnostics collector for troubleshooting
-- Clarify config sync is change-gated, not clockwork
-- Update README for DNS-only VIP failover, PIN_DNS, and version badge
+- Added the `pihole-ha-debug` diagnostics collector for troubleshooting.
+- Clarified that config sync is change-gated, not on a fixed clock.
 
-## v3.0.0 — 2026-07-06
-- Add ./release helper to bump VERSION, commit, tag, and push
-- Add version badge + update-available indicator to the HA panel
-- Add PIN_DNS opt-out for the system-DNS pinning
-- Patch the sidebar without python3 (fresh-install/Docker fix)
-- Allow the VIP toggle in DNS-only mode (mode-aware authority)
-- Fix panel reads failing on password-protected Pi-holes (route matching)
-- Delete peer sessions after propagation (close secondary seat leak)
-- Fix Pi-hole API session leak that exhausted webserver.api.max_sessions
-- DNS-only VIP: prevent split-brain and let the installer enable it
-- Add health-based VIP failover for DNS-only deployments
-- Fix panel writes failing on password-protected Pi-holes
-- Don't abort setup when the Docker daemon is present but not running
-- Fix HA panel wiping the password field while typing
-- install.sh --uninstall: remove this node from the cluster reliably
-- README: note the Docker path is newer/less battle-tested
-- README: fix clone URL to pihole-ha-cluster; document --update/--uninstall, deployment modes, and License
-- Fix deployment-mode bugs found in testing
-- Sync: auto-detect DHCP-HA vs DNS-only deployment + docs
-- Initial public release
+## v3.0.0 — 2026-07-06 — first public release
+- **Failover / VIP:** health-based VIP failover for DNS-only deployments, with split-brain protection; the VIP toggle is allowed in DNS-only mode via mode-aware authority.
+- **Auth:** fixed panel reads and writes failing on password-protected Pi-holes; closed a Pi-hole API session leak that exhausted `webserver.api.max_sessions` (including peer-session cleanup after propagation).
+- **Web UI:** fixed the panel wiping the password field while typing; added the version badge and update-available indicator.
+- **Installer:** added `--update` and `--uninstall`; reliable removal of a node from the cluster; no longer aborts when Docker is installed but not running; patches the sidebar without `python3`; auto-detects DHCP-HA vs DNS-only.
+- **Other:** `PIN_DNS` opt-out for system-DNS pinning; the `./release` helper; README and license cleanup.
+
+---
 
 ## Pre-3.0.0 — private development (2026-02 – 2026-06)
 
-History predates the first public release and the semver scheme (the repo was versioned from v3.0.0 onward). Distilled from the original private repo, grouped by month, newest first.
+Before the first public release the project was built out in a private repo and wasn't yet on a semver scheme. This is a condensed summary of that work by area, rather than a commit-by-commit log.
 
-### 2026-06
-- Resolve sub-allocated MACs (MA-M/MA-S/IAB), not just 24-bit OUIs
-- Use Pi-hole's macvendor.db as the primary MAC vendor source
-- Re-check unknown MAC vendors online after a TTL
-- Make IEEE OUI DB refresh self-contained and version-independent
-- Auto-update local IEEE OUI DB monthly via systemd timer
-- Colorize new-device Pushover notification
-- DHCP vendor lookup: harden API fallback for offline/failover bursts
-- DHCP vendor lookup: local IEEE OUI DB first, throttled API fallback
-- Add muteable tags to sync build + pull Pushover notifications
+### DHCP failover
+- Priority-based automatic failover with anti-flap, instant primary activation, and FTL-crash recovery.
+- Manual DHCP master override and a cluster-wide HA enable/disable kill-switch, both propagated to every node.
+- Health checks run even when HA is disabled, so the dashboard always reflects real peer state; check interval tuned to 10s.
 
-### 2026-05
-- Per-kind Pushover mute toggles (7 tags, replicated)
-- Remove dead demote_old_primary branch from install scripts
-- Consolidate logging + harden two interpolation sites
-- Consolidate shared helpers + fix two latent bugs
-- Remove dead code: pihole-ha-monitor and dhcp-failover migration
-- Restart sync timers on install instead of enable --now
-- Preserve multi-MAC DHCP reservations during sync
-- Use OnActiveSec instead of OnBootSec in sync timers
-- Fix wrong IP in DHCP-device Pushover title when VIP held
-- Auto-promote sync publisher when configured primary is down
-- Restart FTL after settings apply on standbys
-- Skip bootstrap pull when primary has already published
+### Virtual IP
+- Optional floating VIP with auto-detected interface, advertised as both DNS server and DHCP server-id.
+- Self-healing dnsmasq VIP config that survives Pi-hole upgrades.
+- VIP control restricted to the active DHCP master.
 
-### 2026-04
-- Self-heal DNS pin on daemon startup
-- Run Pushover notify synchronously in oneshot sync scripts
-- Fix sync timers going dark after interval change
-- Apply FTL settings after gravity restart
-- Replicate sync.conf (interval, component toggles) across the cluster
-- Sync DHCP scope across nodes; show source in sync notification
-- Pin resolv.conf to 127.0.0.1 and harden VIP claim
-- Include receiving node role/IP in sync notification
-- Sync notify.conf across nodes and bake defaults into install
-- Fix notify settings not propagating to peers
-- Propagate notify settings to all peers on save
-- Fix MAC picker dirty flag and save with existing credentials
-- Add DHCP notification settings to both UIs
-- Include node role and IP in DHCP notification title
-- Use notify.conf for DHCP notifications; daemon ensures dhcp-script hook
-- Use dnsmasq.d file for dhcp-script hook instead of misc.dnsmasq_lines
-- Restart pihole-FTL after configuring dhcp-script hook
-- Fix dhcp-script hook being wiped by config sync
-- Remove personal DHCP static host list from installer
-- Handle network outage during bootstrap: abort if fresh node and no standbys reachable
-- Add bootstrap protection: primary pulls from standbys when they have newer config
-- Always include adlists in sync payload
-- Add new-dhcp-device script to repo and fix notification formatting
-- Add configurable sync interval with UI dropdown
-- Add descriptive text to all HA admin panel cards
-- Add descriptions to Config Sync card in HA panel
-- Seed Pi-hole defaults on fresh install: adlists, DHCP hosts, scripts
-- Bake Pushover credentials into installer defaults
-- Remove inline onclick handlers blocked by Pi-hole v6 CSP
-- Fix Pushover toggle not updating UI when notifyCfg is null
-- Fix Pushover toggle on fresh installs creating notify.conf
-- Add PAT token to clone command in README
-- Pin DNS to 127.0.0.1 in installer when NetworkManager is present
+### Config sync
+- HTTP pull model replacing the original SSH-based sync — no keys, no rsync, no shared filesystem.
+- Change-gated payloads covering the gravity DB, DHCP static leases, custom DNS records, adlists, and FTL settings.
+- Any node can be promoted to sync publisher, with auto-promotion when the configured primary is down.
+- Bootstrap protection so a freshly rebuilt primary can't overwrite good standby config.
+- `sync.conf` (interval and per-component toggles) replicated across the cluster.
 
-### 2026-03
-- Fix Pushover notifications dropping silently during failover
-- Fix Pushover notifications: spacing in preview and DNS resolution
-- Strip ANSI colors from docker compose build output
-- Match Pi-hole's official color scheme in all installers
-- Detect port conflicts: find free port when Pi-hole port is taken
-- Auto-detect Pi-hole web port instead of assuming port 80
-- Fix scan result order: sort numerically to prevent VIP misidentification
-- Auto-detect VIP from existing cluster during install
-- Fix setup.sh banner alignment and false bare-metal detection
-- Fix README: use public repo URL, consolidate install instructions
-- Add unified installer, cluster join/leave API, and Leave Cluster button
-- Add Docker sidecar support and per-node port configuration
+### Web UI
+- Native panel embedded in Pi-hole's admin page at `/admin/ha`, served through a same-origin API proxy that fixes HTTPS mixed-content.
+- Priority-order control, per-card descriptions, and sync/settings toggles.
 
-### 2026-02
-- Remove unused SETTINGS_ARRAY_KEYS variable from sync scripts
-- Fix ha.lp: separate sync_settings local declaration for Lua compat
-- Add FTL Settings toggle to Pi-hole admin panel integration
-- Add FTL settings sync component (SYNC_SETTINGS)
-- Fix is_valid_ip called before definition in pihole-ha daemon
-- Update README with auth, structured logging, config versioning, tests, and extracted web UI docs
-- Fix auth: detect Pi-hole port, add glob suffixes for SID query strings
-- Add structured logging, config versioning, input validation, API auth, static web UI, and tests
-- Auto-detect primary during install, prevent dual-primary conflict
-- Expand Pushover notifications with per-node health breakdown
-- Add priority order UI control with cluster propagation
-- Fix installer to match new VIP DHCP option logic and add HA_ENABLED to nodes.conf
-- Update README with VIP DHCP option behavior, HA kill-switch, and new API endpoints
-- VIP enabled: advertise only VIP as DNS + DHCP server-id; VIP disabled: all node IPs
-- Add network diagnostic monitor for debugging connectivity issues
-- Run health checks even when HA is disabled so dashboard shows peer status
-- Disable Pi-hole multiDNS on startup to prevent duplicate dhcp-option=6
-- Add HA disable/enable kill-switch with cluster-wide propagation
-- Fix FTL restart loop that caused DHCP clients to lose connectivity
-- Restrict VIP toggle to active DHCP master only
-- Add VIP enable/disable toggle to dashboard and Pi-hole admin panel
-- Make VIP optional, advertise all node IPs as DNS servers via DHCP
-- Fix sync exporting TOML-style arrays that fail on import
-- Fix DHCP failover: instant primary activation, anti-flap, FTL crash recovery
-- Make dnsmasq VIP config self-healing — survives Pi-hole upgrades
-- Fix DHCP clients losing DNS during failover — advertise VIP as DNS server
-- Add comprehensive README with full system documentation
-- Fix standalone dashboard showing FAIL instead of Standby for DHCP off
-- Add DHCP master override — manual node promotion for DHCP serving
-- Add dynamic node config — nodes.conf replaces all hardcoded IPs
-- Add sync primary promotion — any node can be promoted to build/distribute config payloads
-- Replace external pushover script with built-in Pushover config
-- Fix auth spinner race condition with optimistic UI update
-- Show spinner after auth save instead of keeping password field
-- Reload auth.conf every cycle instead of only at startup
-- Fix curl_local: quote URL to prevent shell & interpretation
-- Fix auth/set endpoint: remove local keyword outside function
-- Add Pi-hole API authentication support
-- Add client count and lease count to overview cards
-- Fix DHCP lease count: grep -o 
-- Show active DHCP lease count in health table
-- Show DHCP as Active/Standby instead of OK/FAIL
-- Replace checkbox toggles with div-based toggles
-- Fix sync panel hidden by JS: remove hide/show and overlay refs
-- Fix blank sync panel: remove overlays, add server-side config
-- Fix sync panel race condition and overlay bugs
-- Add same-origin API proxy to fix HTTPS mixed content
-- Add native Pi-hole web UI integration (/admin/ha)
-- Fix migration: use is-active/is-enabled instead of list-unit-files
-- Rename to Pi-hole HA, add configurable sync settings panel
-- Replace SSH-based sync with HTTP pull model
-- Add Pi-hole config sync from primary to standby nodes
-- Beautify pushover notifications with HTML colors
-- Reduce check interval from 20s to 10s for faster failover
-- Add space after Monitor Started and DEACTIVATED in notifications
-- Add yielded-to info in deactivation notification
-- Add VIP management, auto-detect interface, trailing space in pushover
+### Notifications
+- Built-in Pushover support (replacing an external script), HTML-formatted with a per-node health breakdown.
+- Reliable delivery during failover — resolves `pushover.net` via peers or the system resolver when local DNS is flapping.
+- `notify.conf` synced across nodes, per-kind mute toggles, and new-device alerts enriched with a MAC-vendor lookup.
 
+### MAC vendor lookup
+- Local IEEE OUI database first with a throttled API fallback; the DB self-updates monthly.
+- Resolves sub-allocated MACs (MA-M / MA-S / IAB), not just 24-bit OUIs, and uses Pi-hole's own `macvendor.db`.
+
+### Installer & cluster management
+- Unified installer, a cluster join/leave API with a "Leave Cluster" button, and a dynamic `nodes.conf` (no hardcoded IPs).
+- Auto-detects the Pi-hole web port and existing VIP, resolves port conflicts, and supports a Docker sidecar deployment.
+
+### Security & hardening
+- API authentication using Pi-hole's own password; structured logging, input validation, and config versioning.
+- Fixes for RCE / XSS / injection vectors and removal of credentials that had been committed.
+- `resolv.conf` pinned to `127.0.0.1` and a hardened VIP-claim path.
