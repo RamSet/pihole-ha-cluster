@@ -25,12 +25,31 @@ case "${1:-}" in
 esac
 [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid version: $new"; exit 1; }
 
-# Require a clean tree so the release commit contains only the version bump.
+# Require a clean tree so the release commit contains only the version bump
+# and the changelog entry generated from it.
 if [[ -n "$(git status --porcelain)" ]]; then
     echo "working tree is dirty — commit or stash first:"; git status --short; exit 1
 fi
 if git rev-parse "v$new" >/dev/null 2>&1; then
     echo "tag v$new already exists"; exit 1
+fi
+
+# Prepend a CHANGELOG.md section built from the commit subjects since the last
+# tag (release commits excluded). Keeps the changelog current without manual
+# edits; regenerate the whole file from git history if it ever drifts.
+if [[ -f CHANGELOG.md ]]; then
+    lasttag="$(git tag | sort -V | tail -1)"
+    [[ -n "$lasttag" ]] && rng="$lasttag..HEAD" || rng="HEAD"
+    entries="$(git log --format='%s' $rng | grep -viE '^Release v' | sed 's/^/- /')"
+    [[ -z "$entries" ]] && entries="- Maintenance release"
+    firstver="$(grep -n -m1 '^## ' CHANGELOG.md | cut -d: -f1)"
+    {
+        if [[ -n "$firstver" ]]; then head -n "$((firstver-1))" CHANGELOG.md; else cat CHANGELOG.md; echo; fi
+        printf '## v%s — %s\n%s\n\n' "$new" "$(date +%F)" "$entries"
+        [[ -n "$firstver" ]] && tail -n "+$firstver" CHANGELOG.md
+    } > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
+    git add CHANGELOG.md
+    echo "  CHANGELOG.md updated for v$new"
 fi
 
 printf '%s\n' "$new" > VERSION

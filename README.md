@@ -4,6 +4,8 @@ DHCP high availability and config sync for a Pi-hole cluster. Automatic failover
 
 > **Unofficial third-party project.** pihole-ha is an independent, community-built add-on. It is **not** affiliated with, endorsed by, or sponsored by the Pi-hole project or Pi-hole LLC. Pi-hole® is a registered trademark of Pi-hole LLC. This project uses Pi-hole's supported interfaces (`pihole-FTL --config`, the admin page) but ships no Pi-hole code and is maintained separately. Use at your own risk.
 
+**Version history:** see [CHANGELOG.md](CHANGELOG.md).
+
 ## Deployment Modes
 
 pihole-ha auto-detects how your network does DHCP and installs to match — it will **not** enable Pi-hole DHCP behind your back:
