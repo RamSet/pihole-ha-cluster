@@ -99,10 +99,13 @@ PIHOLE_HA_GATEWAY=192.168.1.1
 PIHOLE_PASSWORD=your-pihole-password
 PIHOLE_WEB_PORT=80                            # Pi-hole web port on this node
 PIHOLE_HA_VIP_ENABLED=false
+PIHOLE_HA_DHCP_HA=false                       # true = this node's Pi-hole serves DHCP (failover); false = DNS-only. If unset, inferred: true when a DHCP scope below is set, else false.
 PIHOLE_HA_DHCP_START=192.168.1.50
 PIHOLE_HA_DHCP_END=192.168.1.200
 PIHOLE_HA_DHCP_ROUTER=192.168.1.1
 ```
+
+> **DNS-only vs DHCP-HA:** if your Pi-hole doesn't serve DHCP, leave the `PIHOLE_HA_DHCP_*` scope out (or set `PIHOLE_HA_DHCP_HA=false`) — otherwise the node assumes it should take over DHCP and logs `dhcp_activate status=failed`.
 
 See `.env.example` for all available options.
 

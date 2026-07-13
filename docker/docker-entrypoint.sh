@@ -43,12 +43,28 @@ generate_config() {
     IFS=',' read -ra _nodes <<< "$PIHOLE_HA_NODES"
     local primary="${_nodes[0]}"
 
+    # Resolve DHCP-HA vs DNS-only. Unlike the bare-metal installer, the container
+    # can't reliably probe the LAN, so: an explicit PIHOLE_HA_DHCP_HA wins; else
+    # infer intent from whether a DHCP scope was configured (start/router given);
+    # otherwise default to DNS-only. Without this the daemon defaulted to DHCP-HA
+    # and looped on 'dhcp_activate status=failed' on any node not serving DHCP.
+    local _dhcp_ha
+    if [[ -n "${PIHOLE_HA_DHCP_HA:-}" ]]; then
+        _dhcp_ha="$PIHOLE_HA_DHCP_HA"
+    elif [[ -n "${PIHOLE_HA_DHCP_START:-}" || -n "${PIHOLE_HA_DHCP_ROUTER:-}" ]]; then
+        _dhcp_ha="true"
+    else
+        _dhcp_ha="false"
+    fi
+    [[ "$_dhcp_ha" != "true" && "$_dhcp_ha" != "false" ]] && _dhcp_ha="false"
+
     cat > "$NODES_CONF" <<EOF
 CONFIG_VERSION=1
 GATEWAY=${PIHOLE_HA_GATEWAY}
 VIP=${PIHOLE_HA_VIP:-}
 VIP_ENABLED=${PIHOLE_HA_VIP_ENABLED:-false}
 HA_ENABLED=${PIHOLE_HA_ENABLED:-true}
+DHCP_HA=${_dhcp_ha}
 HA_NODES=${PIHOLE_HA_NODES}
 EOF
 
@@ -61,7 +77,7 @@ SYNC_SETTINGS=${PIHOLE_HA_SYNC_SETTINGS:-true}
 SYNC_PRIMARY=${PIHOLE_HA_SYNC_PRIMARY:-$primary}
 EOF
 
-    log_info "event=config_written nodes=$PIHOLE_HA_NODES gateway=$PIHOLE_HA_GATEWAY"
+    log_info "event=config_written nodes=$PIHOLE_HA_NODES gateway=$PIHOLE_HA_GATEWAY dhcp_ha=$_dhcp_ha"
 }
 
 if [[ "${PIHOLE_HA_FORCE_CONFIG:-false}" == "true" ]] || [[ ! -f "$NODES_CONF" ]]; then
