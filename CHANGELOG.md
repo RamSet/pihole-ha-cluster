@@ -2,6 +2,11 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.8.1 — 2026-07-13
+- Docker: set DHCP_HA in generated config instead of defaulting to DHCP-HA
+- Polish CHANGELOG: curated release notes and themed pre-3.0 summary
+- Add CHANGELOG.md with full history; auto-maintain it on release
+
 ## v3.8.0 — 2026-07-11
 - Filter new-device DHCP notifications by hostname (case-insensitive), alongside the existing MAC ignore list — a match on either silences the alert.
 - Added an unofficial / non-affiliation notice to the README.
