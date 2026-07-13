@@ -51,7 +51,10 @@ If you already run Pi-hole in Docker, add the pihole-ha sidecar to your existing
 
 1. **Switch to `network_mode: host`** — remove any `ports:` mappings (host mode binds directly)
 2. **Add capabilities** — `NET_ADMIN`, `NET_RAW`, `SYS_NICE`
-3. **Share volumes** — both containers need access to `/etc/pihole` and `/etc/dnsmasq.d`
+3. **Share volumes** — both containers need `/etc/pihole` and `/etc/dnsmasq.d`, **plus the shared `pihole-ha-src` volume** (this is how the HA panel gets injected)
+4. **Override the entrypoint** — the Pi-hole container must run the inject step, or `/admin/ha` returns 404. The line below waits for the sidecar to stage the script, runs it, then hands off to Pi-hole's own `start.sh`. It needs no local file, so it works even when the sidecar is built from the git URL.
+
+> **This is the step people miss.** Adding the sidecar alone does **not** inject the panel — the Pi-hole container has to run the inject entrypoint and mount `pihole-ha-src`. Without both, the sidecar and `:8887` API still work, but `/admin/ha` 404s.
 
 ### Example: adding pihole-ha to existing compose
 
@@ -61,9 +64,15 @@ services:
     image: pihole/pihole:latest
     network_mode: host              # was: ports: ["53:53", "80:80"]
     cap_add: [NET_ADMIN, NET_RAW, SYS_NICE]
+    # Inject the HA panel: wait for the sidecar-staged script, run it, then start Pi-hole.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - 'until [ -f /pihole-ha-src/pihole-ha-inject-docker.sh ]; do sleep 1; done; exec /pihole-ha-src/pihole-ha-inject-docker.sh'
     volumes:
       - ./etc-pihole:/etc/pihole    # keep your existing mounts
       - ./etc-dnsmasq:/etc/dnsmasq.d
+      - pihole-ha-src:/pihole-ha-src:ro   # panel files staged by the sidecar
     environment:
       TZ: America/New_York
       FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD:-}
@@ -82,10 +91,14 @@ services:
       - ./etc-pihole:/etc/pihole    # same as pihole service
       - ./etc-dnsmasq:/etc/dnsmasq.d
       - pihole-ha-conf:/etc/pihole-ha
+      - pihole-ha-run:/run/pihole-ha
+      - pihole-ha-src:/pihole-ha-src   # sidecar stages the panel here (rw)
     restart: unless-stopped
 
 volumes:
   pihole-ha-conf:
+  pihole-ha-run:
+  pihole-ha-src:
 ```
 
 ### Create your `.env`

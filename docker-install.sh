@@ -670,13 +670,18 @@ services:
       - NET_ADMIN
       - NET_RAW
       - SYS_NICE
-    entrypoint: /pihole-ha-inject/pihole-ha-inject-docker.sh
+    # Wait for the sidecar to stage the inject script into the shared
+    # pihole-ha-src volume, then run it — it injects the HA panel and hands off
+    # to Pi-hole's own start.sh. No local file or bind-mount required.
+    entrypoint:
+      - /bin/bash
+      - -c
+      - 'until [ -f /pihole-ha-src/pihole-ha-inject-docker.sh ]; do sleep 1; done; exec /pihole-ha-src/pihole-ha-inject-docker.sh'
     volumes:
 ${pihole_vols}      - pihole-ha-src:/pihole-ha-src:ro
       - pihole-ha-run:/run/pihole-ha:ro
       - pihole-ha-conf:/etc/pihole-ha:ro
       - pihole-ha-ieee:/var/lib/ieee-data:ro
-      - ./pihole-ha-inject-docker.sh:/pihole-ha-inject/pihole-ha-inject-docker.sh:ro
     environment:
       TZ: \${TZ:-America/New_York}
       FTLCONF_webserver_api_password: \${PIHOLE_PASSWORD:-}
