@@ -140,12 +140,13 @@ if [[ "${1:-}" == "--update" ]]; then
     done
     [[ -f "$_src/new-dhcp-device" ]] && { cp "$_src/new-dhcp-device" /usr/local/bin/new_dhcp_device; chmod 755 /usr/local/bin/new_dhcp_device; }
     [[ -f "$_src/pihole-ha-oui-update" ]] && { cp "$_src/pihole-ha-oui-update" /usr/local/bin/pihole-ha-oui-update; chmod 755 /usr/local/bin/pihole-ha-oui-update; }
-    # platform library
+    # platform library + management CLI
     if [[ -f "$_src/pihole-ha-platform" ]]; then
         mkdir -p /usr/local/lib/pihole-ha
         cp "$_src/pihole-ha-platform" /usr/local/lib/pihole-ha/pihole-ha-platform
         chmod 755 /usr/local/lib/pihole-ha/pihole-ha-platform
     fi
+    [[ -f "$_src/pihole-ha-cli" ]] && { mkdir -p /usr/local/lib/pihole-ha; cp "$_src/pihole-ha-cli" /usr/local/lib/pihole-ha/pihole-ha-cli; chmod 755 /usr/local/lib/pihole-ha/pihole-ha-cli; }
     # web UI source (admin panel; www/ only exists in the internal build)
     mkdir -p /usr/local/share/pihole-ha
     for _w in ha.lp ha-api.lp ha.js VERSION; do [[ -f "$_src/$_w" ]] && cp "$_src/$_w" "/usr/local/share/pihole-ha/$_w"; done
@@ -611,6 +612,8 @@ printf "  %b Installing platform abstraction..." "${INFO}"
 mkdir -p /usr/local/lib/pihole-ha
 cp "$SCRIPT_DIR/pihole-ha-platform" /usr/local/lib/pihole-ha/pihole-ha-platform
 chmod 755 /usr/local/lib/pihole-ha/pihole-ha-platform
+cp "$SCRIPT_DIR/pihole-ha-cli" /usr/local/lib/pihole-ha/pihole-ha-cli
+chmod 755 /usr/local/lib/pihole-ha/pihole-ha-cli
 printf "%b  %b Platform abstraction installed\\n" "${OVER}" "${TICK}"
 
 printf "  %b Installing scripts..." "${INFO}"

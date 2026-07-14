@@ -5,6 +5,19 @@
 
 set -uo pipefail
 
+# --- Management CLI dispatch -------------------------------------------------
+# This binary is both the failover daemon and the global `pihole-ha` command.
+# systemd and Docker launch it bare with no controlling TTY (or as `daemon`),
+# which runs the failover loop below. A subcommand — or a bare run in an
+# interactive terminal — hands off to the CLI instead, so `pihole-ha update`,
+# `status`, etc. work from anywhere.
+case "${1:-}" in
+    daemon) shift ;;                                   # explicit: run the daemon
+    "")     [[ -t 1 ]] && exec /usr/local/lib/pihole-ha/pihole-ha-cli help ;;  # bare+TTY → help; bare+no TTY (systemd/Docker) → daemon
+    *)      exec /usr/local/lib/pihole-ha/pihole-ha-cli "$@" ;;                 # any subcommand → CLI
+esac
+# ----------------------------------------------------------------------------
+
 # Load platform abstraction (systemd vs Docker)
 for _p in /usr/local/lib/pihole-ha/pihole-ha-platform ./pihole-ha-platform; do
     [[ -f "$_p" ]] && { . "$_p"; break; }

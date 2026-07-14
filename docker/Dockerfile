@@ -25,8 +25,9 @@ RUN apk add --no-cache \
 # Copy pihole-FTL binary (needed for --config CLI to signal running FTL)
 COPY --from=pihole-src /usr/bin/pihole-FTL /usr/bin/pihole-FTL
 
-# Install platform abstraction
+# Install platform abstraction + management CLI
 COPY pihole-ha-platform /usr/local/lib/pihole-ha/pihole-ha-platform
+COPY pihole-ha-cli /usr/local/lib/pihole-ha/pihole-ha-cli
 
 # Install pihole-ha scripts
 COPY pihole-ha /usr/local/bin/pihole-ha
@@ -35,7 +36,7 @@ COPY pihole-ha-sync /usr/local/bin/pihole-ha-sync
 COPY pihole-ha-sync-pull /usr/local/bin/pihole-ha-sync-pull
 COPY new-dhcp-device /usr/local/bin/new-dhcp-device
 COPY pihole-ha-oui-update /usr/local/bin/pihole-ha-oui-update
-RUN chmod 755 /usr/local/bin/pihole-ha* /usr/local/bin/new-dhcp-device /usr/local/lib/pihole-ha/pihole-ha-platform
+RUN chmod 755 /usr/local/bin/pihole-ha* /usr/local/bin/new-dhcp-device /usr/local/lib/pihole-ha/pihole-ha-platform /usr/local/lib/pihole-ha/pihole-ha-cli
 
 
 # Install Pi-hole admin panel integration source files

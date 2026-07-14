@@ -1,0 +1,146 @@
+#!/bin/bash
+# pihole-ha-cli — the management CLI behind the global `pihole-ha` command.
+# Invoked by the pihole-ha dispatcher (see the top of `pihole-ha`); it is not
+# meant to be run directly. Subcommands: update, status, version, restart,
+# logs, debug, uninstall, help.
+set -uo pipefail
+
+REPO_URL="https://github.com/RamSet/pihole-ha-cluster.git"
+REPO_TARBALL="https://github.com/RamSet/pihole-ha-cluster/archive/refs/heads/main.tar.gz"
+RAW_VERSION_URL="https://raw.githubusercontent.com/RamSet/pihole-ha-cluster/main/VERSION"
+VERSION_FILE="/usr/local/share/pihole-ha/VERSION"
+DASH="http://127.0.0.1:8887"
+
+ARGV=("$@")
+
+_c()   { command -v "$1" >/dev/null 2>&1; }
+_have_systemd() { _c systemctl && [[ -d /run/systemd/system ]]; }
+_local_version() { tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null || echo "unknown"; }
+_latest_version() { curl -fsSL --max-time 5 "$RAW_VERSION_URL" 2>/dev/null | tr -d '[:space:]'; }
+
+# Re-run the whole command as root via sudo when needed.
+_need_root() {
+    [[ $EUID -eq 0 ]] && return 0
+    if _c sudo; then exec sudo pihole-ha "${ARGV[@]}"; fi
+    echo "This needs root — re-run with: sudo pihole-ha ${ARGV[*]}" >&2
+    exit 1
+}
+
+# Fetch the repo into a temp dir (git if present, else tarball) and echo its path.
+_fetch_repo() {
+    local tmp; tmp="$(mktemp -d)" || return 1
+    if _c git; then
+        git clone --depth 1 -q "$REPO_URL" "$tmp" 2>/dev/null || { rm -rf "$tmp"; return 1; }
+    elif _c curl && _c tar; then
+        curl -fsSL --max-time 30 "$REPO_TARBALL" 2>/dev/null | tar -xz -C "$tmp" --strip-components=1 2>/dev/null \
+            || { rm -rf "$tmp"; return 1; }
+    else
+        rm -rf "$tmp"; return 1
+    fi
+    printf '%s\n' "$tmp"
+}
+
+cmd_update() {
+    _need_root
+    local cur; cur="$(_local_version)"
+    printf 'Fetching latest pihole-ha (current: %s) ...\n' "$cur"
+    local dir; dir="$(_fetch_repo)" || { echo "Fetch failed — need git, or curl+tar, and network access." >&2; exit 1; }
+    if [[ ! -x "$dir/install.sh" ]]; then echo "Fetched copy is missing install.sh — aborting." >&2; rm -rf "$dir"; exit 1; fi
+    bash "$dir/install.sh" --update
+    rm -rf "$dir"
+}
+
+cmd_version() {
+    local cur latest; cur="$(_local_version)"; latest="$(_latest_version)"
+    printf 'pihole-ha %s\n' "$cur"
+    if [[ -n "$latest" ]]; then
+        if [[ "$latest" != "$cur" ]]; then
+            printf 'update available: %s  (run: sudo pihole-ha update)\n' "$latest"
+        else
+            printf 'up to date\n'
+        fi
+    fi
+}
+
+cmd_status() {
+    printf 'pihole-ha %s\n' "$(_local_version)"
+    if _have_systemd; then
+        local s
+        for s in pihole-ha pihole-ha-dash; do
+            printf '  %-16s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || echo unknown)"
+        done
+    fi
+    local js
+    js="$(curl -s --max-time 3 "$DASH/api/status" 2>/dev/null)"
+    if [[ -n "$js" ]]; then
+        local role dhcp vip
+        role="$(printf '%s' "$js" | grep -o '"role":"[^"]*"' | head -1 | cut -d'"' -f4)"
+        dhcp="$(printf '%s' "$js" | grep -o '"dhcp_active":[a-z]*' | head -1 | cut -d: -f2)"
+        vip="$(printf '%s' "$js" | grep -o '"vip_held":[a-z]*' | head -1 | cut -d: -f2)"
+        printf '  role: %s   dhcp_active: %s   vip_held: %s\n' "${role:-?}" "${dhcp:-?}" "${vip:-?}"
+    else
+        printf '  dashboard: unreachable on :8887\n'
+    fi
+}
+
+cmd_restart() {
+    _need_root
+    if _have_systemd; then
+        systemctl restart pihole-ha pihole-ha-dash && echo "restarted pihole-ha + pihole-ha-dash"
+    else
+        echo "No systemd here — restart the container instead." >&2; exit 1
+    fi
+}
+
+cmd_logs() {
+    if ! _have_systemd; then echo "No systemd here — use 'docker logs' instead." >&2; exit 1; fi
+    if [[ "${1:-}" == "-f" || "${1:-}" == "follow" ]]; then
+        journalctl -u pihole-ha -u pihole-ha-dash -f
+    else
+        journalctl -u pihole-ha -u pihole-ha-dash -n "${1:-100}" --no-pager
+    fi
+}
+
+cmd_debug() {
+    if [[ -x /usr/local/bin/pihole-ha-debug ]]; then exec /usr/local/bin/pihole-ha-debug "$@"; fi
+    echo "pihole-ha-debug not installed." >&2; exit 1
+}
+
+cmd_uninstall() {
+    _need_root
+    local dir; dir="$(_fetch_repo)" || { echo "Fetch failed — clone the repo and run ./install.sh --uninstall." >&2; exit 1; }
+    bash "$dir/install.sh" --uninstall
+    rm -rf "$dir"
+}
+
+cmd_help() {
+    cat <<'EOF'
+pihole-ha — manage the Pi-hole HA cluster node
+
+Usage: pihole-ha <command>
+
+  update       Update this node to the latest release (fetches fresh; run from anywhere)
+  status       Show version, service state, and this node's role/VIP/DHCP
+  version      Show installed version and whether an update is available
+  restart      Restart the pihole-ha daemon and dashboard
+  logs [-f|N]  Show daemon+dashboard logs (last 100, N lines, or -f to follow)
+  debug        Run the diagnostics collector (pihole-ha-debug)
+  uninstall    Remove pihole-ha from this node (keeps Pi-hole)
+  help         Show this help
+
+Commands that change the system (update, restart, uninstall) re-run with sudo automatically.
+EOF
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+    update)                 cmd_update "$@" ;;
+    status|st)              cmd_status "$@" ;;
+    version|-v|--version)   cmd_version "$@" ;;
+    restart)                cmd_restart "$@" ;;
+    logs|log)               cmd_logs "$@" ;;
+    debug)                  cmd_debug "$@" ;;
+    uninstall|remove)       cmd_uninstall "$@" ;;
+    help|-h|--help)         cmd_help ;;
+    *) echo "Unknown command: $cmd" >&2; echo; cmd_help; exit 1 ;;
+esac
