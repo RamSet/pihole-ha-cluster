@@ -971,7 +971,7 @@ $(function () {
                     'update available (v' + escapeHtml(d.latest) + ')</span>' +
                     '<br><span style="color:#f0ad4e;font-size:12px">To update, run: ' +
                     '<code style="background:rgba(240,173,78,0.15);padding:1px 6px;border-radius:3px">' +
-                    'sudo ./install.sh --update</code></span>'
+                    'sudo pihole-ha update</code></span>'
                 );
             } else if (d.latest) {
                 $("#ha-version-update").html(' &middot; <span style="color:#00a65a">up to date</span>');

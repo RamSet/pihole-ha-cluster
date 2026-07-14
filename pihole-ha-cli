@@ -26,29 +26,29 @@ _need_root() {
     exit 1
 }
 
-# Fetch the repo into a temp dir (git if present, else tarball) and echo its path.
-_fetch_repo() {
-    local tmp; tmp="$(mktemp -d)" || return 1
+# Fetch the latest repo and hand off to its installer via exec. exec matters:
+# the installer overwrites this very script, and if bash were still reading it
+# afterwards it would parse corrupted bytes (a self-update syntax error).
+# Replacing the process avoids that. One temp dir is left behind and cleaned at
+# the start of the next run.
+_run_installer() {   # $1 = --update | --uninstall
+    _need_root
+    rm -rf /tmp/.pihole-ha-src.* 2>/dev/null || true
+    local dir; dir="$(mktemp -d /tmp/.pihole-ha-src.XXXXXX)" || { echo "mktemp failed" >&2; exit 1; }
+    printf 'Fetching latest pihole-ha (current: %s) ...\n' "$(_local_version)"
     if _c git; then
-        git clone --depth 1 -q "$REPO_URL" "$tmp" 2>/dev/null || { rm -rf "$tmp"; return 1; }
+        git clone --depth 1 -q "$REPO_URL" "$dir" 2>/dev/null || { echo "Fetch failed — git + network needed." >&2; rm -rf "$dir"; exit 1; }
     elif _c curl && _c tar; then
-        curl -fsSL --max-time 30 "$REPO_TARBALL" 2>/dev/null | tar -xz -C "$tmp" --strip-components=1 2>/dev/null \
-            || { rm -rf "$tmp"; return 1; }
+        curl -fsSL --max-time 30 "$REPO_TARBALL" 2>/dev/null | tar -xz -C "$dir" --strip-components=1 2>/dev/null \
+            || { echo "Fetch failed — curl/tar + network needed." >&2; rm -rf "$dir"; exit 1; }
     else
-        rm -rf "$tmp"; return 1
+        echo "Need git, or curl+tar, plus network access." >&2; rm -rf "$dir"; exit 1
     fi
-    printf '%s\n' "$tmp"
+    [[ -x "$dir/install.sh" ]] || { echo "Fetched copy is missing install.sh." >&2; rm -rf "$dir"; exit 1; }
+    exec bash "$dir/install.sh" "$1"
 }
 
-cmd_update() {
-    _need_root
-    local cur; cur="$(_local_version)"
-    printf 'Fetching latest pihole-ha (current: %s) ...\n' "$cur"
-    local dir; dir="$(_fetch_repo)" || { echo "Fetch failed — need git, or curl+tar, and network access." >&2; exit 1; }
-    if [[ ! -x "$dir/install.sh" ]]; then echo "Fetched copy is missing install.sh — aborting." >&2; rm -rf "$dir"; exit 1; fi
-    bash "$dir/install.sh" --update
-    rm -rf "$dir"
-}
+cmd_update() { _run_installer --update; }
 
 cmd_version() {
     local cur latest; cur="$(_local_version)"; latest="$(_latest_version)"
@@ -112,12 +112,7 @@ cmd_debug() {
     echo "pihole-ha-debug not installed." >&2; exit 1
 }
 
-cmd_uninstall() {
-    _need_root
-    local dir; dir="$(_fetch_repo)" || { echo "Fetch failed — clone the repo and run ./install.sh --uninstall." >&2; exit 1; }
-    bash "$dir/install.sh" --uninstall
-    rm -rf "$dir"
-}
+cmd_uninstall() { _run_installer --uninstall; }
 
 cmd_help() {
     cat <<'EOF'
