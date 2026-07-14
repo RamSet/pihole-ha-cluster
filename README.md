@@ -99,6 +99,22 @@ sudo ./setup.sh
 
 For manual Docker setup without the installer, see [Docker README](docker/README.md).
 
+### Managing a Node — the `pihole-ha` Command
+
+After install, a global `pihole-ha` command is available from any directory (no need to be in the clone):
+
+```bash
+pihole-ha update       # update this node to the latest release (fetches fresh from GitHub)
+pihole-ha status       # version, service state, and this node's role / VIP / DHCP
+pihole-ha version      # installed version + whether an update is available
+pihole-ha restart      # restart the daemon and dashboard
+pihole-ha logs [-f]    # daemon + dashboard logs (add -f to follow)
+pihole-ha debug        # run the diagnostics collector
+pihole-ha uninstall    # remove pihole-ha (Pi-hole is left untouched)
+```
+
+`update` pulls a fresh copy of the latest release and runs the installer, so it works no matter where (or whether) the original clone still exists. Commands that change the system re-run with `sudo` automatically. The classic `cd <clone> && sudo ./install.sh --update` still works too — and is how an existing install first picks up the `pihole-ha` command.
+
 ### Configuration Files
 
 All config lives in `/etc/pihole-ha/`:

@@ -70,8 +70,14 @@ cmd_status() {
             printf '  %-16s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null || echo unknown)"
         done
     fi
-    local js
-    js="$(curl -s --max-time 3 "$DASH/api/status" 2>/dev/null)"
+    # Prefer the local status file the daemon writes (no dependency on the
+    # dashboard being up); fall back to the dashboard API.
+    local js=""
+    local f
+    for f in /run/pihole-ha/status.json /var/run/pihole-ha/status.json; do
+        [[ -f "$f" ]] && { js="$(cat "$f" 2>/dev/null)"; break; }
+    done
+    [[ -z "$js" ]] && js="$(curl -s --max-time 3 "$DASH/api/status" 2>/dev/null)"
     if [[ -n "$js" ]]; then
         local role dhcp vip
         role="$(printf '%s' "$js" | grep -o '"role":"[^"]*"' | head -1 | cut -d'"' -f4)"
