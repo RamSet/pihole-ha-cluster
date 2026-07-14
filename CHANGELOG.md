@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.8.4 — 2026-07-14
+- pihole-ha status: read local status file first; document the command
+
 ## v3.8.3 — 2026-07-14
 - Add global 'pihole-ha' management command (update from anywhere)
 
