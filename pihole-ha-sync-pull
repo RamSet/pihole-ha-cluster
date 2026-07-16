@@ -205,6 +205,7 @@ tar -xzf "$STAGING_DIR/payload.tar.gz" -C "$STAGING_DIR" 2>/dev/null || {
 log_info "event=pull_apply reason=\"payload downloaded\""
 
 APPLIED_SOMETHING=false
+APPLY_FAILED=false   # set if a component's apply command returns an error
 
 # Apply adlists (always present in payload; merge into gravity.db)
 if [[ -f "$STAGING_DIR/adlists.tsv" ]]; then
@@ -231,31 +232,40 @@ fi
 # holding entries) can therefore never blow these away on the standbys.
 _json_is_empty() { local s="${1//[[:space:]]/}"; [[ -z "$s" || "$s" == "[]" ]]; }
 
-# Apply DHCP hosts (reservations) — immediate, no restart needed
-if [[ "$COMP_DHCP" == "true" && -f "$STAGING_DIR/dhcp-hosts.json" ]]; then
-    DHCP_HOSTS="$(cat "$STAGING_DIR/dhcp-hosts.json")"
-    if _json_is_empty "$DHCP_HOSTS"; then
+# dhcp.hosts and dns.hosts are STRING-valued config keys, so — exactly like the
+# FTL settings below — they must be written AFTER any gravity-triggered FTL
+# restart. Writing them before a restart is unsafe: FTL persists its in-memory
+# copy on shutdown and silently clobbers the fresh CLI write, reverting the
+# value. Defined as functions here and invoked in the post-restart phase.
+HOSTS_APPLIED=false
+apply_dhcp_hosts() {
+    [[ "$COMP_DHCP" == "true" && -f "$STAGING_DIR/dhcp-hosts.json" ]] || return 0
+    local _v; _v="$(cat "$STAGING_DIR/dhcp-hosts.json")"
+    if _json_is_empty "$_v"; then
         log_warn "event=apply_skip component=dhcp_hosts reason=\"refusing to apply an empty reservation list — keeping local\""
-    else
-        pihole-FTL --config dhcp.hosts "$DHCP_HOSTS" >/dev/null 2>&1 && {
-            log_info "event=apply component=dhcp_hosts status=ok"
-            APPLIED_SOMETHING=true
-        }
+        return 0
     fi
-fi
-
-# Apply DNS hosts (custom records) — immediate, no restart needed
-if [[ "$COMP_DNS" == "true" && -f "$STAGING_DIR/dns-hosts.json" ]]; then
-    DNS_HOSTS="$(cat "$STAGING_DIR/dns-hosts.json")"
-    if _json_is_empty "$DNS_HOSTS"; then
+    if pihole-FTL --config dhcp.hosts "$_v" >/dev/null 2>&1; then
+        log_info "event=apply component=dhcp_hosts status=ok"
+        APPLIED_SOMETHING=true; HOSTS_APPLIED=true
+    else
+        log_warn "event=apply_fail component=dhcp_hosts"; APPLY_FAILED=true
+    fi
+}
+apply_dns_hosts() {
+    [[ "$COMP_DNS" == "true" && -f "$STAGING_DIR/dns-hosts.json" ]] || return 0
+    local _v; _v="$(cat "$STAGING_DIR/dns-hosts.json")"
+    if _json_is_empty "$_v"; then
         log_warn "event=apply_skip component=dns_hosts reason=\"refusing to apply an empty custom-DNS list — keeping local\""
-    else
-        pihole-FTL --config dns.hosts "$DNS_HOSTS" >/dev/null 2>&1 && {
-            log_info "event=apply component=dns_hosts status=ok"
-            APPLIED_SOMETHING=true
-        }
+        return 0
     fi
-fi
+    if pihole-FTL --config dns.hosts "$_v" >/dev/null 2>&1; then
+        log_info "event=apply component=dns_hosts status=ok"
+        APPLIED_SOMETHING=true; HOSTS_APPLIED=true
+    else
+        log_warn "event=apply_fail component=dns_hosts"; APPLY_FAILED=true
+    fi
+}
 
 # FTL settings: defined as a function so we can apply them AFTER any
 # FTL restart (e.g. gravity update). Applying *before* a restart is
@@ -364,6 +374,11 @@ if $GRAVITY_RESTARTED; then
         sleep 1
     done
 fi
+# Apply the string-valued keys (reservations, custom DNS, settings) here — into
+# a freshly-loaded FTL, so the final restart below persists them instead of a
+# gravity restart clobbering them.
+apply_dhcp_hosts
+apply_dns_hosts
 apply_settings
 
 # Restart FTL after settings apply so the running daemon (and admin UI)
@@ -373,13 +388,21 @@ apply_settings
 # any other cause. Fires even when gravity already restarted FTL —
 # settings are applied AFTER that restart, so a fresh restart is still
 # needed to pick them up.
-if [[ "$SETTINGS_APPLIED" == "true" ]]; then
+if [[ "$SETTINGS_APPLIED" == "true" || "$HOSTS_APPLIED" == "true" ]]; then
     platform_ftl_restart
-    log_info "event=ftl_restart reason=\"settings applied\""
+    log_info "event=ftl_restart reason=\"settings/hosts applied\""
 fi
 
 # Cleanup
 rm -rf "$STAGING_DIR"
+
+# If any component's apply command errored, do NOT record this hash — leaving
+# LOCAL_HASH stale so the next cycle re-pulls and retries instead of the node
+# wrongly believing it is up to date.
+if [[ "$APPLY_FAILED" == "true" ]]; then
+    log_warn "event=hash_not_recorded reason=\"an apply failed — will retry next cycle\" hash=$REMOTE_HASH"
+    exit 0
+fi
 
 # Save hash
 echo "$REMOTE_HASH" > "$LAST_HASH_FILE"
