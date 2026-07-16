@@ -135,6 +135,14 @@ FORCE=false
 [[ "${1:-}" == "--force" ]] && FORCE=true
 
 if [[ "$REMOTE_HASH" == "$LOCAL_HASH" && "$FORCE" != "true" ]]; then
+    # Same content — nothing to apply. But still adopt a higher config-version so
+    # a node that already holds this content isn't left "behind" in version (which
+    # would make its own later changes look older than they are).
+    _lv="$(cat /etc/pihole-ha/sync-version 2>/dev/null || echo 0)"
+    if [[ -n "$REMOTE_VER" ]] && (( REMOTE_VER > _lv )); then
+        echo "$REMOTE_VER" > /etc/pihole-ha/sync-version
+        log_info "event=version_adopt version=$REMOTE_VER reason=\"same content, newer version\""
+    fi
     log_info "event=skip reason=\"already up to date\" hash=$REMOTE_HASH"
     exit 0
 fi
