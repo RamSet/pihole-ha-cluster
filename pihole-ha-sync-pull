@@ -224,22 +224,37 @@ if [[ -f "$STAGING_DIR/adlists.tsv" ]]; then
     APPLIED_SOMETHING=true
 fi
 
-# Apply DHCP hosts (immediate, no restart needed)
+# True when a JSON array is empty ("[]" or "[ ]" or blank). Used to refuse
+# wiping reservations/records: sync must never CLEAR the DHCP reservation list
+# or custom DNS list. A publisher whose runtime config reads back empty (e.g. a
+# node where `pihole-FTL --config dhcp.hosts` returns [] despite the toml
+# holding entries) can therefore never blow these away on the standbys.
+_json_is_empty() { local s="${1//[[:space:]]/}"; [[ -z "$s" || "$s" == "[]" ]]; }
+
+# Apply DHCP hosts (reservations) — immediate, no restart needed
 if [[ "$COMP_DHCP" == "true" && -f "$STAGING_DIR/dhcp-hosts.json" ]]; then
     DHCP_HOSTS="$(cat "$STAGING_DIR/dhcp-hosts.json")"
-    pihole-FTL --config dhcp.hosts "$DHCP_HOSTS" >/dev/null 2>&1 && {
-        log_info "event=apply component=dhcp_hosts status=ok"
-        APPLIED_SOMETHING=true
-    }
+    if _json_is_empty "$DHCP_HOSTS"; then
+        log_warn "event=apply_skip component=dhcp_hosts reason=\"refusing to apply an empty reservation list — keeping local\""
+    else
+        pihole-FTL --config dhcp.hosts "$DHCP_HOSTS" >/dev/null 2>&1 && {
+            log_info "event=apply component=dhcp_hosts status=ok"
+            APPLIED_SOMETHING=true
+        }
+    fi
 fi
 
-# Apply DNS hosts (immediate, no restart needed)
+# Apply DNS hosts (custom records) — immediate, no restart needed
 if [[ "$COMP_DNS" == "true" && -f "$STAGING_DIR/dns-hosts.json" ]]; then
     DNS_HOSTS="$(cat "$STAGING_DIR/dns-hosts.json")"
-    pihole-FTL --config dns.hosts "$DNS_HOSTS" >/dev/null 2>&1 && {
-        log_info "event=apply component=dns_hosts status=ok"
-        APPLIED_SOMETHING=true
-    }
+    if _json_is_empty "$DNS_HOSTS"; then
+        log_warn "event=apply_skip component=dns_hosts reason=\"refusing to apply an empty custom-DNS list — keeping local\""
+    else
+        pihole-FTL --config dns.hosts "$DNS_HOSTS" >/dev/null 2>&1 && {
+            log_info "event=apply component=dns_hosts status=ok"
+            APPLIED_SOMETHING=true
+        }
+    fi
 fi
 
 # FTL settings: defined as a function so we can apply them AFTER any
