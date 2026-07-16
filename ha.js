@@ -143,6 +143,15 @@ $(function () {
 
     // ---- Render: Overview cards ----
 
+    // Render a node timestamp (UTC "...Z") in the viewer's local time, so the
+    // display is correct regardless of the node's own timezone. Falls back to
+    // the raw string for anything unparseable (e.g. legacy naive timestamps).
+    function fmtTime(ts) {
+        if (!ts) return "—";
+        var d = new Date(ts);
+        return isNaN(d.getTime()) ? ts : d.toLocaleString();
+    }
+
     function renderOverview() {
         // Gateway + timestamp
         if (statusData) {
@@ -153,7 +162,7 @@ $(function () {
                 "Gateway " + GATEWAY_IP + ": " +
                 '<strong>' + (gwOk ? "Reachable" : "UNREACHABLE") + '</strong>'
             );
-            $("#ha-timestamp").text("Last check: " + (statusData.timestamp || "\u2014"));
+            $("#ha-timestamp").text("Last check: " + fmtTime(statusData.timestamp));
         } else {
             $("#gw-status").html(
                 '<i class="fa fa-circle" style="color:#aaa; font-size:10px"></i> Gateway: No data'
@@ -393,9 +402,9 @@ $(function () {
             }
         }
 
-        // Last sync timestamp from manifest
+        // Last sync timestamp from manifest (UTC → viewer's local time)
         if (syncManifest && syncManifest.timestamp) {
-            $("#sync-ts").text("Last build: " + syncManifest.timestamp);
+            $("#sync-ts").text("Last build: " + fmtTime(syncManifest.timestamp));
         }
     }
 

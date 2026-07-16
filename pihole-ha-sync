@@ -286,7 +286,7 @@ tar -czf "$PAYLOAD_FILE.tmp" -C "$STAGING_DIR" $TAR_FILES 2>/dev/null || {
 mv "$PAYLOAD_FILE.tmp" "$PAYLOAD_FILE"
 
 # Build manifest with component flags
-TIMESTAMP="$(date '+%Y-%m-%dT%H:%M:%S')"
+TIMESTAMP="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"   # UTC with Z marker — the panel renders it in the viewer's local time
 # Record our own build timestamp so the sync-pull direction guard treats what we
 # publish as "current" — a stale peer can't later roll our newer config back.
 echo "$TIMESTAMP" > /etc/pihole-ha/sync-last-ts 2>/dev/null || true

@@ -627,7 +627,7 @@ write_status() {
     {
         printf '{"ha_enabled":%s,"dhcp_master":"%s","node":{"ip":"%s","role":"%s","priority":%d,"dhcp_active":%s,"vip":"%s","vip_enabled":%s,"vip_held":%s},' \
             "$HA_ENABLED" "$DHCP_MASTER" "$LOCAL_IP" "$ROLE" "$PRIORITY" "$dhcp" "$VIP" "$VIP_ENABLED" "$vip_held"
-        printf '"gateway":%s,"timestamp":"%s",' "$gw" "$(date '+%Y-%m-%dT%H:%M:%S')"
+        printf '"gateway":%s,"timestamp":"%s",' "$gw" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         printf '"reason":"%s","peers":{' "$(echo "$reason" | sed 's/"/\\"/g')"
         local sep=""
         for (( i=0; i<NODE_COUNT; i++ )); do
