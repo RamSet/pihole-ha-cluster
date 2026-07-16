@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.10.0 — 2026-07-15
+- Drive catch-up by content-version, not pull-count (fixes multi-node lease loss)
+
 ## v3.9.2 — 2026-07-15
 - sync-pull: apply dhcp.hosts/dns.hosts after the FTL restart, not before
 
