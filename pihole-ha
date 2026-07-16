@@ -79,7 +79,8 @@ _ACTIVATE_BASE="${ACTIVATE_AFTER:-2}"      # base down-checks before a standby t
 STATUS_DIR="/run/pihole-ha"
 STATUS_FILE="$STATUS_DIR/status.json"
 SYNC_CONF="/etc/pihole-ha/sync.conf"
-GEN_FILE="/etc/pihole-ha/sync-generation"          # persistent pull-generation counter
+GEN_FILE="/etc/pihole-ha/sync-generation"          # persistent pull-generation counter (legacy)
+VER_FILE="/etc/pihole-ha/sync-version"             # content-version: advances only on real config changes
 SYNC_ROLE_FILE="$STATUS_DIR/sync-role"             # PUBLISHER | STANDBY (for the dashboard)
 
 LOCAL_IP="$(platform_get_local_ip)"
@@ -753,19 +754,19 @@ write_sync_primary() {
 # primary returns and a peer (the acting primary during the outage) holds newer
 # config. Synchronous — blocks this tick for the catch-up, which is rare.
 catch_up_from_peers() {
-    local _local_gen _best_gen _best_ip _peer_gen _ip _pull_script _ok
-    _local_gen="$(cat "$GEN_FILE" 2>/dev/null || echo 0)"
-    _best_gen=$_local_gen
+    local _local_ver _best_ver _best_ip _peer_ver _ip _pull_script _ok
+    _local_ver="$(cat "$VER_FILE" 2>/dev/null || echo 0)"
+    _best_ver=$_local_ver
     _best_ip=""
     for _ip in "${NODES[@]}"; do
         [[ "$_ip" == "$LOCAL_IP" ]] && continue
         is_alive_for_publish "$_ip" || continue
-        _peer_gen="$(curl -sf --max-time 3 "http://$_ip:8887/api/sync/generation" 2>/dev/null | grep -o '"generation":[0-9]*' | cut -d: -f2)"
-        [[ -z "$_peer_gen" ]] && continue
-        if (( _peer_gen > _best_gen )); then _best_gen=$_peer_gen; _best_ip=$_ip; fi
+        _peer_ver="$(curl -sf --max-time 3 "http://$_ip:8887/api/sync/version" 2>/dev/null | grep -o '"version":[0-9]*' | cut -d: -f2)"
+        [[ -z "$_peer_ver" ]] && continue
+        if (( _peer_ver > _best_ver )); then _best_ver=$_peer_ver; _best_ip=$_ip; fi
     done
     [[ -z "$_best_ip" ]] && return 0
-    log_info "event=sync_catchup_pull source=$_best_ip peer_gen=$_best_gen local_gen=$_local_gen"
+    log_info "event=sync_catchup_pull source=$_best_ip peer_ver=$_best_ver local_ver=$_local_ver"
     _ok=false
     for _pull_script in /usr/local/bin/pihole-ha-sync-pull ./pihole-ha-sync-pull; do
         [[ -x "$_pull_script" ]] || continue
@@ -776,7 +777,7 @@ catch_up_from_peers() {
         log_warn "event=sync_catchup_fail source=$_best_ip — publishing with what we have"
         return 1
     fi
-    log_info "event=sync_catchup_done source=$_best_ip generation=$_best_gen"
+    log_info "event=sync_catchup_done source=$_best_ip version=$_best_ver"
     return 0
 }
 
@@ -798,11 +799,12 @@ manage_sync_role() {
 
     if [[ "$_ap" == "$LOCAL_IP" ]]; then
         if [[ "$_current" != "$LOCAL_IP" ]]; then
-            # Configured primary returning: catch up BEFORE claiming publisher so
-            # the next publish can't overwrite the acting primary's newer config.
-            if (( MY_IDX == 0 )); then
-                catch_up_from_peers || true
-            fi
+            # Becoming publisher: catch up to the highest config-version FIRST, so
+            # this node can't overwrite newer config held by another node (e.g. a
+            # lease added on a lower-priority survivor during a multi-node outage).
+            # Version-gated, so it's a no-op unless a peer is genuinely newer —
+            # safe for ANY promoting node, not just the configured primary.
+            catch_up_from_peers || true
             log_info "event=sync_promote acting_primary=$LOCAL_IP previous=$_current"
             write_sync_primary "$LOCAL_IP"
             platform_sync_pull_disable

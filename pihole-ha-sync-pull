@@ -111,6 +111,7 @@ PRIMARY_URL="http://$_PULL_FROM:8887"
 # Parse hash from manifest
 REMOTE_HASH="$(echo "$MANIFEST" | grep -o '"hash":"[^"]*"' | cut -d'"' -f4)"
 REMOTE_TS="$(echo "$MANIFEST" | grep -o '"timestamp":"[^"]*"' | cut -d'"' -f4)"
+REMOTE_VER="$(echo "$MANIFEST" | grep -o '"config_version":[0-9]*' | cut -d: -f2)"
 REMOTE_GRAVITY_MD5="$(echo "$MANIFEST" | grep -o '"gravity_md5":"[^"]*"' | cut -d'"' -f4)"
 
 # Parse component flags from manifest
@@ -145,9 +146,19 @@ fi
 # config back. Bootstrap/catch-up always pull the highest-generation (newest)
 # node, so those legitimately-forced pulls carry an equal-or-newer timestamp and
 # pass. A missing/blank timestamp on either side skips the guard (fail open).
+# Primary guard: config-version. It advances only on real content changes and is
+# monotonic (no clock dependency), so a lower remote version means the source is
+# behind us — refuse, even under --force (bootstrap/reconcile always pull the
+# HIGHEST version, so a legitimate catch-up never trips this).
+LOCAL_VER="$(cat /etc/pihole-ha/sync-version 2>/dev/null || echo 0)"
+if [[ -n "$REMOTE_VER" ]] && (( REMOTE_VER < LOCAL_VER )); then
+    log_warn "event=pull_reject_older reason=\"remote config-version is behind local — refusing rollback\" remote_ver=$REMOTE_VER local_ver=$LOCAL_VER from=$_PULL_FROM"
+    exit 0
+fi
+# Fallback guard for legacy manifests without a version: timestamp direction.
 LAST_TS_FILE="/etc/pihole-ha/sync-last-ts"
 LOCAL_TS="$(cat "$LAST_TS_FILE" 2>/dev/null || echo "")"
-if [[ -n "$REMOTE_TS" && -n "$LOCAL_TS" && "$REMOTE_TS" < "$LOCAL_TS" ]]; then
+if [[ -z "$REMOTE_VER" && -n "$REMOTE_TS" && -n "$LOCAL_TS" && "$REMOTE_TS" < "$LOCAL_TS" ]]; then
     log_warn "event=pull_reject_older reason=\"remote config is older than local — refusing rollback\" remote_ts=$REMOTE_TS local_ts=$LOCAL_TS from=$_PULL_FROM"
     exit 0
 fi
@@ -413,7 +424,9 @@ mkdir -p /etc/pihole-ha
 _cur_gen="$(cat "$GEN_FILE" 2>/dev/null || echo 0)"
 echo "$(( _cur_gen + 1 ))" > "$GEN_FILE"
 
-# Record the applied build timestamp for the direction guard above.
+# Adopt the config-version and build timestamp we just applied — these drive the
+# direction guard and the publisher's reconcile decision on every node.
+[[ -n "$REMOTE_VER" ]] && echo "$REMOTE_VER" > /etc/pihole-ha/sync-version
 [[ -n "$REMOTE_TS" ]] && echo "$REMOTE_TS" > /etc/pihole-ha/sync-last-ts
 
 if [[ "$APPLIED_SOMETHING" == "true" ]]; then

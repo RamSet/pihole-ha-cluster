@@ -166,44 +166,39 @@ export_settings() {
     echo "$json"
 }
 
-# Bootstrap check: only runs when this primary has never published a payload
-# (no HASH_FILE yet). Protects a freshly-rebuilt primary from overwriting good
-# standby config. Once primary has published once, it is authoritative and we
-# must not pull from standbys — otherwise local edits get reverted on every tick
-# as standbys naturally accumulate generation from each successful pull.
+# Reconcile before publishing. If any alive peer holds a higher CONFIG-VERSION
+# (a real content change made while we were down or acting as standby), pull it
+# FIRST — so a returning/stale node can never republish old config over newer
+# changes. Runs every cycle: it's a no-op when everyone is in sync (equal
+# versions), because — unlike the pull-count "generation" — the version only
+# advances on an actual content change, so in-sync nodes always match.
+VER_FILE="/etc/pihole-ha/sync-version"
 GEN_FILE="/etc/pihole-ha/sync-generation"
-if [[ ! -f "$HASH_FILE" ]]; then
-    _local_gen="$(cat "$GEN_FILE" 2>/dev/null || echo 0)"
-    _best_gen=$_local_gen
-    _best_ip=""
-    _any_standby_reachable=false
-    for (( _bi=1; _bi<NODE_COUNT; _bi++ )); do
-        _bs_ip="${NODES[$_bi]}"
-        [[ "$_bs_ip" == "$LOCAL_IP" ]] && continue
-        _peer_gen="$(curl -sf --max-time 5 "http://$_bs_ip:8887/api/sync/generation" 2>/dev/null | grep -o '"generation":[0-9]*' | cut -d: -f2)"
-        [[ -z "$_peer_gen" ]] && continue
-        _any_standby_reachable=true
-        if (( _peer_gen > _best_gen )); then
-            _best_gen=$_peer_gen
-            _best_ip=$_bs_ip
-        fi
+_local_ver="$(cat "$VER_FILE" 2>/dev/null || echo 0)"
+_best_ver=$_local_ver
+_best_ip=""
+_any_peer_reachable=false
+for (( _bi=0; _bi<NODE_COUNT; _bi++ )); do
+    _bs_ip="${NODES[$_bi]}"
+    [[ "$_bs_ip" == "$LOCAL_IP" ]] && continue
+    _peer_ver="$(curl -sf --max-time 5 "http://$_bs_ip:8887/api/sync/version" 2>/dev/null | grep -o '"version":[0-9]*' | cut -d: -f2)"
+    [[ -z "$_peer_ver" ]] && continue
+    _any_peer_reachable=true
+    # Strictly-greater only: equal version == same content, so no pull. On a true
+    # split-brain tie (both edited at the same version) the higher-priority node
+    # wins because NODES is in priority order and we never overwrite on a tie.
+    if (( _peer_ver > _best_ver )); then _best_ver=$_peer_ver; _best_ip=$_bs_ip; fi
+done
+if [[ -n "$_best_ip" ]]; then
+    log_info "event=reconcile reason=\"peer holds newer config\" from=$_best_ip peer_ver=$_best_ver local_ver=$_local_ver"
+    for _pull_script in /usr/local/bin/pihole-ha-sync-pull ./pihole-ha-sync-pull; do
+        [[ -x "$_pull_script" ]] || continue
+        PULL_SOURCE="$_best_ip" "$_pull_script" --force || log_warn "event=reconcile_fail from=$_best_ip"
+        break
     done
-
-    if [[ -n "$_best_ip" ]]; then
-        log_info "event=bootstrap reason=\"standby has newer config\" standby=$_best_ip standby_gen=$_best_gen local_gen=$_local_gen"
-        _pull_ok=false
-        for _pull_script in /usr/local/bin/pihole-ha-sync-pull ./pihole-ha-sync-pull; do
-            [[ -x "$_pull_script" ]] || continue
-            PULL_SOURCE="$_best_ip" "$_pull_script" --force && _pull_ok=true
-            break
-        done
-        if [[ "$_pull_ok" != "true" ]]; then
-            log_warn "event=bootstrap_fail reason=\"pull from standby failed\" standby=$_best_ip"
-        fi
-    elif [[ "$_local_gen" -eq 0 && "$_any_standby_reachable" == "false" ]]; then
-        log_warn "event=skip reason=\"fresh node with no config and no standbys reachable — will retry next cycle\""
-        exit 0
-    fi
+elif [[ ! -f "$HASH_FILE" && "$_local_ver" -eq 0 && "$_any_peer_reachable" == "false" ]]; then
+    log_warn "event=skip reason=\"fresh node with no config and no peers reachable — will retry next cycle\""
+    exit 0
 fi
 
 CURRENT="$(current_hash)"
@@ -216,6 +211,17 @@ FORCE=false
 if [[ "$CURRENT" == "$PREVIOUS" && "$FORCE" != "true" ]]; then
     log_info "event=skip reason=\"no changes\""
     exit 0
+fi
+
+# Advance the content-version ONLY on a real content change (not on --force of
+# identical content). Re-read after the reconcile pull above, which may have
+# adopted a peer's higher version. This is the number other nodes compare to
+# decide who holds the newest config.
+CONFIG_VERSION="$(cat "$VER_FILE" 2>/dev/null || echo 0)"
+if [[ "$CURRENT" != "$PREVIOUS" ]]; then
+    CONFIG_VERSION=$(( CONFIG_VERSION + 1 ))
+    echo "$CONFIG_VERSION" > "$VER_FILE"
+    log_info "event=version_bump version=$CONFIG_VERSION"
 fi
 
 log_info "event=build_start reason=\"changes detected\""
@@ -310,8 +316,8 @@ if [[ -f "$CLUSTER_KEY_FILE" ]]; then
         log_warn "event=sign_skip reason=\"cluster.key set but openssl missing — payload built UNSIGNED; install openssl\""
     fi
 fi
-printf '{"timestamp":"%s","hash":"%s","gravity_md5":"%s","size":%d,"signature":"%s","components":{"gravity":%s,"dhcp":%s,"dns":%s,"settings":%s,"notify":%s,"syncconf":%s,"adlists":true}}\n' \
-    "$TIMESTAMP" "$CURRENT" "$GRAVITY_MD5" "$PAYLOAD_SIZE" "$SIGNATURE" \
+printf '{"timestamp":"%s","hash":"%s","config_version":%d,"gravity_md5":"%s","size":%d,"signature":"%s","components":{"gravity":%s,"dhcp":%s,"dns":%s,"settings":%s,"notify":%s,"syncconf":%s,"adlists":true}}\n' \
+    "$TIMESTAMP" "$CURRENT" "$CONFIG_VERSION" "$GRAVITY_MD5" "$PAYLOAD_SIZE" "$SIGNATURE" \
     "$SYNC_GRAVITY" "$SYNC_DHCP" "$SYNC_DNS" "$SYNC_SETTINGS" "$SYNC_NOTIFY" "$SYNCCONF_PRESENT" > "$MANIFEST_FILE.tmp"
 mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
 

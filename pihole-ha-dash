@@ -240,6 +240,14 @@ if [[ "${1:-}" == "--handle" ]]; then
             send_headers "200 OK" "application/json"
             printf '{"generation":%s}\n' "$_gen"
             ;;
+        /api/sync/version)
+            # Content-version of the config this node currently holds. Used by
+            # the publisher's reconcile + catch-up to find the newest node.
+            _ver="$(cat /etc/pihole-ha/sync-version 2>/dev/null || echo 0)"
+            [[ "$_ver" =~ ^[0-9]+$ ]] || _ver=0
+            send_headers "200 OK" "application/json"
+            printf '{"version":%s}\n' "$_ver"
+            ;;
         /api/sync/payload)
             if [[ -f "$SYNC_PAYLOAD" ]]; then
                 printf "HTTP/1.1 200 OK\r\n"
