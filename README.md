@@ -201,6 +201,8 @@ Two scripts handle config distribution:
 
 Sync is entirely over HTTP on port 8887. No SSH keys, no rsync, no shared filesystem.
 
+**The publisher role fails over, and recovery never loses changes.** The sync publisher isn't a fixed node — it follows the same highest-priority-alive rule as the DHCP master. If the primary goes down, a surviving node auto-promotes and starts publishing, so config edits (e.g. a new DHCP reservation) made during the outage propagate to the other survivors. When a higher-priority node returns, it **catches up to the newest config before it reclaims the publisher role**, so it can never overwrite changes made while it was away. Freshness is tracked by a **content-version** that advances only on real changes (carried in the manifest, served at `/api/sync/version`), so a returning node always pulls the newest config regardless of which peer it checks — and a lower-version payload is refused outright. This holds across multi-node cascades: a change made on the last surviving node survives the others recovering in any order.
+
 ### DHCP Master Override
 
 The master override adds a manual control layer on top of automatic failover:
