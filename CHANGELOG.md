@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.9.1 — 2026-07-15
+- sync-pull: never apply an empty DHCP-reservation or custom-DNS list
+
 ## v3.9.0 — 2026-07-15
 - Restore auto-promoting sync publisher with catch-up on primary recovery
 
