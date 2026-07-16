@@ -2,6 +2,10 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.10.2 — 2026-07-16
+- Fix build/check time display: emit UTC, render in viewer's local time (#3)
+- README: document sync-publisher failover + content-versioned catch-up
+
 ## v3.10.1 — 2026-07-15
 - sync-pull: adopt a higher config-version even when content is unchanged
 
