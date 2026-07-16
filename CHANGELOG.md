@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.9.0 — 2026-07-15
+- Restore auto-promoting sync publisher with catch-up on primary recovery
+
 ## v3.8.5 — 2026-07-14
 - pihole-ha update: exec the installer + point the UI at the new command
 
