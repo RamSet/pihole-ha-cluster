@@ -138,6 +138,20 @@ if [[ "$REMOTE_HASH" == "$LOCAL_HASH" && "$FORCE" != "true" ]]; then
     exit 0
 fi
 
+# Direction guard: never apply a payload OLDER than what we already hold. Build
+# timestamps are ISO-8601 (lexicographic == chronological). This stops a stale
+# node — e.g. a primary returning from an outage before it has caught up, or a
+# split-brain peer after a partition heals — from rolling this node's newer
+# config back. Bootstrap/catch-up always pull the highest-generation (newest)
+# node, so those legitimately-forced pulls carry an equal-or-newer timestamp and
+# pass. A missing/blank timestamp on either side skips the guard (fail open).
+LAST_TS_FILE="/etc/pihole-ha/sync-last-ts"
+LOCAL_TS="$(cat "$LAST_TS_FILE" 2>/dev/null || echo "")"
+if [[ -n "$REMOTE_TS" && -n "$LOCAL_TS" && "$REMOTE_TS" < "$LOCAL_TS" ]]; then
+    log_warn "event=pull_reject_older reason=\"remote config is older than local — refusing rollback\" remote_ts=$REMOTE_TS local_ts=$LOCAL_TS from=$_PULL_FROM"
+    exit 0
+fi
+
 log_info "event=pull_start remote_hash=$REMOTE_HASH local_hash=$LOCAL_HASH ts=$REMOTE_TS"
 
 # Download payload
@@ -360,6 +374,9 @@ GEN_FILE="/etc/pihole-ha/sync-generation"
 mkdir -p /etc/pihole-ha
 _cur_gen="$(cat "$GEN_FILE" 2>/dev/null || echo 0)"
 echo "$(( _cur_gen + 1 ))" > "$GEN_FILE"
+
+# Record the applied build timestamp for the direction guard above.
+[[ -n "$REMOTE_TS" ]] && echo "$REMOTE_TS" > /etc/pihole-ha/sync-last-ts
 
 if [[ "$APPLIED_SOMETHING" == "true" ]]; then
     log_info "event=pull_complete status=applied primary=$SYNC_PRIMARY ts=$REMOTE_TS"

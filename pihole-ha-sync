@@ -281,6 +281,9 @@ mv "$PAYLOAD_FILE.tmp" "$PAYLOAD_FILE"
 
 # Build manifest with component flags
 TIMESTAMP="$(date '+%Y-%m-%dT%H:%M:%S')"
+# Record our own build timestamp so the sync-pull direction guard treats what we
+# publish as "current" — a stale peer can't later roll our newer config back.
+echo "$TIMESTAMP" > /etc/pihole-ha/sync-last-ts 2>/dev/null || true
 PAYLOAD_SIZE="$(stat -c%s "$PAYLOAD_FILE")"
 if (( PAYLOAD_SIZE >= 1048576 )); then
     PAYLOAD_HUMAN="$(awk "BEGIN {printf \"%.1f MB\", $PAYLOAD_SIZE/1048576}")"

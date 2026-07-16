@@ -78,6 +78,9 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-2}"      # per-check timeout (ping/DNS/API)
 _ACTIVATE_BASE="${ACTIVATE_AFTER:-2}"      # base down-checks before a standby takes over
 STATUS_DIR="/run/pihole-ha"
 STATUS_FILE="$STATUS_DIR/status.json"
+SYNC_CONF="/etc/pihole-ha/sync.conf"
+GEN_FILE="/etc/pihole-ha/sync-generation"          # persistent pull-generation counter
+SYNC_ROLE_FILE="$STATUS_DIR/sync-role"             # PUBLISHER | STANDBY (for the dashboard)
 
 LOCAL_IP="$(platform_get_local_ip)"
 
@@ -704,6 +707,125 @@ dns_only_vip_cycle() {
     fi
 }
 
+# --- Config-sync publisher role (active-active with the DHCP/VIP failover) ---
+# The sync publisher (source of config truth) follows the same highest-priority-
+# alive rule as the DHCP master. When the configured primary is down a survivor
+# auto-promotes and publishes; when the primary returns it FIRST pulls the newer
+# config from whoever was acting, THEN reclaims the publisher role — so a stale
+# returning primary can never overwrite changes made during the outage.
+
+is_alive_for_publish() {
+    local ip="$1"
+    [[ "$ip" == "$LOCAL_IP" ]] && return 0
+    [[ "${peer_ping[$ip]:-}" == "true" ]] || return 1
+    [[ "${peer_dns[$ip]:-}" == "true" ]] || return 1
+    [[ "${peer_api[$ip]:-}" == "true" ]] || return 1
+    return 0
+}
+
+# The acting sync primary is the highest-priority node that's alive to publish.
+acting_primary_ip() {
+    local i
+    for (( i=0; i<NODE_COUNT; i++ )); do
+        is_alive_for_publish "${NODES[$i]}" && { echo "${NODES[$i]}"; return; }
+    done
+    echo ""
+}
+
+read_sync_primary() {
+    local _sp=""
+    [[ -f "$SYNC_CONF" ]] && _sp="$(grep -E '^SYNC_PRIMARY=' "$SYNC_CONF" | head -1 | cut -d= -f2)"
+    [[ -z "$_sp" ]] && _sp="${NODES[0]}"
+    echo "$_sp"
+}
+
+write_sync_primary() {
+    local new="$1"
+    mkdir -p /etc/pihole-ha
+    if [[ -f "$SYNC_CONF" ]] && grep -q '^SYNC_PRIMARY=' "$SYNC_CONF"; then
+        sed -i "s/^SYNC_PRIMARY=.*/SYNC_PRIMARY=$new/" "$SYNC_CONF"
+    else
+        echo "SYNC_PRIMARY=$new" >> "$SYNC_CONF"
+    fi
+}
+
+# Pull-once from the peer with the highest generation. Used when the configured
+# primary returns and a peer (the acting primary during the outage) holds newer
+# config. Synchronous — blocks this tick for the catch-up, which is rare.
+catch_up_from_peers() {
+    local _local_gen _best_gen _best_ip _peer_gen _ip _pull_script _ok
+    _local_gen="$(cat "$GEN_FILE" 2>/dev/null || echo 0)"
+    _best_gen=$_local_gen
+    _best_ip=""
+    for _ip in "${NODES[@]}"; do
+        [[ "$_ip" == "$LOCAL_IP" ]] && continue
+        is_alive_for_publish "$_ip" || continue
+        _peer_gen="$(curl -sf --max-time 3 "http://$_ip:8887/api/sync/generation" 2>/dev/null | grep -o '"generation":[0-9]*' | cut -d: -f2)"
+        [[ -z "$_peer_gen" ]] && continue
+        if (( _peer_gen > _best_gen )); then _best_gen=$_peer_gen; _best_ip=$_ip; fi
+    done
+    [[ -z "$_best_ip" ]] && return 0
+    log_info "event=sync_catchup_pull source=$_best_ip peer_gen=$_best_gen local_gen=$_local_gen"
+    _ok=false
+    for _pull_script in /usr/local/bin/pihole-ha-sync-pull ./pihole-ha-sync-pull; do
+        [[ -x "$_pull_script" ]] || continue
+        PULL_SOURCE="$_best_ip" "$_pull_script" --force >/dev/null 2>&1 && _ok=true
+        break
+    done
+    if [[ "$_ok" != "true" ]]; then
+        log_warn "event=sync_catchup_fail source=$_best_ip — publishing with what we have"
+        return 1
+    fi
+    log_info "event=sync_catchup_done source=$_best_ip generation=$_best_gen"
+    return 0
+}
+
+# Reconcile the sync publisher role each tick. Every node independently computes
+# the same acting primary (highest-priority alive) and converges its sync.conf +
+# timers to match — no RPC needed.
+manage_sync_role() {
+    local _se="true"
+    if [[ -f "$SYNC_CONF" ]]; then
+        _se="$(grep -E '^SYNC_ENABLED=' "$SYNC_CONF" | head -1 | cut -d= -f2)"
+        [[ -z "$_se" ]] && _se="true"
+    fi
+    [[ "$_se" != "true" ]] && return 0
+
+    local _ap _current
+    _ap="$(acting_primary_ip)"
+    [[ -z "$_ap" ]] && return 0
+    _current="$(read_sync_primary)"
+
+    if [[ "$_ap" == "$LOCAL_IP" ]]; then
+        if [[ "$_current" != "$LOCAL_IP" ]]; then
+            # Configured primary returning: catch up BEFORE claiming publisher so
+            # the next publish can't overwrite the acting primary's newer config.
+            if (( MY_IDX == 0 )); then
+                catch_up_from_peers || true
+            fi
+            log_info "event=sync_promote acting_primary=$LOCAL_IP previous=$_current"
+            write_sync_primary "$LOCAL_IP"
+            platform_sync_pull_disable
+            platform_sync_enable
+            echo "PUBLISHER" > "$SYNC_ROLE_FILE"
+            NOTIFY_TAG=sync_role_change notify "<b><font color='#2ecc71'>Sync Publisher</font></b> <br> $ROLE ($LOCAL_IP) is now publishing config <br> Previous: $_current" &
+        fi
+    else
+        if [[ "$_current" == "$LOCAL_IP" ]]; then
+            log_info "event=sync_demote acting_primary=$_ap previous=$LOCAL_IP"
+            write_sync_primary "$_ap"
+            platform_sync_disable
+            platform_sync_pull_enable
+            echo "STANDBY" > "$SYNC_ROLE_FILE"
+            NOTIFY_TAG=sync_role_change notify "<b><font color='#f39c12'>Sync Yielded</font></b> <br> $ROLE ($LOCAL_IP) yielded publisher to $_ap" &
+        elif [[ "$_current" != "$_ap" ]]; then
+            log_info "event=sync_primary_changed from=$_current to=$_ap"
+            write_sync_primary "$_ap"
+            echo "STANDBY" > "$SYNC_ROLE_FILE"
+        fi
+    fi
+}
+
 # --- Main Loop ---
 log_info "event=startup ip=$LOCAL_IP priority=$PRIORITY interval=${CHECK_INTERVAL}s activate_after=$ACTIVATE_AFTER deactivate_after=$DEACTIVATE_AFTER"
 log_info "event=startup checks=\"ping dns:53 api dhcp\""
@@ -720,6 +842,9 @@ while true; do
 
     # Always run health checks so dashboard shows real peer state
     for ip in "${NODES[@]}"; do check_peer "$ip"; done
+
+    # Reconcile the config-sync publisher role (auto-promote / catch-up / yield)
+    manage_sync_role
 
     # DNS-only deployment: another server handles DHCP. Never manage dhcp.active;
     # run config sync and (if a VIP is configured) health-based VIP failover so
