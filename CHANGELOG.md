@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.10.6 — 2026-07-17
+- VIP: make the 'orbit' flavor self-explanatory (clarify it's the VIP)
+
 ## v3.10.5 — 2026-07-17
 - Panel: subtle astrophysics flavor for cluster state
 
