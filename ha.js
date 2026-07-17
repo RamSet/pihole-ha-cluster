@@ -359,10 +359,15 @@ $(function () {
                 '<td><i class="fa ' + dIcon + '" style="color:' + dColor + '"></i> ' +
                 '<span style="color:' + dColor + '">' + dLabel + '</span></td></tr>';
 
-            // Auth row: show lock status and password input if denied
-            if (peer.auth === "ok") {
+            // Auth row: reflect the real state — no password (open), authenticated,
+            // or password required / auth failed.
+            if (peer.auth === "none") {
                 delete authPending[node.ip];
-                html += '<tr><td><i class="fa fa-unlock" style="color:#00a65a"></i> Auth</td>' +
+                html += '<tr><td><i class="fa fa-unlock-alt" style="color:#888"></i> Auth</td>' +
+                    '<td><span style="color:#888">No password (open)</span></td></tr>';
+            } else if (peer.auth === "ok") {
+                delete authPending[node.ip];
+                html += '<tr><td><i class="fa fa-lock" style="color:#00a65a"></i> Auth</td>' +
                     '<td><span style="color:#00a65a">Authenticated</span></td></tr>';
             } else if (peer.auth === "denied" && authPending[node.ip]) {
                 // Password was just saved, waiting for pihole-ha to pick it up

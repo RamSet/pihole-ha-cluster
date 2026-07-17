@@ -482,7 +482,16 @@ check_peer() {
             peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="\"denied\""; return
         fi
     fi
-    peer_api[$ip]="true"; peer_auth[$ip]="\"ok\""
+    peer_api[$ip]="true"
+    # Distinguish "authenticated with a session" from "open, no password". We only
+    # ever hold a SID for a peer we actually logged into (ensure_sid no-ops when no
+    # password is configured), so a successful call with no SID means the peer has
+    # no password set — reflect that honestly instead of claiming "authenticated".
+    if [[ -n "${peer_sid[$ip]:-}" ]]; then
+        peer_auth[$ip]="\"ok\""
+    else
+        peer_auth[$ip]="\"none\""
+    fi
     # Client count from stats summary
     local stats
     stats="$(curl -s --max-time 2 "$(api_url "$ip" /api/stats/summary)" 2>/dev/null)"
