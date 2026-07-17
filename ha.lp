@@ -208,6 +208,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
 <div class="row">
     <div class="col-md-12" style="margin-bottom:10px">
         <span id="gw-status"></span>
+        <span id="ha-equilibrium" style="margin-left:10px;font-size:12px"></span>
         <span class="pull-right text-muted" id="ha-timestamp"></span>
     </div>
 </div>
@@ -366,7 +367,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
             </div>
             <div class="box-body">
                 <p class="text-muted" style="margin:0 0 12px;font-size:12px;line-height:1.5">
-                    A floating IP address that follows the active DHCP node. When enabled, clients get the VIP
+                    A floating IP address that orbits the active DHCP node. When enabled, clients get the VIP
                     as their DNS server instead of individual node IPs. This means failover is seamless &mdash;
                     clients never need to update their DNS settings. The VIP is added and removed automatically
                     via gratuitous ARP when the active node changes.
@@ -439,6 +440,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
             <div class="box-header with-border">
                 <h3 class="box-title">Config Sync</h3>
                 <div class="box-tools pull-right">
+                    <span class="label" id="sync-entangled" style="display:none"></span>
                     <span class="label label-default" id="sync-ts">&mdash;</span>
                 </div>
             </div>

@@ -1,4 +1,4 @@
-/* Pi-hole HA Cluster — Native Web UI JavaScript
+/* Pi-hole HA Cluster - Native Web UI JavaScript
  * Uses same-origin ha-api proxy to avoid cross-origin/mixed-content issues
  */
 $(function () {
@@ -31,6 +31,7 @@ $(function () {
     }
 
     var statusData = null;
+    var prevReach = {};        // per-node last-seen reachability (for redshift/blueshift)
     var syncCfg = null;
     var syncManifest = null;
     var notifyCfg = null;
@@ -114,7 +115,7 @@ $(function () {
     }
 
     // ---- Sync polling ----
-    // Fire each AJAX independently — each calls renderSync on completion
+    // Fire each AJAX independently - each calls renderSync on completion
     // so we never miss an update due to $.when() race conditions
 
     function pollSync() {
@@ -154,8 +155,9 @@ $(function () {
 
     function renderOverview() {
         // Gateway + timestamp
+        var gwOk = !!(statusData && statusData.gateway);
+        var allReachable = !!(statusData && statusData.peers);
         if (statusData) {
-            var gwOk = statusData.gateway;
             $("#gw-status").html(
                 '<i class="fa fa-circle" style="color:' +
                 (gwOk ? "#00a65a" : "#dd4b39") + '; font-size:10px"></i> ' +
@@ -191,6 +193,16 @@ $(function () {
                 ? statusData.node.dhcp_active
                 : (peer && peer.dhcp === true);
             var reachable = peer && peer.ping === true;
+            if (!reachable) allReachable = false;
+            // Doppler flavor: a node moving away (down) is redshifted; one that
+            // was gone and is back (approaching) is blueshifted.
+            var doppler = "";
+            if (!reachable) {
+                doppler = '<span class="text-muted" style="font-style:italic" title="receding - node unreachable">redshifted</span>';
+            } else if (prevReach[node.ip] === false) {
+                doppler = '<span style="color:#3c8dbc;font-style:italic" title="returning - node recovered">blueshifted</span>';
+            }
+            prevReach[node.ip] = reachable;
             var vipEnabled = statusData.node.vip_enabled;
             var vipHeld = isLocal && vipEnabled && statusData.node.vip_held;
 
@@ -217,7 +229,7 @@ $(function () {
 
             $box.attr("class", "small-box " + bgClass + " no-user-select");
 
-            // Stats line: clients and leases
+            // Stats line: clients and leases (+ Doppler flavor)
             var statParts = [];
             if (peer && typeof peer.clients === "number") {
                 statParts.push(peer.clients + " clients");
@@ -225,6 +237,7 @@ $(function () {
             if (peer && typeof peer.leases === "number") {
                 statParts.push(peer.leases + " leases");
             }
+            if (doppler) statParts.push(doppler);
             $stats.html(statParts.length ? statParts.join(" &bull; ") : "&nbsp;");
 
             var footerParts = [node.ip];
@@ -235,7 +248,7 @@ $(function () {
                 ' <i class="fa fa-arrow-circle-right"></i>'
             );
 
-            // Leave button — only on local node's card, only if >1 node
+            // Leave button - only on local node's card, only if >1 node
             var $leaveBtn = $("#leave-btn-" + i);
             if (isLocal && NODES.length > 1) {
                 if (!$leaveBtn.length) {
@@ -267,6 +280,20 @@ $(function () {
                 $leaveBtn.remove();
             }
         });
+
+        // System state (astrophysics flavor): equilibrium when balanced,
+        // perturbation when a node is redshifted, orbital decay when this node
+        // can't see the gateway (isolated). Colour carries the severity.
+        var $eq = $("#ha-equilibrium");
+        if (!statusData) {
+            $eq.text("");
+        } else if (!gwOk) {
+            $eq.html('<span style="color:#dd4b39" title="gateway unreachable - this node is isolated">Orbital decay</span>');
+        } else if (!allReachable) {
+            $eq.html('<span style="color:#f39c12" title="a node is redshifted - failover is holding">Gravitational perturbation</span>');
+        } else {
+            $eq.html('<span style="color:#00a65a" title="all nodes healthy and in orbit">Gravitational equilibrium</span>');
+        }
     }
 
     // ---- Render: Health check tables ----
@@ -367,7 +394,7 @@ $(function () {
     // ---- Render: Sync panel ----
 
     function renderSync() {
-        // Panel is always visible — server-side Lua pre-populates initial state.
+        // Panel is always visible - server-side Lua pre-populates initial state.
         // JS only updates when API data is available.
         if (syncCfg) {
             $("#toggle-enabled").toggleClass("on", syncCfg.enabled);
@@ -405,6 +432,24 @@ $(function () {
         // Last sync timestamp from manifest (UTC → viewer's local time)
         if (syncManifest && syncManifest.timestamp) {
             $("#sync-ts").text("Last build: " + fmtTime(syncManifest.timestamp));
+        }
+
+        // Cluster entanglement: entangled when sync is on and every peer is
+        // reachable; decoherence (link lost) when a peer is unreachable.
+        var $ent = $("#sync-entangled");
+        var peersOk = !!(statusData && statusData.peers);
+        if (peersOk) {
+            $.each(NODES, function (i, node) {
+                var p = statusData.peers[node.ip];
+                if (!(p && p.ping === true)) peersOk = false;
+            });
+        }
+        if (!(syncCfg && syncCfg.enabled)) {
+            $ent.hide();
+        } else if (peersOk) {
+            $ent.attr("class", "label label-success").text("Cluster entangled").show();
+        } else {
+            $ent.attr("class", "label label-warning").text("Decoherence").show();
         }
     }
 
@@ -974,7 +1019,7 @@ $(function () {
             if (d.local && d.local !== "unknown") $("#ha-version-local").text("v" + d.local);
             if (d.update_available && d.latest) {
                 // Show the update command on its own line under the version so it
-                // isn't missed — people forget the exact command.
+                // isn't missed - people forget the exact command.
                 $("#ha-version-update").html(
                     ' &middot; <span style="color:#f0ad4e"><i class="fa fa-arrow-circle-up"></i> ' +
                     'update available (v' + escapeHtml(d.latest) + ')</span>' +
@@ -985,7 +1030,7 @@ $(function () {
             } else if (d.latest) {
                 $("#ha-version-update").html(' &middot; <span style="color:#00a65a">up to date</span>');
             }
-            // check disabled/unreachable (no latest): leave suffix empty — version still shows
+            // check disabled/unreachable (no latest): leave suffix empty - version still shows
         });
     }
 
