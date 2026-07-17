@@ -439,7 +439,10 @@ echo "$(( _cur_gen + 1 ))" > "$GEN_FILE"
 
 if [[ "$APPLIED_SOMETHING" == "true" ]]; then
     log_info "event=pull_complete status=applied primary=$SYNC_PRIMARY ts=$REMOTE_TS"
-    NOTIFY_TAG=sync_payload_pulled notify "<b><font color='#3498db'>Pi-hole Config Synced</font></b> <br> $MY_ROLE ($LOCAL_IP) pulled from $SYNC_PRIMARY <br> <font color='#95a5a6'>$REMOTE_TS</font>"
+    # Show the build time in this node's local timezone (REMOTE_TS is UTC "...Z").
+    _ts_local="$REMOTE_TS"
+    [[ -n "$REMOTE_TS" ]] && _ts_local="$(date -d "$REMOTE_TS" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo "$REMOTE_TS")"
+    NOTIFY_TAG=sync_payload_pulled notify "<b><font color='#3498db'>Pi-hole Config Synced</font></b> <br> $MY_ROLE ($LOCAL_IP) pulled from $SYNC_PRIMARY <br> <font color='#95a5a6'>$_ts_local</font>"
 else
     log_info "event=pull_complete status=unchanged ts=$REMOTE_TS"
 fi
