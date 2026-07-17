@@ -114,6 +114,25 @@ cmd_debug() {
 
 cmd_uninstall() { _run_installer --uninstall; }
 
+# --- Undocumented ----------------------------------------------------------
+# Engage Pi-hole's built-in LCARS theme on this node. `lcars off` stands down.
+cmd_lcars() {
+    _need_root
+    local theme msg
+    case "${1:-on}" in
+        off|disable|standard) theme="default-auto"; msg="Standing down. Restoring standard interface." ;;
+        *)                    theme="lcars";        msg="Engaging LCARS. Aye, Captain." ;;
+    esac
+    if _c pihole-FTL && pihole-FTL --config webserver.interface.theme "$theme" >/dev/null 2>&1; then
+        echo "$msg"
+        echo "  interface theme → $theme  (reload the admin page)"
+    else
+        echo "Unable to reroute power to the display (needs Pi-hole v6)." >&2; exit 1
+    fi
+}
+
+cmd_engage() { echo "  ⊙  Engage."; echo; cmd_status; }
+
 cmd_help() {
     cat <<'EOF'
 pihole-ha — manage the Pi-hole HA cluster node
@@ -143,5 +162,7 @@ case "$cmd" in
     debug)                  cmd_debug "$@" ;;
     uninstall|remove)       cmd_uninstall "$@" ;;
     help|-h|--help)         cmd_help ;;
+    lcars)                  cmd_lcars "$@" ;;      # undocumented
+    engage|"make it so")    cmd_engage ;;          # undocumented
     *) echo "Unknown command: $cmd" >&2; echo; cmd_help; exit 1 ;;
 esac

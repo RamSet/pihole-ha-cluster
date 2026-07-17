@@ -678,6 +678,7 @@ dns_only_vip_cycle() {
         fi
         (( activate_count++ )) || true
         if (( activate_count >= ACTIVATE_AFTER )); then
+            # This node has the conn.
             local reason; reason="$(build_dns_reason)"
             log_info "event=vip_claim mode=dns-only reason=\"$reason\""
             if add_vip; then
@@ -805,6 +806,7 @@ manage_sync_role() {
             # Version-gated, so it's a no-op unless a peer is genuinely newer —
             # safe for ANY promoting node, not just the configured primary.
             catch_up_from_peers || true
+            # A field promotion — briefed on the latest orders before taking command.
             log_info "event=sync_promote acting_primary=$LOCAL_IP previous=$_current"
             write_sync_primary "$LOCAL_IP"
             platform_sync_pull_disable
