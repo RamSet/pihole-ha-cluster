@@ -367,7 +367,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
             </div>
             <div class="box-body">
                 <p class="text-muted" style="margin:0 0 12px;font-size:12px;line-height:1.5">
-                    A floating IP address that orbits the active DHCP node. When enabled, clients get the VIP
+                    A floating IP address (the VIP) that orbits the active DHCP node - it follows whichever node is active. When enabled, clients get the VIP
                     as their DNS server instead of individual node IPs. This means failover is seamless &mdash;
                     clients never need to update their DNS settings. The VIP is added and removed automatically
                     via gratuitous ARP when the active node changes.
