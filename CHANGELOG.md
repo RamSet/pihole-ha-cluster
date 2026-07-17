@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.10.8 — 2026-07-17
+- Pushover 'Config Synced': show build time in local time, not UTC
+
 ## v3.10.7 — 2026-07-17
 - Auth status: distinguish 'no password' from 'authenticated'
 
