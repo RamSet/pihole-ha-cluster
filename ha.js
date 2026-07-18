@@ -820,7 +820,7 @@ $(function () {
         $("#dhcp-host-picker .dhcp-pick-row").each(function () {
             var macs = String($(this).data("mac")).split(",");
             var ignored = macs.every(function (m) { return set[m.trim().toLowerCase()]; });
-            $(this).css({ "font-weight": ignored ? "bold" : "", "color": ignored ? "#c0392b" : "" });
+            $(this).toggleClass("ignored", ignored);
         });
     }
 

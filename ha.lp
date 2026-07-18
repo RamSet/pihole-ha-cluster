@@ -189,6 +189,14 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
     cursor: default;
     pointer-events: none;
 }
+/* Ignored host in the static-host picker: red + bold in every theme.
+   Override text-muted on the name so the color actually shows. */
+.dhcp-pick-row.ignored,
+.dhcp-pick-row.ignored code,
+.dhcp-pick-row.ignored .text-muted {
+    color: #e74c3c !important;
+    font-weight: bold;
+}
 </style>
 
 <!-- Error callout (hidden by default) -->
@@ -618,7 +626,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                         <div id="dhcp-host-picker" style="max-width:420px;max-height:160px;overflow-y:auto;border:1px solid rgba(128,128,128,0.3);border-radius:4px;padding:6px 8px">
                             <small class="text-muted"><i class="fa fa-spinner fa-spin"></i> Loading...</small>
                         </div>
-                        <small class="text-muted">Click a host to add it to the ignored list. <strong style="color:#c0392b">Bold red</strong> = already ignored.</small>
+                        <small class="text-muted">Click a host to add it to the ignored list. <strong style="color:#e74c3c">Bold red</strong> = already ignored.</small>
                     </div>
                     <div class="form-group" style="margin-bottom:10px">
                         <label>Ignored Hostnames</label>
