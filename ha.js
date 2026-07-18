@@ -824,7 +824,8 @@ $(function () {
             hosts.forEach(function (h) {
                 html += '<div class="dhcp-pick-row" style="padding:2px 0;cursor:pointer" data-mac="' + escapeHtml(h.mac) + '">' +
                     '<code style="font-size:11px">' + escapeHtml(h.mac) + '</code>' +
-                    '<span class="text-muted" style="margin-left:8px;font-size:12px">' + escapeHtml(h.name) + ' (' + escapeHtml(h.ip) + ')</span>' +
+                    '<span class="text-muted" style="margin-left:8px;font-size:12px">' +
+                    (h.name ? escapeHtml(h.name) + ' ' : '') + '(' + escapeHtml(h.ip) + ')</span>' +
                     '</div>';
             });
             $("#dhcp-host-picker").html(html);

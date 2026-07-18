@@ -945,23 +945,34 @@ NEOF
         /api/dhcp/hosts)
             send_headers "200 OK" "application/json"
             _raw="$(pihole-FTL --config dhcp.hosts 2>/dev/null)"
-            _inner="${_raw#\[ }"; _inner="${_inner% \]}"
-            _out="["
-            _first=true
+            _inner="${_raw#\[}"; _inner="${_inner%\]}"
+            # dnsmasq entries vary in length (MAC,IP / MAC,IP,name / MAC,MAC,IP,name),
+            # so a fixed field-count parse drifts after any non-3-field entry. Instead
+            # classify every comma token (MAC / IP / hostname) and group into entries:
+            # 1+ MACs, then an IP, then an optional name; a MAC after an IP starts a new
+            # entry. The first MAC is the key used to add the host to the ignore list.
+            _out="["; _first=true
+            _emac="" _eip="" _ename=""
+            _emit() {
+                [[ -z "$_eip" ]] && return
+                [[ "$_first" == "true" ]] && _first=false || _out+=","
+                _out+="{\"mac\":\"$_emac\",\"ip\":\"$_eip\",\"name\":\"$_ename\"}"
+                _emac="" _eip="" _ename=""
+            }
             IFS=',' read -ra _htokens <<< "$_inner"
-            _i=0; _hmac=""; _hip=""; _hname=""
             for _ht in "${_htokens[@]}"; do
-                _ht="${_ht# }"; _ht="${_ht% }"
-                case $(( _i % 3 )) in
-                    0) _hmac="$_ht" ;;
-                    1) _hip="$_ht" ;;
-                    2) _hname="$_ht"
-                       [[ "$_first" == "true" ]] && _first=false || _out+=","
-                       _out+="{\"mac\":\"$_hmac\",\"ip\":\"$_hip\",\"name\":\"$_hname\"}"
-                       ;;
-                esac
-                (( _i++ ))
+                _ht="${_ht#"${_ht%%[![:space:]]*}"}"; _ht="${_ht%"${_ht##*[![:space:]]}"}"
+                [[ -z "$_ht" ]] && continue
+                if [[ "$_ht" =~ ^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$ ]]; then
+                    [[ -n "$_eip" ]] && _emit         # a MAC after an IP => next entry
+                    [[ -z "$_emac" ]] && _emac="$_ht" # keep the first MAC
+                elif [[ "$_ht" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ || "$_ht" == \[* ]]; then
+                    _eip="$_ht"
+                elif [[ "$_ht" != *:* ]]; then
+                    _ename="$_ht"                     # plain hostname (skip id:/set:/tag:)
+                fi
             done
+            _emit
             _out+="]"
             echo "$_out"
             ;;
