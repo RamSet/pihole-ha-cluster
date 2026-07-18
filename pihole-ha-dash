@@ -950,26 +950,29 @@ NEOF
             # so a fixed field-count parse drifts after any non-3-field entry. Instead
             # classify every comma token (MAC / IP / hostname) and group into entries:
             # 1+ MACs, then an IP, then an optional name; a MAC after an IP starts a new
-            # entry. The first MAC is the key used to add the host to the ignore list.
+            # entry. A reservation can bind several MACs to one IP - we keep them ALL
+            # (mac = first, for display; macs = comma-joined, so muting the host adds
+            # every one of its MACs to the ignore list, not just the first).
             _out="["; _first=true
-            _emac="" _eip="" _ename=""
+            _emacs="" _eip="" _ename=""
             _emit() {
                 [[ -z "$_eip" ]] && return
                 [[ "$_first" == "true" ]] && _first=false || _out+=","
-                _out+="{\"mac\":\"$_emac\",\"ip\":\"$_eip\",\"name\":\"$_ename\"}"
-                _emac="" _eip="" _ename=""
+                local _mac1="${_emacs%%,*}"
+                _out+="{\"mac\":\"$_mac1\",\"macs\":\"$_emacs\",\"ip\":\"$_eip\",\"name\":\"$_ename\"}"
+                _emacs="" _eip="" _ename=""
             }
             IFS=',' read -ra _htokens <<< "$_inner"
             for _ht in "${_htokens[@]}"; do
                 _ht="${_ht#"${_ht%%[![:space:]]*}"}"; _ht="${_ht%"${_ht##*[![:space:]]}"}"
                 [[ -z "$_ht" ]] && continue
                 if [[ "$_ht" =~ ^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$ ]]; then
-                    [[ -n "$_eip" ]] && _emit         # a MAC after an IP => next entry
-                    [[ -z "$_emac" ]] && _emac="$_ht" # keep the first MAC
+                    [[ -n "$_eip" ]] && _emit               # a MAC after an IP => next entry
+                    _emacs="${_emacs:+$_emacs,}$_ht"        # accumulate every MAC
                 elif [[ "$_ht" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ || "$_ht" == \[* ]]; then
                     _eip="$_ht"
                 elif [[ "$_ht" != *:* ]]; then
-                    _ename="$_ht"                     # plain hostname (skip id:/set:/tag:)
+                    _ename="$_ht"                           # plain hostname (skip id:/set:/tag:)
                 fi
             done
             _emit

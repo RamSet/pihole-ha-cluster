@@ -822,8 +822,11 @@ $(function () {
             }
             var html = "";
             hosts.forEach(function (h) {
-                html += '<div class="dhcp-pick-row" style="padding:2px 0;cursor:pointer" data-mac="' + escapeHtml(h.mac) + '">' +
+                var macs = h.macs || h.mac;
+                var extra = macs.split(",").length - 1;
+                html += '<div class="dhcp-pick-row" style="padding:2px 0;cursor:pointer" data-mac="' + escapeHtml(macs) + '">' +
                     '<code style="font-size:11px">' + escapeHtml(h.mac) + '</code>' +
+                    (extra > 0 ? '<code class="text-muted" style="font-size:11px;margin-left:4px">+' + extra + '</code>' : '') +
                     '<span class="text-muted" style="margin-left:8px;font-size:12px">' +
                     (h.name ? escapeHtml(h.name) + ' ' : '') + '(' + escapeHtml(h.ip) + ')</span>' +
                     '</div>';
@@ -847,14 +850,20 @@ $(function () {
     });
 
     $(document).on("click", ".dhcp-pick-row", function () {
-        var mac = $(this).data("mac");
+        var macs = String($(this).data("mac")).split(",");
         var $ta = $("#dhcp-ignored-macs");
-        var current = $ta.val().trim();
-        var lines = current ? current.split("\n").map(function (l) { return l.trim().toLowerCase(); }) : [];
-        if (lines.indexOf(mac.toLowerCase()) === -1) {
-            $ta.val(current ? current + "\n" + mac : mac);
-            $ta.data("dirty", true);
-        }
+        var added = false;
+        macs.forEach(function (mac) {
+            mac = mac.trim();
+            if (!mac) return;
+            var current = $ta.val().trim();
+            var lines = current ? current.split("\n").map(function (l) { return l.trim().toLowerCase(); }) : [];
+            if (lines.indexOf(mac.toLowerCase()) === -1) {
+                $ta.val(current ? current + "\n" + mac : mac);
+                added = true;
+            }
+        });
+        if (added) $ta.data("dirty", true);
     });
 
     // Render: Notify panel
