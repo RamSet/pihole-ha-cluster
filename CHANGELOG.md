@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.10.9 — 2026-07-17
+- Fix static-host picker: parse dnsmasq reservations robustly
+
 ## v3.10.8 — 2026-07-17
 - Pushover 'Config Synced': show build time in local time, not UTC
 
