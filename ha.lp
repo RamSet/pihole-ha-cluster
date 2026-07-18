@@ -216,8 +216,10 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
 <div class="row">
     <div class="col-md-12" style="margin-bottom:10px">
         <span id="gw-status"></span>
-        <span id="ha-equilibrium" style="margin-left:10px;font-size:12px"></span>
-        <span class="pull-right text-muted" id="ha-timestamp"></span>
+        <div class="pull-right">
+            <span id="ha-equilibrium"></span>
+            <span class="label label-default" id="ha-timestamp"></span>
+        </div>
     </div>
 </div>
 

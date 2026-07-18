@@ -288,11 +288,11 @@ $(function () {
         if (!statusData) {
             $eq.text("");
         } else if (!gwOk) {
-            $eq.html('<span style="color:#dd4b39" title="gateway unreachable - this node is isolated">Orbital decay</span>');
+            $eq.html('<span class="label label-danger" title="gateway unreachable - this node is isolated">Orbital decay</span>');
         } else if (!allReachable) {
-            $eq.html('<span style="color:#f39c12" title="a node is redshifted - failover is holding">Gravitational perturbation</span>');
+            $eq.html('<span class="label label-warning" title="a node is redshifted - failover is holding">Gravitational perturbation</span>');
         } else {
-            $eq.html('<span style="color:#00a65a" title="all nodes healthy and in orbit">Gravitational equilibrium</span>');
+            $eq.html('<span class="label label-success" title="all nodes healthy and in orbit">Gravitational equilibrium</span>');
         }
     }
 
