@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.10.14 — 2026-07-17
+- Notify: make ignored-host highlight red in every theme
+
 ## v3.10.13 — 2026-07-17
 - Notify: label the picker legend so bold red = ignored is explicit
 
