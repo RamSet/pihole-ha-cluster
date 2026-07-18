@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.10.15 — 2026-07-17
+- Overview: render system-state + last-check as right-aligned label badges
+
 ## v3.10.14 — 2026-07-17
 - Notify: make ignored-host highlight red in every theme
 
