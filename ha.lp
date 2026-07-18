@@ -197,6 +197,16 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
     color: #e74c3c !important;
     font-weight: bold;
 }
+/* Portrait / narrow screens: stack the state badge above the last-check date
+   instead of side by side, so they don't collide. */
+@media (max-width: 767px) {
+    #ha-equilibrium,
+    #ha-ts-wrap {
+        display: block;
+        text-align: right;
+        margin-top: 3px;
+    }
+}
 </style>
 
 <!-- Error callout (hidden by default) -->
@@ -218,7 +228,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
         <span id="gw-status"></span>
         <div class="pull-right">
             <span id="ha-equilibrium"></span>
-            <span class="label label-default" id="ha-timestamp"></span>
+            <span id="ha-ts-wrap"><span class="label label-default" id="ha-timestamp"></span></span>
         </div>
     </div>
 </div>
