@@ -809,23 +809,19 @@ $(function () {
         .always(renderNotify);
     }
 
-    // MAC (lowercase) -> friendly name, built from the static-host picker data.
-    // Used to annotate the ignored-MAC list so bare MACs are legible.
-    var dhcpHostMap = {};
-
-    // Show each ignored MAC with its host name beneath the textarea (read-only).
-    function renderIgnoredNames() {
-        var lines = ($("#dhcp-ignored-macs").val() || "").split("\n");
-        var html = "";
-        lines.forEach(function (mac) {
-            mac = mac.trim();
-            if (!mac) return;
-            var name = dhcpHostMap[mac.toLowerCase()];
-            html += '<div><code style="font-size:11px">' + escapeHtml(mac) + '</code>' +
-                '<span class="text-muted" style="margin-left:8px;font-size:12px">' +
-                (name ? escapeHtml(name) : "&mdash;") + '</span></div>';
+    // Bold + red any picker row whose MACs are all in the ignored-MAC list,
+    // so an ignored host is visible in-place instead of via a separate list.
+    function refreshPickerHighlight() {
+        var set = {};
+        ($("#dhcp-ignored-macs").val() || "").split("\n").forEach(function (m) {
+            m = m.trim().toLowerCase();
+            if (m) set[m] = true;
         });
-        $("#dhcp-ignored-named").html(html);
+        $("#dhcp-host-picker .dhcp-pick-row").each(function () {
+            var macs = String($(this).data("mac")).split(",");
+            var ignored = macs.every(function (m) { return set[m.trim().toLowerCase()]; });
+            $(this).css({ "font-weight": ignored ? "bold" : "", "color": ignored ? "#c0392b" : "" });
+        });
     }
 
     function loadDhcpHostPicker() {
@@ -842,9 +838,6 @@ $(function () {
             var html = "";
             hosts.forEach(function (h) {
                 var macs = h.macs || h.mac;
-                (h.name ? macs.split(",") : []).forEach(function (m) {
-                    dhcpHostMap[m.trim().toLowerCase()] = h.name;
-                });
                 var extra = macs.split(",").length - 1;
                 html += '<div class="dhcp-pick-row" style="padding:2px 0;cursor:pointer" data-mac="' + escapeHtml(macs) + '">' +
                     '<code style="font-size:11px">' + escapeHtml(h.mac) + '</code>' +
@@ -854,7 +847,7 @@ $(function () {
                     '</div>';
             });
             $("#dhcp-host-picker").html(html);
-            renderIgnoredNames();
+            refreshPickerHighlight();
         })
         .fail(function () {
             $("#dhcp-host-picker").html('<small class="text-muted">Failed to load hosts</small>');
@@ -886,7 +879,7 @@ $(function () {
                 added = true;
             }
         });
-        if (added) { $ta.data("dirty", true); renderIgnoredNames(); }
+        if (added) { $ta.data("dirty", true); refreshPickerHighlight(); }
     });
 
     // Render: Notify panel
@@ -922,7 +915,7 @@ $(function () {
     // Mark textarea dirty when user edits it manually
     $(document).on("input", "#dhcp-ignored-macs", function () {
         $(this).data("dirty", true);
-        renderIgnoredNames();
+        refreshPickerHighlight();
     });
     $(document).on("input", "#dhcp-ignored-hosts", function () {
         $(this).data("dirty", true);
