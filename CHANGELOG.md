@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.10.12 — 2026-07-17
+- Notify: highlight ignored hosts in the picker instead of a mirror list
+
 ## v3.10.11 — 2026-07-17
 - Notify: show host name beside each ignored MAC
 
