@@ -612,6 +612,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                             style="max-width:420px;font-family:monospace;font-size:12px"
                             placeholder="One MAC per line, e.g.&#10;aa:bb:cc:dd:ee:ff"><?=dhcp_ignored_textarea?></textarea>
                         <small class="text-muted">Devices that will never trigger a notification. One MAC address per line.</small>
+                        <div id="dhcp-ignored-named" style="max-width:420px;margin-top:6px"></div>
                     </div>
                     <div class="form-group" style="margin-bottom:10px">
                         <label>Pick from static hosts</label>
