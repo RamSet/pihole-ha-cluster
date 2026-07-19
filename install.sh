@@ -115,6 +115,50 @@ open(p, 'w').write(s)
 PYEOF
     fi
 
+    # Revert the host changes install made (DNS pin, dhcp.active, upstreams), so
+    # Pi-hole is left as it was. Runs BEFORE the config dir (holding the snapshots)
+    # is removed. Blocklists/adlists seeded at install are intentionally kept -
+    # they're functional content the network may now rely on.
+    _ur=/etc/pihole-ha/uninstall-restore.conf
+    if [[ -f "$_ur" ]]; then
+        printf "  %b Reverting host changes..." "${INFO}"
+        _urget() { sed -n "s/^$1=//p" "$_ur" | head -1; }
+
+        _o="$(_urget DHCP_ACTIVE)";  [[ -n "$_o" ]] && pihole-FTL --config dhcp.active "$_o" >/dev/null 2>&1 || true
+        _o="$(_urget DNS_UPSTREAMS)"; [[ -n "$_o" ]] && pihole-FTL --config dns.upstreams "$_o" >/dev/null 2>&1 || true
+
+        if [[ "$(_urget PIN_DNS_APPLIED)" == "true" ]]; then
+            # NetworkManager: reset only the connections we pinned back to automatic DNS
+            if [[ -f /etc/pihole-ha/nm-pinned.list ]] && command -v nmcli &>/dev/null; then
+                while IFS= read -r _nc; do
+                    [[ -z "$_nc" ]] && continue
+                    nmcli con mod "$_nc" ipv4.dns "" ipv4.ignore-auto-dns no 2>/dev/null || true
+                    nmcli con up "$_nc" >/dev/null 2>&1 || true
+                done < /etc/pihole-ha/nm-pinned.list
+            fi
+            # dhcpcd: strip our block
+            if [[ -f /etc/dhcpcd.conf ]] && grep -q '# pihole-ha BEGIN' /etc/dhcpcd.conf; then
+                sed -i '/# pihole-ha BEGIN/,/# pihole-ha END/d' /etc/dhcpcd.conf
+                systemctl restart dhcpcd 2>/dev/null || true
+            fi
+            # systemd-resolved: drop our override
+            if [[ -f /etc/systemd/resolved.conf.d/pihole-ha.conf ]]; then
+                rm -f /etc/systemd/resolved.conf.d/pihole-ha.conf
+                systemctl restart systemd-resolved 2>/dev/null || true
+            fi
+            # /etc/resolv.conf: restore the original symlink or file (only if we have a source)
+            if [[ "$(_urget RESOLV_WAS_SYMLINK)" == "true" ]]; then
+                chattr -i /etc/resolv.conf 2>/dev/null || true
+                rm -f /etc/resolv.conf
+                ln -s "$(_urget RESOLV_SYMLINK_TARGET)" /etc/resolv.conf 2>/dev/null || true
+            elif [[ -f /etc/pihole-ha/resolv.conf.orig ]]; then
+                chattr -i /etc/resolv.conf 2>/dev/null || true
+                cp -a /etc/pihole-ha/resolv.conf.orig /etc/resolv.conf 2>/dev/null || true
+            fi
+        fi
+        printf "%b  %b Host changes reverted (DNS pin, DHCP role, upstream)\\n" "${OVER}" "${TICK}"
+    fi
+
     # Remove config, shared, lib, runtime, and the OUI database
     rm -rf /etc/pihole-ha /usr/local/share/pihole-ha /usr/local/lib/pihole-ha /run/pihole-ha /var/lib/ieee-data
 
@@ -125,6 +169,16 @@ PYEOF
     printf "  %b Pi-hole's web port was left as-is; reset it manually if you changed it for the cluster.\\n" "${INFO}"
     exit 0
 fi
+
+# Record a pre-change value once, so uninstall can restore the original. Never
+# overwrites an existing key, so re-running install preserves the TRUE original
+# (not an already-modified value). Requires /etc/pihole-ha to exist.
+_save_orig() {
+    local key="$1" val="$2" f=/etc/pihole-ha/uninstall-restore.conf
+    [[ -d /etc/pihole-ha ]] || return 0
+    grep -q "^${key}=" "$f" 2>/dev/null && return 0
+    printf '%s=%s\n' "$key" "$val" >> "$f"
+}
 
 # --- 1c. Update mode: refresh code only, keep config + cluster membership ---
 if [[ "${1:-}" == "--update" ]]; then
@@ -688,6 +742,7 @@ if [[ "$_dhcp_mode" == "dns" ]]; then
     printf "  %b DNS-only deployment — leaving Pi-hole DHCP untouched\\n" "${INFO}"
 else
     printf "  %b Configuring DHCP role..." "${INFO}"
+    _save_orig DHCP_ACTIVE "$(pihole-FTL --config dhcp.active 2>/dev/null)"
     if [[ "$is_primary" == "true" ]]; then
         if pihole-FTL --config dhcp.active true >/dev/null 2>&1; then
             printf "%b  %b DHCP enabled (primary)\\n" "${OVER}" "${TICK}"
@@ -735,11 +790,14 @@ if [[ "$pin_dns_val" != "true" ]]; then
 else
 printf "  %b Pinning system DNS to 127.0.0.1..." "${INFO}"
 _pinned=()
+_save_orig PIN_DNS_APPLIED true
 
 # NetworkManager (Raspberry Pi OS Bookworm default)
 if command -v nmcli &>/dev/null; then
     while IFS= read -r nm_con; do
         [[ -z "$nm_con" ]] && continue
+        # Remember which connections we touched so uninstall can reset only those.
+        grep -qxF "$nm_con" /etc/pihole-ha/nm-pinned.list 2>/dev/null || printf '%s\n' "$nm_con" >> /etc/pihole-ha/nm-pinned.list
         nmcli con mod "$nm_con" ipv4.dns "127.0.0.1" ipv4.ignore-auto-dns yes 2>/dev/null || true
         nmcli con up "$nm_con" >/dev/null 2>&1 || true
     done < <(nmcli -t -f NAME,DEVICE con show --active 2>/dev/null | grep -v ':lo$' | cut -d: -f1)
@@ -769,6 +827,16 @@ DNSStubListener=no
 RESOLVED
     systemctl restart systemd-resolved 2>/dev/null || true
     _pinned+=("systemd-resolved")
+fi
+
+# Snapshot the original /etc/resolv.conf (once) so uninstall can put it back
+# exactly - a symlink target if it was managed, or the file's contents if not.
+if [[ -L /etc/resolv.conf ]]; then
+    _save_orig RESOLV_WAS_SYMLINK true
+    _save_orig RESOLV_SYMLINK_TARGET "$(readlink /etc/resolv.conf)"
+else
+    _save_orig RESOLV_WAS_SYMLINK false
+    [[ -f /etc/pihole-ha/resolv.conf.orig ]] || cp -a /etc/resolv.conf /etc/pihole-ha/resolv.conf.orig 2>/dev/null || true
 fi
 
 # Final guarantee: write /etc/resolv.conf directly. If it's a managed symlink
@@ -863,6 +931,7 @@ elif ss -H -lun 2>/dev/null | grep -q ':5335[[:space:]]' || ss -H -ltn 2>/dev/nu
 fi
 _upstream="$(pihole-FTL --config dns.upstreams 2>/dev/null)"
 if [[ "$_unbound_present" == "true" && "$_upstream" != *"127.0.0.1#5335"* ]]; then
+    _save_orig DNS_UPSTREAMS "$_upstream"
     pihole-FTL --config dns.upstreams '["127.0.0.1#5335"]' >/dev/null 2>&1
     pihole-FTL --config dns.cache.size 10000 >/dev/null 2>&1
     printf "  %b Upstream DNS set to local unbound (127.0.0.1#5335)\\n" "${TICK}"
