@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.10.17 — 2026-07-19
+- Uninstall: revert host changes so Pi-hole is left as it was
+
 ## v3.10.16 — 2026-07-17
 - Overview: stack state badge above last-check date on narrow screens
 
