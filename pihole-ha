@@ -361,7 +361,9 @@ ensure_sid() {
         -H "Content-Type: application/json" \
         -d "{\"password\":\"${_pw}\"}" 2>/dev/null)" || return
     local sid
-    sid="$(echo "$resp" | grep -o '"sid":"[^"]*"' | cut -d'"' -f4)"
+    # Same result as `grep -o '"sid":"[^"]*"' | cut -d'"' -f4`, no forks.
+    sid=""
+    [[ "$resp" =~ \"sid\":\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
     [[ -n "$sid" && "$sid" != "null" ]] && peer_sid[$ip]="$sid"
 }
 
@@ -375,14 +377,17 @@ fi
 # Build URL with SID query param if peer needs auth. Pure formatter — safe to
 # call inside $(). It only reads the cached SID; ensure_sid (called directly by
 # check_peer) is responsible for populating/refreshing it.
+# Sets API_URL instead of echoing it. Every "$(api_url ...)" was a forked
+# subshell just to concatenate a string, four times per peer per tick; with
+# three peers on a 3s interval that alone was ~4 forks/sec on a Pi 3.
 api_url() {
     local ip="$1" path="$2"
     local port="${NODE_PORTS[$ip]:-80}"
     local sid="${peer_sid[$ip]:-}"
     if [[ -n "$sid" ]]; then
-        echo "http://$ip:${port}$path?sid=$sid"
+        API_URL="http://$ip:${port}$path?sid=$sid"
     else
-        echo "http://$ip:${port}$path"
+        API_URL="http://$ip:${port}$path"
     fi
 }
 
@@ -466,19 +471,19 @@ check_peer() {
     fi
     local resp url
     ensure_sid "$ip"   # authenticate once (cached); direct call so the cache persists
-    url="$(api_url "$ip" /api/config/dhcp/active)"
+    api_url "$ip" /api/config/dhcp/active; url="$API_URL"
     resp="$(curl -s --max-time "$HEALTH_TIMEOUT" "$url" 2>/dev/null)" || {
         peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="null"; return
     }
     # If 401, our SID expired/was evicted — drop it, re-auth once, and retry.
-    if echo "$resp" | grep -q '"unauthorized"'; then
+    if [[ "$resp" == *'"unauthorized"'* ]]; then
         unset "peer_sid[$ip]"
         ensure_sid "$ip"
-        url="$(api_url "$ip" /api/config/dhcp/active)"
+        api_url "$ip" /api/config/dhcp/active; url="$API_URL"
         resp="$(curl -s --max-time "$HEALTH_TIMEOUT" "$url" 2>/dev/null)" || {
             peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="\"denied\""; return
         }
-        if echo "$resp" | grep -q '"unauthorized"'; then
+        if [[ "$resp" == *'"unauthorized"'* ]]; then
             peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="\"denied\""; return
         fi
     fi
@@ -492,15 +497,29 @@ check_peer() {
     else
         peer_auth[$ip]="\"none\""
     fi
-    # Client count from stats summary
+    # Client count from stats summary. The bash match reproduces
+    # `grep -o '"active":[0-9]*' | head -1 | grep -o '[0-9]*'` exactly: =~ finds
+    # the first '"active":' the same way head -1 did, and [0-9]* captures an
+    # empty string there too, which the -z test below still maps to null.
     local stats
-    stats="$(curl -s --max-time 2 "$(api_url "$ip" /api/stats/summary)" 2>/dev/null)"
-    peer_clients[$ip]="$(echo "$stats" | grep -o '"active":[0-9]*' | head -1 | grep -o '[0-9]*')"
+    api_url "$ip" /api/stats/summary
+    stats="$(curl -s --max-time 2 "$API_URL" 2>/dev/null)"
+    if [[ "$stats" =~ \"active\":([0-9]*) ]]; then
+        peer_clients[$ip]="${BASH_REMATCH[1]}"
+    else
+        peer_clients[$ip]=""
+    fi
     [[ -z "${peer_clients[$ip]}" ]] && peer_clients[$ip]="null"
-    if echo "$resp" | grep -q '"active":true'; then
+    if [[ "$resp" == *'"active":true'* ]]; then
         peer_dhcp[$ip]="true"
-        peer_leases[$ip]="$(curl -s --max-time 2 "$(api_url "$ip" /api/dhcp/leases)" 2>/dev/null | grep -o '"expires"' | wc -l)"
-    elif echo "$resp" | grep -q '"active":false'; then
+        # Count '"expires"' occurrences without grep|wc: strip them out and
+        # divide the length difference by the needle length.
+        local _leases _stripped _needle='"expires"'
+        api_url "$ip" /api/dhcp/leases
+        _leases="$(curl -s --max-time 2 "$API_URL" 2>/dev/null)"
+        _stripped="${_leases//$_needle/}"
+        peer_leases[$ip]=$(( (${#_leases} - ${#_stripped}) / ${#_needle} ))
+    elif [[ "$resp" == *'"active":false'* ]]; then
         peer_dhcp[$ip]="false"; peer_leases[$ip]="null"
     else
         peer_dhcp[$ip]="null"; peer_leases[$ip]="null"
