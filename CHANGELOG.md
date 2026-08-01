@@ -2,6 +2,10 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.12.1 — 2026-08-01
+- Enable both sync timers on every node so role changes cannot break sync
+- Fix sync timers never firing when installed or enabled after boot
+
 ## v3.12.0 — 2026-08-01
 - Make Add Node work from either side, and probe before joining
 
