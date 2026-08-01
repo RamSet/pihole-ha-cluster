@@ -678,8 +678,9 @@ $(function () {
         // instead of showing a "cluster" of one with everything disabled.
         if (nodes.length === 1) {
             $("#standalone-detail").text(
-                "It is not part of a cluster, so HA failover is off. Add another node below, " +
-                "or add this node (" + nodes[0] + ") from a node that is already in the cluster."
+                "It is not part of a cluster, so HA failover is off. Enter another Pi-hole HA " +
+                "node below: if it already runs a cluster this node joins it, otherwise the two " +
+                "of them start a new one."
             );
             $("#standalone-note").show();
         } else {
@@ -761,18 +762,6 @@ $(function () {
             return;
         }
 
-        // Adding from a standalone node forms a new cluster with this node at
-        // P1 — and pushes that order onto the node being added. Worth a prompt.
-        var soloNodes = prioCfg && prioCfg.nodes ? prioCfg.nodes.split(",") : [];
-        if (soloNodes.length === 1) {
-            if (!confirm("This node is standalone, so adding " + ip + " forms a new cluster " +
-                         "with this node (" + soloNodes[0] + ") as PRIMARY and " + ip + " as SECONDARY.\n\n" +
-                         "If " + ip + " is already in a cluster, add this node from there instead.\n\nContinue?")) {
-                $res.hide();
-                return;
-            }
-        }
-
         $("#join-btn").prop("disabled", true);
         $res.html('<i class="fa fa-spinner fa-spin"></i> Adding ' + ip + '...').show();
 
@@ -783,13 +772,27 @@ $(function () {
         })
         .done(function (data) {
             if (data && data.ok) {
+                // The backend picks the direction, so report what it actually did.
+                var msg;
                 if (data.action === "already_member") {
-                    $res.html('<span style="color:#00a65a"><i class="fa fa-check"></i> ' + ip + ' is already a member</span>');
+                    msg = ip + " is already a member";
+                } else if (data.action === "joined_cluster") {
+                    msg = "Joined the cluster at " + ip;
+                    $("#join-ip").val("");
+                } else if (data.action === "cluster_created") {
+                    msg = "Cluster created with " + ip;
+                    $("#join-ip").val("");
                 } else {
-                    $res.html('<span style="color:#00a65a"><i class="fa fa-check"></i> ' + ip + ' added</span>');
+                    msg = ip + " added";
                     $("#join-ip").val("");
                 }
+                $res.html('<span style="color:#00a65a"><i class="fa fa-check"></i> ' + msg + '</span>');
                 if (data.nodes) { prioCfg.nodes = data.nodes; renderPriority(); }
+                // Joining someone else's cluster rewrites our own membership and
+                // restarts the daemon; reload so the whole page reflects it.
+                if (data.action === "joined_cluster") {
+                    setTimeout(function () { location.reload(); }, 1500);
+                }
             } else {
                 $res.html('<span style="color:#dd4b39">' + (data && data.error || "Failed") + '</span>');
             }

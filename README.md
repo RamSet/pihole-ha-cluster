@@ -25,7 +25,7 @@ At install it checks whether Pi-hole DHCP is active, probes the LAN for another 
 - **Pushover Notifications** — Optional alerts on failover events (activation, deactivation, sync).
 - **API Authentication** — Mutating API endpoints are protected using Pi-hole's own password. If the local Pi-hole instance has a password set, all write operations require a valid session ID (SID). Read-only endpoints remain open.
 - **Web UI** — A native panel integrated into Pi-hole's admin interface at `/admin/ha` (**Tools > HA Cluster**).
-- **Cluster Join/Leave** — Nodes register themselves with the cluster on install via the `/api/nodes/join` API. The **Cluster Members** panel on the HA page adds, removes, and reorders nodes with one click, and every change propagates to all peers. A removed node keeps serving DNS on its own with failover switched off, so it can be added back at any time. No manual config editing needed.
+- **Cluster Join/Leave** — Nodes register themselves with the cluster on install via the `/api/nodes/join` API. The **Cluster Members** panel on the HA page adds, removes, and reorders nodes with one click, and every change propagates to all peers. Adding works from either side: a standalone node joins an existing cluster rather than absorbing it, and an address that doesn't answer is refused instead of being written to the config. A removed node keeps serving DNS on its own with failover switched off, so it can be added back at any time. No manual config editing needed.
 - **Docker Support** — Runs as a sidecar container alongside the stock `pihole/pihole` image. No custom Pi-hole fork needed. Interactive installer detects existing Pi-hole containers and preserves volume mounts.
 - **Mixed Clusters** — Supports nodes running on different Pi-hole web ports (e.g., bare-metal on port 80 alongside Docker on port 8081) using `IP:PORT` format in the node list.
 
@@ -375,7 +375,7 @@ The HA page is injected into Pi-hole's sidebar under **Tools > HA Cluster**. A s
 | `/api/notify/test` | GET | Send test Pushover notification |
 | `/api/auth/check` | GET | Check if Pi-hole password auth is required |
 | `/api/config` | GET | Cluster bootstrap config (nodes, gateway, Pi-hole port) |
-| `/api/nodes/join?node=<ip[:port]>` | GET | Add a node to the cluster (propagates to update all peers) |
+| `/api/nodes/join?node=<ip[:port]>` | GET | Add a node, or join that node's cluster if this node is standalone. Probes the target first and refuses if it doesn't answer; propagates to all peers |
 | `/api/nodes/leave?node=<ip>` | GET | Remove a node from the cluster (propagates to all peers) |
 | `/api/priority/set?order=<csv>` | GET | Set node priority order (propagates to all nodes) |
 | `/api/role/demote?ip=<ip>` | GET | Demote current primary, promote target node |
@@ -485,19 +485,34 @@ Tests cover IP validation, config version parsing, role detection, node reorder 
 
 ## Adding a Node
 
-The node must already have Pi-hole HA installed and be reachable on port `8887`.
+The other node must already have Pi-hole HA installed and be reachable on port `8887`.
 
 ### From the Web UI
 
-Open **Cluster Members** on any node's `/admin/ha` page, enter the new node's IP, and click **Add Node**. It joins at the lowest priority. Add a `:PORT` suffix only if that node's Pi-hole web interface is not on port 80.
+Open **Cluster Members** on any node's `/admin/ha` page, enter the other node's IP, and click **Add Node**. Add a `:PORT` suffix only if that node's Pi-hole web interface is not on port 80.
 
-The new membership is pushed to every node **including the one being added**, so all of them agree on the node list without any manual config editing.
+You can run this from *either* side — the node you are adding, or the node you are joining. The target is contacted first and the direction is chosen from what it reports:
+
+| This node | The address you entered | What happens |
+|---|---|---|
+| In a cluster | Standalone | It is added to this cluster at the lowest priority |
+| Standalone | In a cluster | **This node joins that cluster** at the lowest priority; the existing primary is not disturbed |
+| Standalone | Standalone | The two form a new cluster, this node as `PRIMARY` |
+| In a cluster | In a *different* cluster | Refused — remove it from the other cluster first |
+| Any | Not answering on `8887` | Refused, and nothing is changed |
+
+That last row matters: an address with nothing behind it is never written to `HA_NODES`. Accepting one would leave this node as `PRIMARY` of a cluster whose only peer never answers, which is enough for it to claim the VIP and start a DHCP server.
+
+Whichever direction it runs, the resulting membership is pushed to every node **including the one being added**, so all of them agree without any manual config editing.
 
 ### From the CLI
 
 ```bash
-# Add node 192.168.1.55 to the cluster (run from any existing member):
+# Add 192.168.1.55 (run from any existing member):
 curl "http://localhost:8887/api/nodes/join?node=192.168.1.55"
+
+# Or, from a standalone node, join the cluster that 192.168.1.3 belongs to:
+curl "http://localhost:8887/api/nodes/join?node=192.168.1.3"
 
 # Non-standard Pi-hole web port:
 curl "http://localhost:8887/api/nodes/join?node=192.168.1.55:8081"

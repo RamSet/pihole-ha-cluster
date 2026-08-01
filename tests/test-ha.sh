@@ -328,6 +328,70 @@ assert_true "dash: leave notifies the departing node" \
 
 # ============================================================
 echo
+echo "=== Join direction and target probing ==="
+
+# Adding used to mean "append them to my list and make me P1" regardless of
+# what the target already was, so a standalone node joining an established
+# cluster silently demoted that cluster's primary. And an address with nothing
+# at it was accepted, leaving the local node P1 of a cluster whose only peer
+# never answers — which is enough for it to take the VIP and start DHCP.
+eval "$(extract_fn "$DASH_SRC" _probe_node_list)"
+
+_get_peer_sid() { echo ""; }   # no password configured in these tests
+
+# Reachable node reporting a two-node cluster
+curl() { cat <<'JSON'
+{"nodes":[{"ip":"192.0.2.10","role":"PRIMARY","p":1,"port":80},{"ip":"192.0.2.11","role":"SECONDARY","p":2,"port":80}],"gateway":"192.0.2.1","pihole_port":80}
+JSON
+}
+_probed="$(_probe_node_list 192.0.2.10)"
+assert_eq "probe returns both cluster members" "192.0.2.10
+192.0.2.11" "$_probed"
+assert_eq "probe counts a 2-node cluster" "2" "$(printf '%s\n' "$_probed" | grep -c .)"
+
+# Reachable but standalone
+curl() { echo '{"nodes":[{"ip":"192.0.2.20","role":"STANDALONE","p":1,"port":80}],"gateway":"192.0.2.1","pihole_port":80}'; }
+assert_eq "probe counts a standalone node" "1" "$(_probe_node_list 192.0.2.20 | grep -c .)"
+
+# Unreachable: curl fails
+curl() { return 7; }
+assert_false "probe fails on an unreachable node" _probe_node_list 192.0.2.99
+assert_eq    "unreachable probe yields no members" "0" "$(_probe_node_list 192.0.2.99 | grep -c .)"
+
+# Reachable, but not pihole-ha (no "nodes" key)
+curl() { echo '{"error":"not found"}'; }
+assert_false "probe fails when the response is not a node list" _probe_node_list 192.0.2.98
+
+# The gateway field must never be mistaken for a cluster member
+curl() { echo '{"nodes":[{"ip":"192.0.2.10","role":"STANDALONE","p":1,"port":80}],"gateway":"192.0.2.1","pihole_port":80}'; }
+assert_not_contains "probe ignores the gateway address" "$(_probe_node_list 192.0.2.10)" "192.0.2.1
+"
+unset -f curl
+
+# Direction rules, as applied by the join handler
+_decide() {   # target_count local_count target_has_us -> direction
+    local tc="$1" lc="$2" hasus="$3"
+    if (( tc == 0 )); then echo "reject_unreachable"
+    elif (( tc > 1 && lc == 1 )); then echo "join_theirs"
+    elif (( tc > 1 && lc > 1 )) && [[ "$hasus" != "true" ]]; then echo "reject_two_clusters"
+    else echo "add_to_mine"; fi
+}
+assert_eq "unreachable target is rejected"                "reject_unreachable"  "$(_decide 0 1 false)"
+assert_eq "standalone joining a cluster joins theirs"     "join_theirs"         "$(_decide 3 1 false)"
+assert_eq "cluster adding a standalone absorbs it"        "add_to_mine"         "$(_decide 1 2 false)"
+assert_eq "two standalones form a new cluster"            "add_to_mine"         "$(_decide 1 1 false)"
+assert_eq "two different clusters are refused"            "reject_two_clusters" "$(_decide 2 2 false)"
+assert_eq "re-adding a node that already lists us is ok"  "add_to_mine"         "$(_decide 2 2 true)"
+
+assert_true "dash: join probes the target before mutating" \
+    grep -q '_target_list="$(_probe_node_list "$_join_ip")"' "$DASH_SRC"
+assert_true "dash: unreachable target changes nothing" \
+    grep -q 'did not respond on port 8887' "$DASH_SRC"
+assert_true "dash: standalone forwards its own join to the cluster" \
+    grep -q '_forward_join "$_join_ip" "$_self_ip"' "$DASH_SRC"
+
+# ============================================================
+echo
 echo "=== Syntax check all scripts ==="
 
 all_ok=true

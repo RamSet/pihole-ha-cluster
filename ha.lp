@@ -229,8 +229,9 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
     <h4><i class="fa fa-unlink"></i> Not in a cluster</h4>
     <p>This node (<?=ha_nodes[1] or ""?>) is on its own, so there is nothing to fail over to and
     HA is off. Other Pi-holes on your network are unaffected.
-    To put it back in a cluster, open the HA page on a node that is already in one and add
-    <?=ha_nodes[1] or "this node"?> under <strong>Cluster Members</strong>.</p>
+    Use <strong>Cluster Members</strong> below to join a cluster: enter the address of another
+    Pi-hole HA node &mdash; if it already runs a cluster this node joins it, otherwise the two
+    of them start a new one.</p>
 <? else ?>
     <h4><i class="fa fa-power-off"></i> HA Failover Disabled</h4>
     <p>All DHCP failover, health checks, and VIP management are paused across all nodes.
@@ -407,7 +408,9 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                         <span id="join-result" style="margin-left:10px"></span>
                     </div>
                     <p class="text-muted" style="margin:8px 0 0;font-size:12px;line-height:1.5">
-                        The node must already have Pi-hole HA installed and be reachable on port 8887.
+                        The node must already have Pi-hole HA installed and be reachable on port 8887 &mdash;
+                        it is contacted first, and nothing changes if it does not answer.
+                        If it already runs a cluster, this node joins that cluster instead of absorbing it.
                         Add a <code>:port</code> suffix only if its Pi-hole web interface is not on port 80.
                     </p>
                 </div>
