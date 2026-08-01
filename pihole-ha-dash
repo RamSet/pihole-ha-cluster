@@ -1203,7 +1203,9 @@ NEOF
                         # With HA off the daemon no longer manages DHCP, so a
                         # node that was serving would keep answering and race
                         # the cluster's master. Stand down explicitly.
-                        pihole-FTL --config dhcp.active false >/dev/null 2>&1
+                        if ! platform_set_dhcp false; then
+                            log_warn "event=leave_dhcp_standdown status=failed node=$_LOCAL_IP"
+                        fi
                         _HA_NODES=("$_LOCAL_IP")
                     else
                         _conf_set "HA_NODES" "$_new_nodes"

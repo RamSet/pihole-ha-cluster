@@ -129,6 +129,24 @@ platform_ftl_is_active() {
     fi
 }
 
+# Read / write Pi-hole's DHCP server state.
+#
+# Both deployments drive pihole-FTL directly, but this lives here so callers
+# don't each hardcode the binary: the daemon and the dashboard both need to
+# stand DHCP down, and a bare call that silently no-ops when pihole-FTL isn't
+# on PATH would leave a node serving DHCP when it was told to stop.
+# Returns non-zero if pihole-FTL is unavailable so callers can report it.
+platform_get_dhcp() {
+    command -v pihole-FTL >/dev/null 2>&1 || { echo "false"; return 1; }
+    pihole-FTL --config dhcp.active 2>/dev/null || { echo "false"; return 1; }
+}
+
+platform_set_dhcp() {
+    local want="$1"
+    command -v pihole-FTL >/dev/null 2>&1 || return 1
+    pihole-FTL --config dhcp.active "$want" >/dev/null 2>&1
+}
+
 platform_ftl_restart() {
     if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
         local pid

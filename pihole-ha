@@ -348,7 +348,7 @@ fi
 # load_notify_conf and notify() live in pihole-ha-platform. Daemon callers
 # below background with `&` so curl never blocks the failover loop.
 load_notify_conf
-get_dhcp() { pihole-FTL --config dhcp.active 2>/dev/null || echo "false"; }
+get_dhcp() { platform_get_dhcp; }
 
 # Ensure we hold a valid cached SID for $ip, authenticating only if we don't
 # already have one. MUST be called directly, never inside $(...): the whole point
@@ -459,7 +459,7 @@ set_dhcp() {
     local want="$1" have
     have="$(get_dhcp)"
     [[ "$have" == "$want" ]] && return 0
-    pihole-FTL --config dhcp.active "$want" >/dev/null 2>&1
+    platform_set_dhcp "$want"
     sleep 1
     have="$(get_dhcp)"
     [[ "$have" == "$want" ]]

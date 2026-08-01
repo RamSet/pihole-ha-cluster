@@ -25,7 +25,7 @@ At install it checks whether Pi-hole DHCP is active, probes the LAN for another 
 - **Pushover Notifications** — Optional alerts on failover events (activation, deactivation, sync).
 - **API Authentication** — Mutating API endpoints are protected using Pi-hole's own password. If the local Pi-hole instance has a password set, all write operations require a valid session ID (SID). Read-only endpoints remain open.
 - **Web UI** — A native panel integrated into Pi-hole's admin interface at `/admin/ha` (**Tools > HA Cluster**).
-- **Cluster Join/Leave** — Nodes register themselves with the cluster on install via the `/api/nodes/join` API. A "Leave Cluster" button on each node's HA panel removes it from all peers with one click. No manual config editing needed.
+- **Cluster Join/Leave** — Nodes register themselves with the cluster on install via the `/api/nodes/join` API. The **Cluster Members** panel on the HA page adds, removes, and reorders nodes with one click, and every change propagates to all peers. A removed node keeps serving DNS on its own with failover switched off, so it can be added back at any time. No manual config editing needed.
 - **Docker Support** — Runs as a sidecar container alongside the stock `pihole/pihole` image. No custom Pi-hole fork needed. Interactive installer detects existing Pi-hole containers and preserves volume mounts.
 - **Mixed Clusters** — Supports nodes running on different Pi-hole web ports (e.g., bare-metal on port 80 alongside Docker on port 8081) using `IP:PORT` format in the node list.
 
@@ -483,18 +483,51 @@ bash tests/test-ha.sh
 
 Tests cover IP validation, config version parsing, role detection, node reorder logic, structured log format, auth check logic, and syntax checking of all scripts.
 
+## Adding a Node
+
+The node must already have Pi-hole HA installed and be reachable on port `8887`.
+
+### From the Web UI
+
+Open **Cluster Members** on any node's `/admin/ha` page, enter the new node's IP, and click **Add Node**. It joins at the lowest priority. Add a `:PORT` suffix only if that node's Pi-hole web interface is not on port 80.
+
+The new membership is pushed to every node **including the one being added**, so all of them agree on the node list without any manual config editing.
+
+### From the CLI
+
+```bash
+# Add node 192.168.1.55 to the cluster (run from any existing member):
+curl "http://localhost:8887/api/nodes/join?node=192.168.1.55"
+
+# Non-standard Pi-hole web port:
+curl "http://localhost:8887/api/nodes/join?node=192.168.1.55:8081"
+```
+
 ## Removing a Node
 
 ### From the Web UI
 
-Click the **Leave Cluster** button on the node's own card at `/admin/ha`. This removes the node from all peers automatically via the `/api/nodes/leave` endpoint.
+Open **Cluster Members** on any node's `/admin/ha` page and click the red **×** next to the node. You can also use the **Leave Cluster** button on the node's own card. Either way the change propagates to all peers.
+
+### What happens to the removed node
+
+It becomes **standalone** rather than being torn down:
+
+- Its node list is reset to just itself and `HA_ENABLED` is set to `false`.
+- It stops serving DHCP, and releases the VIP if it held it, so it can't compete with the cluster it just left.
+- `pihole-FTL` keeps running, so the node carries on serving DNS on its own IP.
+- Its HA page reports the node as `STANDALONE` and explains how to rejoin.
+
+A node with no peers never runs failover logic. It has no way to tell "every peer died" from "I was removed", and assuming the former would make it seize a VIP another node still holds and start a second DHCP server on the network.
+
+To bring it back, add it from a node that is still in the cluster (see **Adding a Node**).
 
 ### From the CLI
 
 ```bash
 # Remove node 192.168.1.55 from the cluster (run from any node):
 curl "http://localhost:8887/api/nodes/leave?node=192.168.1.55"
-# Propagates to all other nodes automatically
+# Propagates to all other nodes, and tells 192.168.1.55 to stand itself down
 ```
 
 ## Updating
