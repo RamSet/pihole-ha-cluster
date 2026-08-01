@@ -2,6 +2,11 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.11.0 — 2026-08-01
+- Drive DHCP state through the platform layer, document join/leave
+- Make cluster join/leave safe and add it to the UI
+- Replace per-tick forks in check_peer with bash builtins
+
 ## v3.10.17 — 2026-07-19
 - Uninstall: revert host changes so Pi-hole is left as it was
 
