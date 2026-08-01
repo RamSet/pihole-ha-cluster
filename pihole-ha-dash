@@ -54,6 +54,8 @@ if [[ "${1:-}" == "--handle" ]]; then
     for (( _ri=0; _ri<_NODE_COUNT; _ri++ )); do
         if (( _ri < ${#_ROLE_NAMES[@]} )); then _ROLES+=("${_ROLE_NAMES[$_ri]}"); else _ROLES+=("NODE$((_ri+1))"); fi
     done
+    # A node with no peers isn't the PRIMARY of anything.
+    (( _NODE_COUNT == 1 )) && _ROLES=("STANDALONE")
 
     # is_valid_ip() comes from pihole-ha-platform sourced above.
 
@@ -74,6 +76,44 @@ if [[ "${1:-}" == "--handle" ]]; then
             [[ "$_n" == "$ip" ]] && return 0
         done
         return 1
+    }
+
+    # Validate a comma-separated HA_NODES list of IP or IP:PORT entries. The
+    # list is written verbatim into nodes.conf (a sourced file), so every part
+    # must be checked to prevent shell injection.
+    _valid_node_list() {
+        local list="$1" _e _eip _eport
+        [[ -n "$list" ]] || return 1
+        # `read -ra` stops at the first newline, so anything after one would
+        # skip validation entirely and still be written to nodes.conf. Reject
+        # any whitespace outright — no valid entry contains it.
+        [[ "$list" == *[[:space:]]* ]] && return 1
+        local _vparts
+        IFS=',' read -ra _vparts <<< "$list"
+        for _e in "${_vparts[@]}"; do
+            _eip="${_e%%:*}"
+            _eport=""
+            [[ "$_e" == *:* ]] && _eport="${_e##*:}"
+            is_valid_ip "$_eip" || return 1
+            if [[ -n "$_eport" ]]; then
+                [[ "$_eport" =~ ^[0-9]+$ ]] || return 1
+                (( 10#$_eport >= 1 && 10#$_eport <= 65535 )) || return 1
+            fi
+        done
+        return 0
+    }
+
+    # Push an authoritative HA_NODES list to every other member of that list,
+    # including a node that is joining for the first time.
+    _broadcast_nodes() {
+        local list="$1" _me _b _bip _btargets
+        _me="$(platform_get_local_ip)"
+        IFS=',' read -ra _btargets <<< "$list"
+        for _b in "${_btargets[@]}"; do
+            _bip="${_b%%:*}"
+            [[ "$_bip" == "$_me" ]] && continue
+            _propagate "$_bip" "/api/nodes/join?node=$_bip&propagated=1&nodes=$list" &
+        done
     }
 
     read -r method path _rest
@@ -982,14 +1022,28 @@ NEOF
         /api/nodes/join*)
             _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
             send_headers "200 OK" "application/json"
-            _join_node=""
+            _join_node="" _join_propagated="" _join_list=""
             IFS='&' read -ra _jparams <<< "$_qs"
             for _jp in "${_jparams[@]}"; do
                 case "$_jp" in
                     node=*) _join_node="${_jp#node=}" ;;
+                    nodes=*) _join_list="${_jp#nodes=}" ;;
+                    propagated=*) _join_propagated="1" ;;
                 esac
             done
-            if [[ -z "$_join_node" ]]; then
+            if [[ -n "$_join_propagated" && -n "$_join_list" ]]; then
+                # Authoritative cluster membership pushed by another node.
+                # Adopt it wholesale and clear the standalone kill-switch that
+                # /api/nodes/leave sets on a departing node.
+                if ! _valid_node_list "$_join_list"; then
+                    echo '{"error":"invalid node list"}'
+                else
+                    _conf_set "HA_NODES" "$_join_list"
+                    _conf_set "HA_ENABLED" "true"
+                    platform_ha_daemon_restart
+                    printf '{"ok":true,"action":"synced","nodes":"%s"}\n' "$_join_list"
+                fi
+            elif [[ -z "$_join_node" ]]; then
                 echo '{"error":"missing node parameter (e.g. ?node=10.0.0.5 or ?node=10.0.0.5:8080)"}'
             else
                 # Extract IP and port for validation. $_join_node is written verbatim
@@ -1033,6 +1087,7 @@ NEOF
                         done
                         _conf_set "HA_NODES" "$_new_nodes"
                         _conf_set "GATEWAY" "$_GATEWAY"
+                        [[ -z "$_join_propagated" ]] && _broadcast_nodes "$_new_nodes"
                         platform_ha_daemon_restart
                         printf '{"ok":true,"action":"port_updated","node":"%s","nodes":"%s"}\n' "$_join_node" "$_new_nodes"
                     else
@@ -1053,6 +1108,10 @@ NEOF
                     _new_nodes+=",${_join_node}"
                     _conf_set "HA_NODES" "$_new_nodes"
                     _conf_set "GATEWAY" "$_GATEWAY"
+                    # Forming a cluster from a standalone node means undoing the
+                    # kill-switch that /api/nodes/leave set. Only in that case —
+                    # an existing member may have HA off deliberately.
+                    (( _NODE_COUNT == 1 )) && _conf_set "HA_ENABLED" "true"
                     # Reload local arrays
                     _HA_NODES+=("$_join_ip")
                     if [[ "$_join_node" == *:* ]]; then
@@ -1066,6 +1125,10 @@ NEOF
                     else
                         _ROLES+=("NODE${_NODE_COUNT}")
                     fi
+                    # Push the new membership to every member, including the
+                    # joiner — it needs a list that contains itself or its
+                    # daemon exits with "Unknown IP".
+                    [[ -z "$_join_propagated" ]] && _broadcast_nodes "$_new_nodes"
                     platform_ha_daemon_restart
                     printf '{"ok":true,"action":"joined","node":"%s","nodes":"%s"}\n' "$_join_node" "$_new_nodes"
                 fi
@@ -1105,25 +1168,67 @@ NEOF
                         fi
                         _new_ha_nodes+=("${_HA_NODES[$_li]}")
                     done
-                    _conf_set "HA_NODES" "$_new_nodes"
-                    # Reload local arrays
-                    _HA_NODES=("${_new_ha_nodes[@]}")
-                    unset "_NODE_PORTS[$_leave_ip]"
+                    _LOCAL_IP="$(platform_get_local_ip)"
+                    # Tell the remaining members first — once we rewrite our
+                    # own config below we no longer know who they were.
+                    if [[ -z "$_leave_propagated" ]]; then
+                        for _ln in "${_new_ha_nodes[@]}"; do
+                            [[ "$_ln" == "$_LOCAL_IP" ]] && continue
+                            _propagate "$_ln" "/api/nodes/leave?node=$_leave_ip&propagated=1" &
+                        done
+                        # Tell the departing node too, so it stands itself down
+                        # instead of carrying on as if still a member and
+                        # contending for the VIP and DHCP. Best-effort: if it
+                        # is already down there is nothing to stand down.
+                        if [[ "$_leave_ip" != "$_LOCAL_IP" ]]; then
+                            _propagate "$_leave_ip" "/api/nodes/leave?node=$_leave_ip&propagated=1" &
+                        fi
+                    fi
+                    _leave_standalone=false
+                    if [[ "$_leave_ip" == "$_LOCAL_IP" ]]; then
+                        # We are the node leaving. Writing a list that excludes
+                        # us makes pihole-ha exit 1 ("Unknown IP") and crashloop
+                        # forever, so go standalone instead: daemon stays up for
+                        # DNS and future rejoin, HA off so we never race the
+                        # cluster for the VIP or DHCP.
+                        _leave_standalone=true
+                        _self_port="${_NODE_PORTS[$_LOCAL_IP]:-80}"
+                        if [[ "$_self_port" == "80" ]]; then
+                            _new_nodes="$_LOCAL_IP"
+                        else
+                            _new_nodes="${_LOCAL_IP}:${_self_port}"
+                        fi
+                        _conf_set "HA_NODES" "$_new_nodes"
+                        _conf_set "HA_ENABLED" "false"
+                        # With HA off the daemon no longer manages DHCP, so a
+                        # node that was serving would keep answering and race
+                        # the cluster's master. Stand down explicitly.
+                        pihole-FTL --config dhcp.active false >/dev/null 2>&1
+                        _HA_NODES=("$_LOCAL_IP")
+                    else
+                        _conf_set "HA_NODES" "$_new_nodes"
+                        _HA_NODES=("${_new_ha_nodes[@]}")
+                        unset "_NODE_PORTS[$_leave_ip]"
+                    fi
                     _NODE_COUNT=${#_HA_NODES[@]}
                     _ROLES=()
                     for (( _ri=0; _ri<_NODE_COUNT; _ri++ )); do
                         if (( _ri < ${#_ROLE_NAMES[@]} )); then _ROLES+=("${_ROLE_NAMES[$_ri]}"); else _ROLES+=("NODE$((_ri+1))"); fi
                     done
-                    # Propagate to other nodes if not already propagated
-                    if [[ -z "$_leave_propagated" ]]; then
-                        for _ln in "${_new_ha_nodes[@]}"; do
-                            _LOCAL_IP="$(platform_get_local_ip)"
-                            [[ "$_ln" == "$_LOCAL_IP" ]] && continue
-                            _propagate "$_ln" "/api/nodes/leave?node=$_leave_ip&propagated=1" &
-                        done
+                    (( _NODE_COUNT == 1 )) && _ROLES=("STANDALONE")
+                    # A DHCP master pinned to a node that is no longer a member
+                    # can never be health-checked, so the pin would freeze
+                    # failover against a peer that isn't there. Fall back to
+                    # automatic election.
+                    _MASTER_CONF="/etc/pihole-ha/master.conf"
+                    if [[ -f "$_MASTER_CONF" ]]; then
+                        _pinned="$(sed -n 's/^DHCP_MASTER=//p' "$_MASTER_CONF" | head -1)"
+                        if [[ -n "$_pinned" && "$_pinned" != "auto" ]] && ! _is_known_node "$_pinned"; then
+                            echo "DHCP_MASTER=auto" > "$_MASTER_CONF"
+                        fi
                     fi
                     platform_ha_daemon_restart
-                    printf '{"ok":true,"action":"removed","node":"%s","nodes":"%s"}\n' "$_leave_ip" "$_new_nodes"
+                    printf '{"ok":true,"action":"removed","node":"%s","standalone":%s,"nodes":"%s"}\n' "$_leave_ip" "$_leave_standalone" "$_new_nodes"
                 fi
             fi
             ;;

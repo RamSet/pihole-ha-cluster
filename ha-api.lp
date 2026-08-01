@@ -57,7 +57,7 @@ local function get_sid()
     return nil
 end
 
-local function curl_local(endpoint)
+local function curl_local(endpoint, timeout)
     -- Forward the caller's session so the :8887 backend authorizes writes on
     -- password-protected Pi-holes. Harmless on endpoints that don't require it.
     local sid = get_sid()
@@ -65,7 +65,8 @@ local function curl_local(endpoint)
         local sep = endpoint:find("?", 1, true) and "&" or "?"
         endpoint = endpoint .. sep .. "sid=" .. url_encode(sid)
     end
-    local handle = io.popen("curl -s --max-time 4 'http://127.0.0.1:8887" .. endpoint .. "' 2>/dev/null")
+    local handle = io.popen("curl -s --max-time " .. (timeout or 4) ..
+        " 'http://127.0.0.1:8887" .. endpoint .. "' 2>/dev/null")
     if not handle then return nil end
     local result = handle:read("*a")
     handle:close()
@@ -233,8 +234,19 @@ elseif action == "vip-toggle" then
 elseif action == "leave" then
     local ip = get_param("ip") or ""
     if ip:match("^%d+%.%d+%.%d+%.%d+$") then
-        local content = curl_local("/api/nodes/leave?node=" .. ip)
+        -- Rewrites config and restarts the daemon on every member; 4s is tight.
+        local content = curl_local("/api/nodes/leave?node=" .. ip, 15)
         mg.write(content or '{"error":"leave failed"}')
+    else
+        mg.write('{"error":"invalid IP"}')
+    end
+
+elseif action == "join" then
+    local ip = get_param("ip") or ""
+    -- Accepts IP or IP:PORT (Pi-hole web port of the joining node).
+    if ip:match("^%d+%.%d+%.%d+%.%d+$") or ip:match("^%d+%.%d+%.%d+%.%d+:%d+$") then
+        local content = curl_local("/api/nodes/join?node=" .. ip, 15)
+        mg.write(content or '{"error":"join failed"}')
     else
         mg.write('{"error":"invalid IP"}')
     end

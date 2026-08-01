@@ -78,6 +78,13 @@ $(function () {
     $(document).on("click", ".prio-up", function () {
         window.haMovePrio($(this).data("idx"), -1);
     });
+    $(document).on("click", "#join-btn", function () { window.haJoinNode(); });
+    $(document).on("keypress", "#join-ip", function (e) {
+        if (e.which === 13) window.haJoinNode();
+    });
+    $(document).on("click", ".prio-remove", function () {
+        window.haRemoveNode($(this).data("ip"));
+    });
     $(document).on("click", ".prio-down", function () {
         window.haMovePrio($(this).data("idx"), 1);
     });
@@ -258,22 +265,7 @@ $(function () {
                         'data-ip="' + node.ip + '">Leave Cluster</button>'
                     );
                     $("#leave-btn-" + i).on("click", function () {
-                        var ip = $(this).data("ip");
-                        if (!confirm("Remove this node (" + ip + ") from the cluster?")) return;
-                        $.ajax({
-                            url: API + "?action=leave&ip=" + encodeURIComponent(ip),
-                            timeout: 10000,
-                            dataType: "json"
-                        }).done(function (r) {
-                            if (r.ok) {
-                                alert("Node removed from cluster. This page will stop updating.");
-                                location.reload();
-                            } else {
-                                alert("Error: " + (r.error || "unknown"));
-                            }
-                        }).fail(function () {
-                            alert("Failed to contact HA API.");
-                        });
+                        window.haRemoveNode($(this).data("ip"));
                     });
                 }
             } else {
@@ -680,21 +672,137 @@ $(function () {
         var shorts = nodes.map(function (ip) { return "." + ip.split(".").pop(); });
         $("#priority-status").text(shorts.join(" → "));
 
+        var localIp = statusData && statusData.node ? statusData.node.ip : null;
+
+        // A one-node list means this node is on its own — say so plainly
+        // instead of showing a "cluster" of one with everything disabled.
+        if (nodes.length === 1) {
+            $("#standalone-detail").text(
+                "It is not part of a cluster, so HA failover is off. Add another node below, " +
+                "or add this node (" + nodes[0] + ") from a node that is already in the cluster."
+            );
+            $("#standalone-note").show();
+        } else {
+            $("#standalone-note").hide();
+        }
+
         // Rebuild rows
         var html = "";
         nodes.forEach(function (ip, i) {
             var role = PRIO_ROLES[i] || ("NODE" + (i + 1));
+            var bareIp = ip.split(":")[0];
             html += '<div class="priority-row" data-ip="' + ip + '" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #eee">';
             html += '<span class="label label-default" style="min-width:28px;text-align:center">P' + (i + 1) + '</span>';
             html += '<strong style="min-width:120px">' + ip + '</strong>';
             html += '<span class="text-muted">' + role + '</span>';
+            if (bareIp === localIp) {
+                html += '<span class="label label-primary">this node</span>';
+            }
             html += '<span style="margin-left:auto">';
             html += '<button class="btn btn-xs btn-default prio-up" data-idx="' + i + '"' + (i === 0 ? " disabled" : "") + '><i class="fa fa-arrow-up"></i></button>';
             html += '<button class="btn btn-xs btn-default prio-down" data-idx="' + i + '"' + (i === nodes.length - 1 ? " disabled" : "") + '><i class="fa fa-arrow-down"></i></button>';
+            html += ' <button class="btn btn-xs btn-danger prio-remove" data-ip="' + bareIp + '" title="Remove from cluster"' + (nodes.length === 1 ? " disabled" : "") + '><i class="fa fa-times"></i></button>';
             html += '</span></div>';
         });
         $("#priority-rows").html(html);
     }
+
+    window.haRemoveNode = function (ip) {
+        var localIp = statusData && statusData.node ? statusData.node.ip : null;
+        var isSelf = ip === localIp;
+        var msg = isSelf
+            ? "Remove this node (" + ip + ") from the cluster?\n\n" +
+              "It will keep serving DNS on its own with HA failover switched off, " +
+              "and will stop serving DHCP. You can add it back from any remaining node."
+            : "Remove " + ip + " from the cluster?\n\n" +
+              "It will keep serving DNS on its own with HA failover switched off. " +
+              "You can add it back here later.";
+        if (!confirm(msg)) return;
+
+        var $res = $("#priority-result");
+        $(".prio-up, .prio-down, .prio-remove").prop("disabled", true);
+        $res.html('<i class="fa fa-spinner fa-spin"></i> Removing ' + ip + '...').show();
+
+        $.ajax({
+            url: API + "?action=leave&ip=" + encodeURIComponent(ip),
+            timeout: 20000,
+            dataType: "json"
+        })
+        .done(function (data) {
+            if (data && data.ok) {
+                if (isSelf) {
+                    alert("This node is now standalone. HA failover is off and it is no longer " +
+                          "serving DHCP.\n\nTo bring it back, open the HA page on a node that is " +
+                          "still in the cluster and add " + ip + ".");
+                    location.reload();
+                    return;
+                }
+                $res.html('<span style="color:#00a65a"><i class="fa fa-check"></i> ' + ip + ' removed</span>');
+                prioCfg.nodes = data.nodes;
+                renderPriority();
+            } else {
+                $res.html('<span style="color:#dd4b39">' + (data && data.error || "Failed") + '</span>');
+            }
+        })
+        .fail(function (xhr, textStatus, err) {
+            $res.html('<span style="color:#dd4b39">Error: ' + (err || textStatus) + '</span>');
+        })
+        .always(function () {
+            setTimeout(function () { $res.fadeOut(function () { $res.text("").show(); }); }, 5000);
+            setTimeout(pollPriority, 2000);
+        });
+    };
+
+    window.haJoinNode = function () {
+        var ip = $.trim($("#join-ip").val() || "");
+        var $res = $("#join-result");
+        if (!/^\d+\.\d+\.\d+\.\d+(:\d+)?$/.test(ip)) {
+            $res.html('<span style="color:#dd4b39">Enter an IP, optionally with :port</span>').show();
+            return;
+        }
+
+        // Adding from a standalone node forms a new cluster with this node at
+        // P1 — and pushes that order onto the node being added. Worth a prompt.
+        var soloNodes = prioCfg && prioCfg.nodes ? prioCfg.nodes.split(",") : [];
+        if (soloNodes.length === 1) {
+            if (!confirm("This node is standalone, so adding " + ip + " forms a new cluster " +
+                         "with this node (" + soloNodes[0] + ") as PRIMARY and " + ip + " as SECONDARY.\n\n" +
+                         "If " + ip + " is already in a cluster, add this node from there instead.\n\nContinue?")) {
+                $res.hide();
+                return;
+            }
+        }
+
+        $("#join-btn").prop("disabled", true);
+        $res.html('<i class="fa fa-spinner fa-spin"></i> Adding ' + ip + '...').show();
+
+        $.ajax({
+            url: API + "?action=join&ip=" + encodeURIComponent(ip),
+            timeout: 20000,
+            dataType: "json"
+        })
+        .done(function (data) {
+            if (data && data.ok) {
+                if (data.action === "already_member") {
+                    $res.html('<span style="color:#00a65a"><i class="fa fa-check"></i> ' + ip + ' is already a member</span>');
+                } else {
+                    $res.html('<span style="color:#00a65a"><i class="fa fa-check"></i> ' + ip + ' added</span>');
+                    $("#join-ip").val("");
+                }
+                if (data.nodes) { prioCfg.nodes = data.nodes; renderPriority(); }
+            } else {
+                $res.html('<span style="color:#dd4b39">' + (data && data.error || "Failed") + '</span>');
+            }
+        })
+        .fail(function (xhr, textStatus, err) {
+            $res.html('<span style="color:#dd4b39">Error: ' + (err || textStatus) + '</span>');
+        })
+        .always(function () {
+            $("#join-btn").prop("disabled", false);
+            setTimeout(function () { $res.fadeOut(function () { $res.text("").show(); }); }, 6000);
+            setTimeout(pollPriority, 2000);
+        });
+    };
 
     window.haMovePrio = function (idx, dir) {
         if (!prioCfg || !prioCfg.nodes) return;

@@ -64,6 +64,9 @@ for (( _ri=0; _ri<NODE_COUNT; _ri++ )); do
         ROLES+=("NODE$((_ri+1))")
     fi
 done
+# A node with no peers isn't the PRIMARY of anything — reporting it as such
+# makes a node that left the cluster look like it took charge of one.
+(( NODE_COUNT == 1 )) && ROLES=("STANDALONE")
 
 IFACE="$(ip -o route get "$GATEWAY" 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1/p')"
 [[ -z "$IFACE" ]] && IFACE="$(ip -o link show up | grep -v lo | head -1 | awk -F': ' '{print $2}')"
@@ -190,6 +193,14 @@ reload_vip_conf() {
             fi
         done
         NODE_COUNT=${#NODES[@]}
+        # ROLES must be rebuilt too, not just re-indexed: a membership change
+        # can shrink the cluster, and the stale array would keep reporting
+        # PRIMARY on a node that now has no peers.
+        ROLES=()
+        for (( _ri=0; _ri<NODE_COUNT; _ri++ )); do
+            if (( _ri < ${#_ROLE_NAMES[@]} )); then ROLES+=("${_ROLE_NAMES[$_ri]}"); else ROLES+=("NODE$((_ri+1))"); fi
+        done
+        (( NODE_COUNT == 1 )) && ROLES=("STANDALONE")
         for i in "${!NODES[@]}"; do
             [[ "${NODES[$i]}" == "$LOCAL_IP" ]] && { MY_IDX=$i; break; }
         done
@@ -528,23 +539,50 @@ check_peer() {
 
 is_serving() {
     local ip="$1"
-    [[ "${peer_ping[$ip]}" == "true" ]] &&
-    [[ "${peer_dns[$ip]}" == "true" ]] &&
-    [[ "${peer_api[$ip]}" == "true" ]] &&
-    [[ "${peer_dhcp[$ip]}" == "true" ]]
+    # Defaults matter: a pinned DHCP_MASTER that has left the cluster is never
+    # health-checked, and a bare lookup would abort the daemon under `set -u`.
+    [[ "${peer_ping[$ip]:-}" == "true" ]] &&
+    [[ "${peer_dns[$ip]:-}" == "true" ]] &&
+    [[ "${peer_api[$ip]:-}" == "true" ]] &&
+    [[ "${peer_dhcp[$ip]:-}" == "true" ]]
 }
 
 get_fail_reason() {
     local ip="$1" r=""
-    [[ "${peer_ping[$ip]}" != "true" ]] && r+="ping failed, "
-    [[ "${peer_dns[$ip]}" != "true" ]] && r+="DNS:53 down, "
-    [[ "${peer_api[$ip]}" != "true" ]] && r+="API unreachable, "
-    [[ "${peer_dhcp[$ip]}" == "false" ]] && r+="DHCP disabled, "
-    [[ "${peer_dhcp[$ip]}" == "null" && "${peer_api[$ip]}" == "true" ]] && r+="DHCP unknown, "
+    # A manually pinned DHCP_MASTER can name a node that is no longer in
+    # HA_NODES, so it never gets health-checked and has no peer_* entries.
+    # Under `set -u` a bare lookup aborts the daemon, so default every read.
+    if [[ -z "${peer_ping[$ip]:-}" ]]; then
+        echo "not a cluster member"
+        return
+    fi
+    [[ "${peer_ping[$ip]:-}" != "true" ]] && r+="ping failed, "
+    [[ "${peer_dns[$ip]:-}" != "true" ]] && r+="DNS:53 down, "
+    [[ "${peer_api[$ip]:-}" != "true" ]] && r+="API unreachable, "
+    [[ "${peer_dhcp[$ip]:-}" == "false" ]] && r+="DHCP disabled, "
+    [[ "${peer_dhcp[$ip]:-}" == "null" && "${peer_api[$ip]:-}" == "true" ]] && r+="DHCP unknown, "
     echo "${r%, }"
 }
 
+is_cluster_member() {
+    local ip="$1" n
+    for n in "${NODES[@]}"; do
+        [[ "$n" == "$ip" ]] && return 0
+    done
+    return 1
+}
+
 should_i_serve() {
+    # A pin naming a node that is no longer in HA_NODES is never health-checked,
+    # so it reads as "master is down" and every remaining node takes over at
+    # once. An unverifiable pin is a stale pin — fall back to priority order.
+    if [[ "$DHCP_MASTER" != "auto" ]] && ! is_cluster_member "$DHCP_MASTER"; then
+        if [[ "${_warned_stale_master:-}" != "$DHCP_MASTER" ]]; then
+            log_warn "event=stale_dhcp_master master=$DHCP_MASTER reason=not_a_member action=using_priority_order"
+            _warned_stale_master="$DHCP_MASTER"
+        fi
+        DHCP_MASTER="auto"
+    fi
     if [[ "$DHCP_MASTER" != "auto" ]]; then
         # Manual override mode
         if [[ "$DHCP_MASTER" == "$LOCAL_IP" ]]; then
@@ -813,6 +851,10 @@ catch_up_from_peers() {
 # the same acting primary (highest-priority alive) and converges its sync.conf +
 # timers to match — no RPC needed.
 manage_sync_role() {
+    # A lone node has nobody to publish to and nobody to pull from. Running the
+    # election anyway makes it claim the publisher role and announce that it
+    # took over from a node it is no longer clustered with.
+    (( NODE_COUNT > 1 )) || return 0
     local _se="true"
     if [[ -f "$SYNC_CONF" ]]; then
         _se="$(grep -E '^SYNC_ENABLED=' "$SYNC_CONF" | head -1 | cut -d= -f2)"
@@ -859,7 +901,17 @@ manage_sync_role() {
 # --- Main Loop ---
 log_info "event=startup ip=$LOCAL_IP priority=$PRIORITY interval=${CHECK_INTERVAL}s activate_after=$ACTIVATE_AFTER deactivate_after=$DEACTIVATE_AFTER"
 log_info "event=startup checks=\"ping dns:53 api dhcp\""
-NOTIFY_TAG=daemon_lifecycle notify "<b><font color='#3498db'>$ROLE</font> DHCP Monitor Started</b> <br> <font color='#95a5a6'>$LOCAL_IP</font> (P<b>$PRIORITY</b>) <br> Order: ${NODES[*]} <br> VIP: $VIP ($([[ "$VIP_ENABLED" == "true" ]] && echo enabled || echo disabled)) <br> HA: $([[ "$HA_ENABLED" == "true" ]] && echo enabled || echo disabled)" &
+if [[ "$HA_ENABLED" != "true" ]]; then
+    # Announcing "PRIMARY DHCP Monitor Started" here reads as though this node
+    # just took charge of DHCP, which is the opposite of what HA-off means.
+    if (( NODE_COUNT == 1 )); then
+        NOTIFY_TAG=daemon_lifecycle notify "<b><font color='#95a5a6'>Standalone</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> started outside any cluster <br> Not managing DHCP or the VIP" &
+    else
+        NOTIFY_TAG=daemon_lifecycle notify "<b><font color='#95a5a6'>HA Disabled</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> started with failover switched off <br> Order: ${NODES[*]} <br> Not managing DHCP or the VIP" &
+    fi
+else
+    NOTIFY_TAG=daemon_lifecycle notify "<b><font color='#3498db'>$ROLE</font> DHCP Monitor Started</b> <br> <font color='#95a5a6'>$LOCAL_IP</font> (P<b>$PRIORITY</b>) <br> Order: ${NODES[*]} <br> VIP: $VIP ($([[ "$VIP_ENABLED" == "true" ]] && echo enabled || echo disabled)) <br> HA: enabled" &
+fi
 
 while true; do
     sleep "$CHECK_INTERVAL"
@@ -886,6 +938,16 @@ while true; do
 
     if [[ "$HA_ENABLED" != "true" ]]; then
         write_status "HA disabled"
+        continue
+    fi
+    # No peers means no failover decision can be made safely. A node that was
+    # evicted from a cluster looks identical, from here, to a node whose peers
+    # all died — and guessing "sole survivor" makes it seize a VIP another node
+    # is still holding and start a second DHCP server on the LAN. Leave DHCP and
+    # the VIP exactly as they are until the node has a peer to compare against.
+    if (( NODE_COUNT == 1 )); then
+        activate_count=0; deactivate_count=0
+        write_status "Standalone - no peers to fail over to"
         continue
     fi
     if ! ensure_ftl_running; then

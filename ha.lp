@@ -50,6 +50,14 @@ for i = 4, node_count do
     ha_roles[i] = "NODE" .. i
     ha_role_short[i] = "P" .. i
 end
+-- A node on its own is not the PRIMARY of anything. Calling it that (and
+-- talking about "all nodes") is misleading on a node that left the cluster.
+local ha_standalone = (node_count == 1)
+if ha_standalone then
+    ha_roles[1] = "STANDALONE"
+    ha_role_short[1] = "solo"
+end
+local scope_word = ha_standalone and "this node" or "all nodes"
 
 -- Read Pushover notify config server-side for initial state
 local po_enabled = false
@@ -217,9 +225,17 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
 
 <!-- HA Disabled Banner -->
 <div class="callout callout-danger" id="ha-disabled-banner" style="<? if ha_enabled then ?>display:none<? end ?>">
+<? if ha_standalone then ?>
+    <h4><i class="fa fa-unlink"></i> Not in a cluster</h4>
+    <p>This node (<?=ha_nodes[1] or ""?>) is on its own, so there is nothing to fail over to and
+    HA is off. Other Pi-holes on your network are unaffected.
+    To put it back in a cluster, open the HA page on a node that is already in one and add
+    <?=ha_nodes[1] or "this node"?> under <strong>Cluster Members</strong>.</p>
+<? else ?>
     <h4><i class="fa fa-power-off"></i> HA Failover Disabled</h4>
     <p>All DHCP failover, health checks, and VIP management are paused across all nodes.
     <button class="btn btn-sm btn-success ha-re-enable-btn" style="margin-left:10px"><i class="fa fa-play"></i> Re-enable HA</button></p>
+<? end ?>
 </div>
 
 <!-- Info bar -->
@@ -272,9 +288,15 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
             </div>
             <div class="box-body">
                 <p class="text-muted" style="margin:0 0 12px;font-size:12px;line-height:1.5">
+<? if ha_standalone then ?>
+                    Controls the HA system on this node. It is not in a cluster, so there is no peer to monitor
+                    or fail over to and this switch affects nothing else on your network. Add it to a cluster
+                    under <strong>Cluster Members</strong> below to make failover meaningful.
+<? else ?>
                     Controls the entire HA system. When enabled, nodes continuously monitor each other and automatically
                     fail over DHCP if the active server goes down. When disabled, all failover logic, health checks,
                     and VIP management stop across every node &mdash; DHCP stays wherever it currently is.
+<? end ?>
                 </p>
                 <table class="table">
                     <tbody>
@@ -286,7 +308,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                             </td>
                             <td>
                                 <strong>HA Enabled</strong><br>
-                                <small class="text-muted">Master kill-switch &mdash; applies to all nodes immediately</small>
+                                <small class="text-muted">Master kill-switch &mdash; applies to <?=scope_word?> immediately</small>
                             </td>
                         </tr>
                     </tbody>
@@ -353,21 +375,42 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
     <div class="col-md-12">
         <div class="box box-success" id="priority-panel">
             <div class="box-header with-border">
-                <h3 class="box-title">Priority Order</h3>
+                <h3 class="box-title">Cluster Members</h3>
                 <div class="box-tools pull-right">
                     <span class="label label-default" id="priority-status">Loading</span>
                 </div>
             </div>
             <div class="box-body">
                 <p class="text-muted" style="margin:0 0 12px;font-size:12px;line-height:1.5">
-                    Sets the failover order. When the active DHCP master goes down, the next node in this list
-                    takes over. Drag nodes up or down to change the sequence. Changes propagate to all nodes
-                    immediately so every node agrees on who takes over next.
+                    Every node in the cluster, in failover order. When the active DHCP master goes down, the
+                    next node in this list takes over. Reorder, add, or remove nodes here &mdash; every change
+                    propagates to all nodes immediately so they all agree on who takes over next.
                 </p>
+                <div id="standalone-note" class="callout callout-warning" style="display:none;padding:8px 12px;margin-bottom:12px">
+                    <strong>This node is standalone.</strong>
+                    <span id="standalone-detail">It is not part of a cluster, so HA failover is off.</span>
+                </div>
                 <strong>Failover Priority</strong>
                 <small class="text-muted" style="margin-left:6px">Reorder nodes to change failover sequence &mdash; propagates to all nodes</small>
                 <div style="margin-top:10px" id="priority-rows">Loading...</div>
                 <span id="priority-result" style="margin-left:10px"></span>
+                <div style="margin-top:16px;border-top:1px solid #eee;padding-top:12px">
+                    <strong>Add a node</strong>
+                    <small class="text-muted" style="margin-left:6px">Joins at the lowest priority</small>
+                    <div style="margin-top:8px">
+                        <input type="text" id="join-ip" class="form-control" autocomplete="off"
+                               placeholder="10.0.0.5 or 10.0.0.5:8080"
+                               style="display:inline-block;width:220px;vertical-align:middle">
+                        <button class="btn btn-success" id="join-btn" style="vertical-align:middle">
+                            <i class="fa fa-plus"></i> Add Node
+                        </button>
+                        <span id="join-result" style="margin-left:10px"></span>
+                    </div>
+                    <p class="text-muted" style="margin:8px 0 0;font-size:12px;line-height:1.5">
+                        The node must already have Pi-hole HA installed and be reachable on port 8887.
+                        Add a <code>:port</code> suffix only if its Pi-hole web interface is not on port 80.
+                    </p>
+                </div>
             </div>
         </div>
     </div>

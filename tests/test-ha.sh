@@ -144,6 +144,190 @@ assert_false "auth required: invalid SID fails" _check_auth "sid=wrong-sid"
 
 # ============================================================
 echo
+echo "=== Peer-state lookups for non-members (crashloop regression) ==="
+
+# A DHCP_MASTER pinned to a node that has left the cluster is never health
+# checked, so peer_* has no entry for it. Under `set -u` a bare lookup aborted
+# pihole-ha at startup and systemd restarted it forever.
+HA_SRC="$SCRIPT_DIR/../pihole-ha"
+eval "$(extract_fn "$HA_SRC" is_serving)"
+eval "$(extract_fn "$HA_SRC" get_fail_reason)"
+eval "$(extract_fn "$HA_SRC" is_cluster_member)"
+
+declare -A peer_ping peer_dns peer_api peer_dhcp
+peer_ping["10.33.47.3"]="true";  peer_dns["10.33.47.3"]="true"
+peer_api["10.33.47.3"]="true";   peer_dhcp["10.33.47.3"]="true"
+peer_ping["10.33.47.5"]="false"; peer_dns["10.33.47.5"]="false"
+peer_api["10.33.47.5"]="false";  peer_dhcp["10.33.47.5"]="null"
+
+assert_true  "is_serving survives unknown IP under set -u"      no_unbound_error is_serving "10.33.47.99"
+assert_true  "get_fail_reason survives unknown IP under set -u" no_unbound_error get_fail_reason "10.33.47.99"
+assert_false "is_serving false for unknown IP"                 is_serving "10.33.47.99"
+assert_true  "is_serving true for healthy member"              is_serving "10.33.47.3"
+assert_false "is_serving false for unhealthy member"           is_serving "10.33.47.5"
+assert_eq    "unknown IP reported as non-member" \
+             "not a cluster member" "$(get_fail_reason 10.33.47.99)"
+assert_contains "unhealthy member reports real failures" "$(get_fail_reason 10.33.47.5)" "ping failed"
+
+# ============================================================
+echo
+echo "=== Cluster membership checks ==="
+
+NODES=("10.33.47.55" "10.33.47.3")
+assert_true  "member .55 recognised"      is_cluster_member "10.33.47.55"
+assert_true  "member .3 recognised"       is_cluster_member "10.33.47.3"
+assert_false "departed .5 not a member"   is_cluster_member "10.33.47.5"
+assert_false "empty string not a member"  is_cluster_member ""
+
+# ============================================================
+echo
+echo "=== Stale DHCP_MASTER falls back to priority order ==="
+
+# A pin naming a departed node reads as "master is down" to is_serving, which
+# made every remaining node take over DHCP at once.
+eval "$(extract_fn "$HA_SRC" should_i_serve)"
+NODES=("10.33.47.55" "10.33.47.3")
+LOCAL_IP="10.33.47.3"; MY_IDX=1
+peer_ping["10.33.47.55"]="true"; peer_dns["10.33.47.55"]="true"
+peer_api["10.33.47.55"]="true";  peer_dhcp["10.33.47.55"]="true"
+
+DHCP_MASTER="10.33.47.5"   # departed node
+assert_true  "stale pin does not abort under set -u" no_unbound_error should_i_serve
+DHCP_MASTER="10.33.47.5"
+assert_false "stale pin: standby yields to healthy P1 instead of taking over" should_i_serve
+
+DHCP_MASTER="10.33.47.5"; LOCAL_IP="10.33.47.55"; MY_IDX=0
+assert_true  "stale pin: P1 serves by priority order" should_i_serve
+
+# The pin must be normalised, not just worked around: leaving it set makes
+# build_reason report "Manual master 10.33.47.5 down" about a node that was
+# deliberately removed, which is what sent .5 into taking over DHCP.
+DHCP_MASTER="10.33.47.5"; LOCAL_IP="10.33.47.3"; MY_IDX=1
+should_i_serve >/dev/null 2>&1
+assert_eq "stale pin normalised to auto" "auto" "$DHCP_MASTER"
+
+DHCP_MASTER="10.33.47.55"; LOCAL_IP="10.33.47.3"; MY_IDX=1
+should_i_serve >/dev/null 2>&1
+assert_eq "valid pin left untouched" "10.33.47.55" "$DHCP_MASTER"
+
+DHCP_MASTER="auto"; LOCAL_IP="10.33.47.3"; MY_IDX=1
+assert_false "auto: standby yields while P1 healthy" should_i_serve
+peer_dhcp["10.33.47.55"]="false"
+assert_true  "auto: standby takes over when P1 stops serving" should_i_serve
+
+# ============================================================
+echo
+echo "=== Node list validation (config injection guard) ==="
+
+DASH_SRC="$SCRIPT_DIR/../pihole-ha-dash"
+eval "$(extract_fn "$DASH_SRC" _valid_node_list)"
+
+assert_true  "valid: single IP"          _valid_node_list "10.33.47.5"
+assert_true  "valid: two IPs"            _valid_node_list "10.33.47.55,10.33.47.3"
+assert_true  "valid: IP with port"       _valid_node_list "10.33.47.55:8080,10.33.47.3"
+assert_false "invalid: empty list"       _valid_node_list ""
+assert_false "invalid: bad octet"        _valid_node_list "10.33.47.300"
+assert_false "invalid: port 0"           _valid_node_list "10.33.47.5:0"
+assert_false "invalid: port too large"   _valid_node_list "10.33.47.5:70000"
+assert_false "invalid: non-numeric port" _valid_node_list "10.33.47.5:http"
+assert_false "injection: command sub"    _valid_node_list '10.33.47.5,$(id)'
+assert_false "injection: semicolon"      _valid_node_list "10.33.47.5:80;id"
+assert_false "injection: backtick"       _valid_node_list '10.33.47.5,`id`'
+assert_false "injection: newline+assign" _valid_node_list "10.33.47.5
+HA_ENABLED=false"
+
+# ============================================================
+echo
+echo "=== Join broadcast targets ==="
+
+# The joining node must be told the new membership too — a node whose HA_NODES
+# does not contain itself exits 1 on startup and crashloops.
+eval "$(extract_fn "$DASH_SRC" _broadcast_nodes)"
+platform_get_local_ip() { echo "10.33.47.55"; }
+# _broadcast_nodes backgrounds each _propagate, so the stub has to record to a
+# file — a variable written in the subshell never reaches the parent.
+_bcast_log="$(mktemp)"
+_propagate() { echo "$1" >> "$_bcast_log"; }
+
+_broadcast_nodes "10.33.47.55,10.33.47.3,10.33.47.5"
+wait 2>/dev/null
+_bcast_targets="$(cat "$_bcast_log")"
+assert_contains     "broadcast reaches existing peer .3" "$_bcast_targets" "10.33.47.3"
+assert_contains     "broadcast reaches joining node .5"  "$_bcast_targets" "10.33.47.5"
+assert_not_contains "broadcast skips self (.55)"         "$_bcast_targets" "10.33.47.55"
+
+: > "$_bcast_log"
+_broadcast_nodes "10.33.47.55:8080,10.33.47.3"
+wait 2>/dev/null
+_bcast_targets="$(cat "$_bcast_log")"
+assert_contains     "broadcast strips port from target"          "$_bcast_targets" "10.33.47.3"
+assert_not_contains "broadcast skips self even with port suffix" "$_bcast_targets" "8080"
+rm -f "$_bcast_log"
+
+# ============================================================
+echo
+echo "=== Departing node stays a member of its own config ==="
+
+# The original bug: leave rewrote the departing node's HA_NODES to a list that
+# excluded itself, so MY_IDX stayed -1 and the daemon exited 1 forever.
+_leave_ip="10.33.47.5"; _local="10.33.47.5"
+_all=("10.33.47.55" "10.33.47.3" "10.33.47.5")
+_remaining=""
+for _n in "${_all[@]}"; do
+    [[ "$_n" == "$_leave_ip" ]] && continue
+    [[ -n "$_remaining" ]] && _remaining+=","
+    _remaining+="$_n"
+done
+# Self-leave must produce a standalone list, not the remaining-members list.
+_result="$([[ "$_leave_ip" == "$_local" ]] && echo "$_local" || echo "$_remaining")"
+assert_eq "self-leave yields standalone list" "10.33.47.5" "$_result"
+
+MY_IDX=-1
+IFS=',' read -ra _rn <<< "$_result"
+for (( i=0; i<${#_rn[@]}; i++ )); do
+    [[ "$_local" == "${_rn[$i]}" ]] && { MY_IDX=$i; break; }
+done
+assert_eq "departing node still finds itself (no 'Unknown IP' exit)" "0" "$MY_IDX"
+
+# Removing someone else must keep the local node in the list.
+_leave_ip="10.33.47.5"; _local="10.33.47.55"
+_result="$([[ "$_leave_ip" == "$_local" ]] && echo "$_local" || echo "$_remaining")"
+assert_eq "remote-leave yields remaining members" "10.33.47.55,10.33.47.3" "$_result"
+assert_contains "remote-leave keeps local node listed" "$_result" "$_local"
+
+# ============================================================
+echo
+echo "=== Safety guards present in daemon and dashboard ==="
+
+# These guard inline loop/handler logic that cannot be extracted as functions,
+# so assert the guard still exists rather than silently losing it in a refactor.
+# The guard must sit in the main loop *ahead* of the serve/yield decision —
+# a bare grep for "NODE_COUNT == 1" also matches the STANDALONE role line and
+# would keep passing if the loop guard were deleted.
+_guard_ln="$(grep -n 'Standalone - no peers to fail over to' "$HA_SRC" | head -1 | cut -d: -f1)"
+_serve_ln="$(grep -n 'if should_i_serve; then' "$HA_SRC" | head -1 | cut -d: -f1)"
+assert_true "daemon: lone-node loop guard exists" test -n "$_guard_ln"
+assert_eq   "daemon: lone-node guard precedes the failover decision" "yes" \
+    "$([[ -n "$_guard_ln" && -n "$_serve_ln" ]] && (( _guard_ln < _serve_ln )) && echo yes || echo no)"
+assert_eq   "daemon: lone-node guard short-circuits the loop" "yes" \
+    "$(sed -n "${_guard_ln},$((_guard_ln + 1))p" "$HA_SRC" | grep -q 'continue' && echo yes || echo no)"
+assert_true "daemon: sync publisher election skipped when alone" \
+    grep -q 'NODE_COUNT > 1 )) || return 0' "$HA_SRC"
+assert_true "daemon: lone node reported as STANDALONE not PRIMARY" \
+    grep -q 'ROLES=("STANDALONE")' "$HA_SRC"
+assert_true "dash: self-leave disables HA on departing node" \
+    grep -q '_conf_set "HA_ENABLED" "false"' "$DASH_SRC"
+assert_true "dash: self-leave stands DHCP down" \
+    grep -q 'pihole-FTL --config dhcp.active false' "$DASH_SRC"
+assert_true "dash: leave resets a stale DHCP_MASTER pin" \
+    grep -q 'DHCP_MASTER=auto' "$DASH_SRC"
+assert_true "dash: propagated join validates the pushed list" \
+    grep -q '_valid_node_list "$_join_list"' "$DASH_SRC"
+assert_true "dash: leave notifies the departing node" \
+    grep -q 'nodes/leave?node=$_leave_ip&propagated=1' "$DASH_SRC"
+
+# ============================================================
+echo
 echo "=== Syntax check all scripts ==="
 
 all_ok=true
