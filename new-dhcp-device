@@ -9,8 +9,18 @@ mac="${2:-mac}"
 ip="${3:-ip}"
 hostname="${4}"
 
-# --- Exit if not an "add" operation ---
-[[ "$op" != "add" ]] && exit 0
+# Trace every invocation and every reason we bail out. Without this there is no
+# way to tell "dnsmasq never called the hook" from "it was called and chose not
+# to notify" — both look identical, which makes a missing notification
+# undiagnosable. dnsmasq discards our stdout/stderr, so this has to go to
+# syslog. Follow it with: journalctl -t new-dhcp-device -f
+_trace() { logger -t new-dhcp-device -- "$*" 2>/dev/null || true; }
+_trace "invoked op=$op mac=$mac ip=$ip host=${hostname:-<none>}"
+_bail() { _trace "skip reason=$1 mac=$mac"; exit 0; }
+
+# dnsmasq calls this on every lease event. Only "add" is a device we have not
+# seen before; "old" is a renewal and "del" is an expiry.
+[[ "$op" != "add" ]] && _bail "not_a_new_lease(op=$op)"
 
 # --- Load notify.conf ---
 NOTIFY_CONF="/etc/pihole-ha/notify.conf"
@@ -35,13 +45,14 @@ if [[ -f "$NOTIFY_CONF" ]]; then
         esac
     done < "$NOTIFY_CONF"
 fi
-[[ "$PO_ENABLED" == "true" && -n "$PO_USER" && -n "$PO_TOKEN" ]] || exit 0
-[[ "$DHCP_NOTIFY_ENABLED" == "true" ]] || exit 0
+[[ "$PO_ENABLED" == "true" ]] || _bail "pushover_disabled"
+[[ -n "$PO_USER" && -n "$PO_TOKEN" ]] || _bail "pushover_credentials_missing"
+[[ "$DHCP_NOTIFY_ENABLED" == "true" ]] || _bail "dhcp_notify_disabled"
 
 # --- Ignore MACs from config (case-insensitive) ---
 IFS=',' read -ra _ignored <<< "$DHCP_NOTIFY_IGNORED_MACS"
 for _m in "${_ignored[@]}"; do
-    [[ "${mac,,}" == "${_m,,}" ]] && exit 0
+    [[ "${mac,,}" == "${_m,,}" ]] && _bail "ignored_mac"
 done
 
 # --- Ignore hostnames from config (case-insensitive, exact match) ---
@@ -49,7 +60,7 @@ if [[ -n "$hostname" ]]; then
     IFS=',' read -ra _ignored_hosts <<< "$DHCP_NOTIFY_IGNORED_HOSTS"
     for _h in "${_ignored_hosts[@]}"; do
         [[ -z "$_h" ]] && continue
-        [[ "${hostname,,}" == "${_h,,}" ]] && exit 0
+        [[ "${hostname,,}" == "${_h,,}" ]] && _bail "ignored_hostname"
     done
 fi
 
