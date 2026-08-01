@@ -2,7 +2,13 @@
 Description=Pi-hole Config Sync Timer (every 15 min)
 
 [Timer]
-OnBootSec=2min
+# OnActiveSec, not OnBootSec: OnBootSec is measured from system boot, so once
+# that instant has passed systemd drops it and the timer is left with only
+# OnUnitActiveSec -- which anchors on the last service run and therefore never
+# fires if the service has never run. A timer installed or re-enabled after
+# boot then sits at NextElapse=infinity forever, silently. OnActiveSec is
+# measured from timer activation, so it always fires.
+OnActiveSec=2min
 OnUnitActiveSec=15min
 RandomizedDelaySec=30
 
