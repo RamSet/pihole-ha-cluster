@@ -1022,21 +1022,21 @@ systemctl enable --now pihole-ha.service >/dev/null 2>&1
 systemctl enable --now pihole-ha-dash.service >/dev/null 2>&1
 printf "%b  %b Services started\\n" "${OVER}" "${TICK}"
 
-if [[ "$is_primary" == "true" ]]; then
-    printf "  %b Enabling sync build timer..." "${INFO}"
-    systemctl enable pihole-ha-sync.timer >/dev/null 2>&1
-    systemctl restart pihole-ha-sync.timer >/dev/null 2>&1
-    systemctl disable pihole-ha-sync-pull.timer 2>/dev/null || true
-    systemctl stop pihole-ha-sync-pull.timer 2>/dev/null || true
-    printf "%b  %b Sync build timer enabled (every 15 min)\\n" "${OVER}" "${TICK}"
-else
-    printf "  %b Enabling sync pull timer..." "${INFO}"
-    systemctl enable pihole-ha-sync-pull.timer >/dev/null 2>&1
-    systemctl restart pihole-ha-sync-pull.timer >/dev/null 2>&1
-    systemctl disable pihole-ha-sync.timer 2>/dev/null || true
-    systemctl stop pihole-ha-sync.timer 2>/dev/null || true
-    printf "%b  %b Sync pull timer enabled (every 15 min)\\n" "${OVER}" "${TICK}"
-fi
+# Both timers run on every node. pihole-ha-sync and pihole-ha-sync-pull each
+# resolve their own role at runtime (the sync primary is NODES[0]) and skip when
+# the role is not theirs, so enabling both is idempotent.
+#
+# Enabling by role at install time did not survive a membership change. Removing
+# a node can move NODES[0] to a different host, and nothing outside install.sh
+# ever re-points these timers -- so the old primary kept the build timer while
+# the new primary kept the pull timer. Both then skip on every tick and sync
+# stops in BOTH directions, with nothing logged above INFO to say so.
+printf "  %b Enabling sync timers..." "${INFO}"
+systemctl enable pihole-ha-sync.timer >/dev/null 2>&1
+systemctl restart pihole-ha-sync.timer >/dev/null 2>&1
+systemctl enable pihole-ha-sync-pull.timer >/dev/null 2>&1
+systemctl restart pihole-ha-sync-pull.timer >/dev/null 2>&1
+printf "%b  %b Sync timers enabled (role resolved at runtime)\\n" "${OVER}" "${TICK}"
 
 # --- 22. Register this node with existing cluster nodes ---
 if [[ ${#discovered_nodes[@]} -gt 0 ]]; then
