@@ -107,13 +107,18 @@ $(function () {
                 statusData = data;
                 $("#ha-error").hide();
             } else {
+                // The dashboard answered, so the connection is fine -- saying
+                // otherwise sends you looking at a service that is running.
+                // The usual cause is the pihole-ha daemon being stopped: it
+                // writes the status file this page reads, and on a node
+                // deliberately outside the cluster that is the normal state.
                 statusData = null;
-                $("#ha-error").show();
+                showHaError(data && data.error);
             }
         })
         .fail(function () {
             statusData = null;
-            $("#ha-error").show();
+            showHaError(null);
         })
         .always(function () {
             renderOverview();
@@ -158,6 +163,30 @@ $(function () {
         if (!ts) return "—";
         var d = new Date(ts);
         return isNaN(d.getTime()) ? ts : d.toLocaleString();
+    }
+
+    // reason === null means the request itself failed; anything else is an
+    // error string the dashboard returned, which means it is reachable.
+    function showHaError(reason) {
+        var title, text;
+        if (reason === null || reason === undefined) {
+            title = "Connection Error";
+            text = "Cannot reach the local HA service on port 8887. Is " +
+                   "<code>pihole-ha-dash</code> running?";
+        } else if (String(reason).indexOf("no status file") !== -1) {
+            title = "HA daemon not running";
+            text = "<code>pihole-ha-dash</code> is reachable, but the " +
+                   "<code>pihole-ha</code> daemon is not running on this node &mdash; " +
+                   "it writes the status this page reads. On a node deliberately kept " +
+                   "outside the cluster, that is expected and this page has nothing to show.";
+        } else {
+            title = "HA service error";
+            text = "The HA service reported: <code>" +
+                   $("<div>").text(String(reason)).html() + "</code>";
+        }
+        $("#ha-error-title").text(title);
+        $("#ha-error-text").html(text);
+        $("#ha-error").show();
     }
 
     function renderOverview() {

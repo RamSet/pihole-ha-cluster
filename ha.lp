@@ -219,8 +219,8 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
 
 <!-- Error callout (hidden by default) -->
 <div class="callout callout-danger" id="ha-error" style="display:none">
-    <h4><i class="fa fa-exclamation-triangle"></i> Connection Error</h4>
-    <p>Cannot reach the local HA service on port 8887. Is <code>pihole-ha-dash</code> running?</p>
+    <h4><i class="fa fa-exclamation-triangle"></i> <span id="ha-error-title">Connection Error</span></h4>
+    <p id="ha-error-text">Cannot reach the local HA service on port 8887. Is <code>pihole-ha-dash</code> running?</p>
 </div>
 
 <!-- HA Disabled Banner -->
