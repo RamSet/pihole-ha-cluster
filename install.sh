@@ -96,6 +96,7 @@ if [[ "${1:-}" == "--uninstall" || "${1:-}" == "-u" ]]; then
 
     # Remove binaries and systemd units
     rm -f /usr/local/bin/pihole-ha /usr/local/bin/pihole-ha-dash /usr/local/bin/pihole-ha-sync \
+           /usr/local/bin/pihole-ha-monitor \
           /usr/local/bin/pihole-ha-sync-pull /usr/local/bin/pihole-ha-inject /usr/local/bin/pihole-ha-debug \
           /usr/local/bin/new_dhcp_device /usr/local/bin/pihole-ha-oui-update
     rm -f /etc/systemd/system/pihole-ha*.service /etc/systemd/system/pihole-ha*.timer /etc/systemd/system/pihole-ha*.path
@@ -110,7 +111,12 @@ import sys, re
 p = sys.argv[1]
 s = open(p).read()
 s = re.sub(r'\s*<!-- HA Cluster -->.*?</li>\n', '\n', s, flags=re.S)
-s = s.replace("'network', 'ha'})", "'network'})")
+# Drop just our entry from the treeview list. A literal replace of
+# "'network', 'ha'})" only works while nothing else has patched the same
+# array -- another project adding its own page leaves 'ha' stranded, and
+# the menu then expands for a scriptname that no longer exists.
+s = re.sub(r",\s*'ha'(?=\s*[,}])", "", s)   # 'ha' after another entry
+s = re.sub(r"'ha'\s*,\s*", "", s)             # 'ha' first in the list
 open(p, 'w').write(s)
 PYEOF
     fi
