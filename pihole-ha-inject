@@ -62,4 +62,11 @@ awk -v f="$_ha_entry" '
 ' "$SIDEBAR" > "$SIDEBAR.tmp" && mv "$SIDEBAR.tmp" "$SIDEBAR"
 rm -f "$_ha_entry"
 
+# The redirect creates the temp file under the inherited umask and mv carries
+# that onto sidebar.lp. Under a restrictive umask the sidebar lands mode 600,
+# the web server cannot read it, and Pi-hole reports "Cannot include
+# sidebar.lp: not found" -- taking the whole admin UI down while the file is
+# sitting right there. Do not trust the caller's umask.
+chmod 644 "$SIDEBAR"
+
 log "Sidebar patched — HA Cluster menu added under Tools"
