@@ -1000,8 +1000,13 @@ MUTED_TAGS=
 CONF
     printf "  %b Notify config created (Pushover disabled by default)\\n" "${TICK}"
 fi
-# notify.conf may hold the Pushover token — keep it root-only.
-chmod 600 /etc/pihole-ha/notify.conf 2>/dev/null || true
+# notify.conf may hold the Pushover token, so it is not world-readable -- but it
+# cannot be root-only either. dnsmasq runs the dhcp-script as pihole-FTL's user
+# (`pihole`), so a 600 file silently disables new-device notifications: the hook
+# reads nothing, falls back to PO_ENABLED=false and reports "pushover disabled",
+# which looks like a config choice rather than a permission error.
+chown root:pihole /etc/pihole-ha/notify.conf 2>/dev/null || true
+chmod 640 /etc/pihole-ha/notify.conf 2>/dev/null || true
 
 # --- 20b. Pull notify.conf from existing peers (ignored MACs, etc.) ---
 if [[ ${#discovered_nodes[@]} -gt 0 ]]; then

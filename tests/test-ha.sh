@@ -394,6 +394,31 @@ assert_true "dash: standalone forwards its own join to the cluster" \
 echo
 echo "=== Syntax check all scripts ==="
 
+# ============================================================
+# notify.conf must be readable by pihole-FTL's user
+# ------------------------------------------------------------
+# dnsmasq runs the dhcp-script as `pihole`, not root. A root-only notify.conf
+# makes new-device notifications vanish silently -- the hook reads nothing and
+# reports "pushover disabled", which reads like a setting rather than a bug.
+# This cost a live outage of DHCP notifications on the primary; assert the
+# installer never tightens it back to root-only.
+_inst="$SCRIPT_DIR/../install.sh"
+assert_contains "installer gives notify.conf to the pihole group" \
+    "$(grep -A1 'chown root:pihole /etc/pihole-ha/notify.conf' "$_inst" 2>/dev/null)" \
+    "chmod 640"
+if grep -qE '^\s*chmod 600 /etc/pihole-ha/notify\.conf' "$_inst" 2>/dev/null; then
+    printf "  FAIL  installer must not make notify.conf root-only\n"
+    (( _FAIL++ )); (( _TOTAL++ ))
+else
+    printf "  PASS  installer must not make notify.conf root-only\n"
+    (( _PASS++ )); (( _TOTAL++ ))
+fi
+assert_contains "dhcp hook reports an unreadable notify.conf distinctly" \
+    "$(cat "$SCRIPT_DIR/../new-dhcp-device" 2>/dev/null)" \
+    "notify_conf_unreadable"
+
+# ============================================================
+
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do
     fpath="$SCRIPT_DIR/../$script"

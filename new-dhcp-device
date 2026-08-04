@@ -32,6 +32,10 @@ DHCP_NOTIFY_ENABLED="true"
 DHCP_NOTIFY_IGNORED_MACS=""
 DHCP_NOTIFY_IGNORED_HOSTS=""
 if [[ -f "$NOTIFY_CONF" ]]; then
+    # Readable, not merely present. This runs as pihole-FTL's user, not root, so
+    # a root-only notify.conf reads as zero settings -- indistinguishable from
+    # "the admin turned notifications off" unless we say so here.
+    [[ -r "$NOTIFY_CONF" ]] || _bail "notify_conf_unreadable(user=$(id -un 2>/dev/null),perms=$(stat -c '%a %U:%G' "$NOTIFY_CONF" 2>/dev/null))"
     while IFS='=' read -r key val; do
         [[ -z "$key" || "$key" == \#* ]] && continue
         case "$key" in
