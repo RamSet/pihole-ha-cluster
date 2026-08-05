@@ -112,13 +112,37 @@ notify() {
 }
 
 platform_get_local_ip() {
+    local _all _ip _nodes _vip
     # hostname -I works on Debian/Ubuntu but not Alpine BusyBox
     if hostname -I &>/dev/null; then
-        hostname -I | awk '{print $1}'
+        _all="$(hostname -I 2>/dev/null)"
     else
         # Fallback: use ip route to find the source IP for default route
-        ip -o route get 1.0.0.0 2>/dev/null | sed -n 's/.*src \([^ ]*\).*/\1/p'
+        _all="$(ip -o route get 1.0.0.0 2>/dev/null | sed -n 's/.*src \([^ ]*\).*/\1/p')"
     fi
+
+    # A node holding the VIP has two addresses on the interface, and `hostname -I`
+    # guarantees no ordering -- so taking the first can hand back the VIP. That
+    # matches no entry in HA_NODES, and every caller then dies with "Unknown IP",
+    # taking the daemon, the sync build and the sync pull down together on the
+    # one node that was healthy enough to hold the VIP. Prefer whichever local
+    # address is actually a cluster member.
+    _nodes="$(sed -n 's/^HA_NODES=//p' /etc/pihole-ha/nodes.conf 2>/dev/null | tr ',' ' ')"
+    if [[ -n "$_nodes" ]]; then
+        for _ip in $_all; do
+            for _n in $_nodes; do
+                [[ "$_ip" == "${_n%%:*}" ]] && { printf '%s' "$_ip"; return 0; }
+            done
+        done
+    fi
+    # Not a configured member (fresh install, or the list was edited): still
+    # avoid the VIP, which is never a node identity.
+    _vip="$(sed -n 's/^VIP=//p' /etc/pihole-ha/nodes.conf 2>/dev/null | head -1)"
+    for _ip in $_all; do
+        [[ -n "$_vip" && "$_ip" == "$_vip" ]] && continue
+        printf '%s' "$_ip"; return 0
+    done
+    printf '%s' "${_all%% *}"
 }
 
 platform_ftl_is_active() {

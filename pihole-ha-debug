@@ -104,15 +104,85 @@ for n in $NODES; do
     printf '%-18s /api/status -> %s\n' "$ip" "${code:-no-response}"
 done
 
+_hr "CONFIG SYNC STATE"
+# Sync problems are the one class where the failing node is usually NOT the one
+# the bundle was collected on: the primary builds fine and the standby quietly
+# declines to pull. Collect enough here to tell those apart from one bundle.
+_sync_primary="$(sed -n 's/^SYNC_PRIMARY=//p' "$CONF_DIR/sync.conf" 2>/dev/null | head -1)"
+_nodes_list="$(sed -n 's/^HA_NODES=//p' "$CONF_DIR/nodes.conf" 2>/dev/null | tr ',' ' ')"
+# Same default the sync scripts apply when sync.conf omits it.
+if [[ -z "$_sync_primary" ]]; then
+    _first="$(set -- $_nodes_list; echo "${1:-}")"
+    _sync_primary="${_first:+${_first%%:*} (defaulted to first node)}"
+    _sync_primary="${_sync_primary:-(unset, and no HA_NODES to default from)}"
+fi
+_me="$(hostname -I 2>/dev/null | awk '{print $1}')"
+
+printf 'this node:        %s\n' "${_me:-unknown}"
+printf 'SYNC_PRIMARY:     %s\n' "${_sync_primary:-（unset)}"
+printf 'publisher here?:  %s\n' "$([[ "$_me" == "${_sync_primary%% *}" ]] && echo "yes - this node builds, it never pulls" || echo "no - this node should be pulling")"
+printf 'sync role file:   %s\n' "$(cat "$RUN_DIR/sync-role" 2>/dev/null || echo '(none)')"
+printf 'config version:   %s\n' "$(cat "$CONF_DIR/sync-version" 2>/dev/null || echo '(none)')"
+printf 'generation:       %s\n' "$(cat "$CONF_DIR/sync-generation" 2>/dev/null || echo '(none)')"
+printf 'last pulled hash: %s\n' "$(cat "$RUN_DIR/last-pull-hash" 2>/dev/null || echo '(never pulled)')"
+if [[ -f "$RUN_DIR/sync-payload.tar.gz" ]]; then
+    printf 'local payload:    %s bytes, built %s\n' \
+        "$(stat -c%s "$RUN_DIR/sync-payload.tar.gz" 2>/dev/null)" \
+        "$(date -r "$RUN_DIR/sync-payload.tar.gz" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null)"
+else
+    printf 'local payload:    (none built on this node)\n'
+fi
+if _have systemctl; then
+    for t in pihole-ha-sync.timer pihole-ha-sync-pull.timer; do
+        # is-active/is-enabled print a verdict AND exit non-zero for anything
+        # not running, so "|| echo n/a" appends a second line to the answer
+        # rather than replacing a missing one. Take the output, fall back only
+        # when it is genuinely empty.
+        _a="$(systemctl is-active "$t" 2>/dev/null)"
+        _e="$(systemctl is-enabled "$t" 2>/dev/null)"
+        printf '%-26s %s / %s\n' "$t" "${_a:-n/a}" "${_e:-n/a}"
+    done
+fi
+
+# The comparison that actually locates a sync fault: what every node believes it
+# is holding. Equal versions and hashes across the cluster means sync is working
+# whatever else looks odd; a standby stuck at an older version (or with no
+# manifest at all) names the broken node directly.
+printf '\ncluster manifest (each node'"'"'s own view, via :8887):\n'
+printf '%-18s %-8s %-6s %-34s %s\n' "NODE" "VERSION" "GEN" "HASH" "BUILT"
+for n in $_nodes_list; do
+    ip="${n%%:*}"
+    _man="$(curl -sf --max-time 4 "http://$ip:8887/api/sync/manifest" 2>/dev/null)"
+    if [[ -z "$_man" ]]; then
+        # A standby that has never published has no manifest, which is normal --
+        # saying "broken" here would send people chasing the healthy node. Only
+        # an unanswered API is worth flagging.
+        if curl -sf --max-time 4 -o /dev/null "http://$ip:8887/api/status" 2>/dev/null; then
+            printf '%-18s %s\n' "$ip" "(no manifest - normal for a standby that has never published)"
+        else
+            printf '%-18s %s\n' "$ip" "(UNREACHABLE on :8887)"
+        fi
+        continue
+    fi
+    _v="$(printf '%s' "$_man" | sed -n 's/.*"config_version"[: ]*"\?\([^",}]*\)"\?.*/\1/p' | head -1)"
+    _h="$(printf '%s' "$_man" | sed -n 's/.*"gravity_md5"[: ]*"\([^"]*\)".*/\1/p' | head -1)"
+    _t="$(printf '%s' "$_man" | sed -n 's/.*"timestamp"[: ]*"\([^"]*\)".*/\1/p' | head -1)"
+    _g="$(curl -sf --max-time 4 "http://$ip:8887/api/sync/generation" 2>/dev/null | sed -n 's/.*"generation"[: ]*\([0-9]*\).*/\1/p')"
+    printf '%-18s %-8s %-6s %-34s %s\n' "$ip" "${_v:--}" "${_g:--}" "${_h:--}" "${_t:--}"
+done
+printf '\nIf the versions/hashes above differ, the node that is behind is the one to\n'
+printf 'look at — run "sudo pihole-ha-sync-pull" there to see the skip reason.\n'
+
 _hr "RECENT LOGS (last 40 lines each)"
 if _have journalctl; then
-    for s in pihole-ha pihole-ha-dash; do
+    for s in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull; do
         printf '%s\n' "--- journalctl -u $s ---"
         journalctl -u "$s" -n 40 --no-pager 2>/dev/null || echo "(no logs)"
         printf '\n'
     done
     printf '%s\n' "--- errors/warnings across pihole-ha units (last 24h) ---"
-    journalctl -u pihole-ha -u pihole-ha-dash --since "24 hours ago" -p warning --no-pager 2>/dev/null | tail -40 || true
+    journalctl -u pihole-ha -u pihole-ha-dash -u pihole-ha-sync -u pihole-ha-sync-pull \
+        --since "24 hours ago" -p warning --no-pager 2>/dev/null | tail -40 || true
 else
     echo "(no journalctl — on Docker, use: docker compose logs pihole-ha)"
 fi

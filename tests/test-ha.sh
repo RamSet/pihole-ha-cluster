@@ -395,6 +395,47 @@ echo
 echo "=== Syntax check all scripts ==="
 
 # ============================================================
+# platform_get_local_ip must never return the VIP
+# ------------------------------------------------------------
+# `hostname -I` guarantees no ordering, so on a VIP-holding node the VIP can be
+# listed first. Returning it makes every caller fail its HA_NODES lookup and die
+# with "Unknown IP" -- daemon, sync build and sync pull at once, on the node
+# healthy enough to be holding the VIP.
+_ip_probe() {
+    local order="$1"
+    bash -c "
+        hostname() { [[ \"\$1\" == -I ]] && echo '$order'; }
+        sed() {
+            case \"\$*\" in
+                *HA_NODES*) echo '192.168.20.22,192.168.20.23' ;;
+                *VIP=*)     echo '192.168.20.24' ;;
+            esac
+        }
+        source '$SCRIPT_DIR/../pihole-ha-platform' 2>/dev/null
+        platform_get_local_ip
+    "
+}
+assert_eq "local IP is the node, not the VIP (VIP listed first)" \
+    "$(_ip_probe '192.168.20.24 192.168.20.22')" "192.168.20.22"
+assert_eq "local IP is the node, not the VIP (node listed first)" \
+    "$(_ip_probe '192.168.20.22 192.168.20.24')" "192.168.20.22"
+assert_eq "local IP still works with a single address" \
+    "$(_ip_probe '192.168.20.22')" "192.168.20.22"
+
+# ============================================================
+# The debug bundle must carry sync evidence
+# ------------------------------------------------------------
+# Issue #4 arrived undiagnosable: a sync complaint whose bundle contained no
+# sync state and no sync logs, collected on the healthy node. The failing node
+# in a sync fault is almost never the one the bundle came from.
+_dbg="$SCRIPT_DIR/../pihole-ha-debug"
+assert_contains "debug collects the sync build log"  "$(cat "$_dbg")" "pihole-ha-sync "
+assert_contains "debug collects the sync pull log"   "$(cat "$_dbg")" "pihole-ha-sync-pull"
+assert_contains "debug reports the sync state"       "$(cat "$_dbg")" "CONFIG SYNC STATE"
+assert_contains "debug compares every node's manifest" "$(cat "$_dbg")" "api/sync/manifest"
+assert_contains "debug says which node publishes"    "$(cat "$_dbg")" "publisher here?"
+
+# ============================================================
 # notify.conf must be readable by pihole-FTL's user
 # ------------------------------------------------------------
 # dnsmasq runs the dhcp-script as `pihole`, not root. A root-only notify.conf
