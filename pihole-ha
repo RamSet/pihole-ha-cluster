@@ -882,6 +882,17 @@ manage_sync_role() {
             echo "PUBLISHER" > "$SYNC_ROLE_FILE"
             NOTIFY_TAG=sync_role_change notify "<b><font color='#2ecc71'>Sync Publisher</font></b> <br> $ROLE ($LOCAL_IP) is now publishing config <br> Previous: $_current" &
         fi
+        # Level-triggered, not edge-triggered. The block above only fires when the
+        # role CHANGES, so a node that already believes it is the publisher never
+        # re-checks that its build timer is actually running -- and if something
+        # stopped it (a demotion during a failover, a manual stop), it stays
+        # stopped forever. The primary then serves no manifest, every standby
+        # logs "no peer has a manifest" on every tick, and nothing above INFO
+        # says so. Converge the real state to the believed role each cycle.
+        if ! platform_sync_is_running; then
+            log_warn "event=sync_timer_recovered role=publisher reason=\"build timer was not running\""
+            platform_sync_enable
+        fi
     else
         if [[ "$_current" == "$LOCAL_IP" ]]; then
             log_info "event=sync_demote acting_primary=$_ap previous=$LOCAL_IP"
@@ -894,6 +905,14 @@ manage_sync_role() {
             log_info "event=sync_primary_changed from=$_current to=$_ap"
             write_sync_primary "$_ap"
             echo "STANDBY" > "$SYNC_ROLE_FILE"
+        fi
+        # Same convergence for the other direction: a standby with a stopped pull
+        # timer silently stops receiving config. Only ever START what this role
+        # needs -- stopping the other timer is what creates the trap, and the
+        # sync scripts already exit early when the role is not theirs.
+        if ! platform_sync_pull_is_running; then
+            log_warn "event=sync_timer_recovered role=standby reason=\"pull timer was not running\""
+            platform_sync_pull_enable
         fi
     fi
 }

@@ -395,6 +395,54 @@ echo
 echo "=== Syntax check all scripts ==="
 
 # ============================================================
+# Sync role reconciliation must be level-triggered
+# ------------------------------------------------------------
+# Issue #4: the primary believed it was the publisher and its build timer was
+# not running. The promote block only fires on a role CHANGE, so nothing ever
+# re-checked it -- no manifest was served, and every standby logged "no peer has
+# a manifest" forever with nothing above INFO to say why.
+_msr="$(extract_fn "$SCRIPT_DIR/../pihole-ha" manage_sync_role)"
+assert_contains "publisher re-checks its build timer every cycle" \
+    "$_msr" "platform_sync_is_running"
+assert_contains "standby re-checks its pull timer every cycle" \
+    "$_msr" "platform_sync_pull_is_running"
+assert_contains "a stopped timer is reported, not fixed in silence" \
+    "$_msr" "sync_timer_recovered"
+# Behavioural, not textual: run the function in the exact state that used to
+# deadlock -- already the publisher (no transition), build timer stopped -- and
+# assert it starts the timer anyway.
+_run_msr() {
+    local ap="$1" current="$2" running="$3"
+    bash -c '
+        SYNC_CONF=/nonexistent; NODE_COUNT=2; LOCAL_IP=192.168.20.22
+        SYNC_ROLE_FILE=/dev/null
+        acting_primary_ip() { echo "'"$ap"'"; }
+        read_sync_primary()  { echo "'"$current"'"; }
+        write_sync_primary() { :; }
+        catch_up_from_peers() { :; }
+        notify() { :; }
+        log_info() { :; }; log_warn() { :; }
+        platform_sync_is_running()      { [[ "'"$running"'" == yes ]]; }
+        platform_sync_pull_is_running() { true; }
+        platform_sync_enable()       { echo "STARTED_BUILD"; }
+        platform_sync_pull_enable()  { echo "STARTED_PULL"; }
+        platform_sync_disable()      { :; }
+        platform_sync_pull_disable() { :; }
+        '"$_msr"'
+        manage_sync_role
+    ' 2>/dev/null
+}
+assert_eq "publisher with a stopped build timer starts it (no role change)" \
+    "STARTED_BUILD" "$(_run_msr 192.168.20.22 192.168.20.22 no)"
+assert_eq "publisher with a running build timer is left alone" \
+    "" "$(_run_msr 192.168.20.22 192.168.20.22 yes)"
+
+# The debug bundle must not describe the publisher as a standby -- that wording
+# pointed away from the faulting node in issue #4.
+assert_contains "debug flags a publisher with no manifest" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-debug")" "THIS IS THE PUBLISHER"
+
+# ============================================================
 # platform_get_local_ip must never return the VIP
 # ------------------------------------------------------------
 # `hostname -I` guarantees no ordering, so on a VIP-holding node the VIP can be

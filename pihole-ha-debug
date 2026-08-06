@@ -158,7 +158,12 @@ for n in $_nodes_list; do
         # saying "broken" here would send people chasing the healthy node. Only
         # an unanswered API is worth flagging.
         if curl -sf --max-time 4 -o /dev/null "http://$ip:8887/api/status" 2>/dev/null; then
-            printf '%-18s %s\n' "$ip" "(no manifest - normal for a standby that has never published)"
+            if [[ "$ip" == "${_sync_primary%% *}" ]]; then
+                printf '%-18s %s\n' "$ip" "*** NO MANIFEST, BUT THIS IS THE PUBLISHER - nothing to sync from ***"
+                printf '%-18s %s\n' "" "   check on $ip: systemctl is-active pihole-ha-sync.timer"
+            else
+                printf '%-18s %s\n' "$ip" "(no manifest - normal for a standby that has never published)"
+            fi
         else
             printf '%-18s %s\n' "$ip" "(UNREACHABLE on :8887)"
         fi

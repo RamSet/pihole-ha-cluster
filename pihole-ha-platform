@@ -213,6 +213,24 @@ platform_sync_pull_enable() {
     fi
 }
 
+# Is the role's timer actually running? The role bookkeeping below is only
+# believed state; these report the real thing.
+platform_sync_is_running() {
+    if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
+        [[ -f /run/pihole-ha/sync-enabled ]]
+    else
+        systemctl is-active --quiet pihole-ha-sync.timer 2>/dev/null
+    fi
+}
+
+platform_sync_pull_is_running() {
+    if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
+        [[ -f /run/pihole-ha/sync-pull-enabled ]]
+    else
+        systemctl is-active --quiet pihole-ha-sync-pull.timer 2>/dev/null
+    fi
+}
+
 platform_sync_pull_disable() {
     if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
         rm -f /run/pihole-ha/sync-pull-enabled
