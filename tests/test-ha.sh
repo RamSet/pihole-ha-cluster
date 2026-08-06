@@ -395,6 +395,19 @@ echo
 echo "=== Syntax check all scripts ==="
 
 # ============================================================
+# A RuntimeDirectory must not take the sync state with it
+# ------------------------------------------------------------
+# /run/pihole-ha holds the manifest, payload and build hash written by
+# pihole-ha-sync -- a different unit. systemd deletes RuntimeDirectory when the
+# owning unit stops, so without RuntimeDirectoryPreserve every restart of the
+# daemon blinds every standby ("no peer has a manifest") until the next build.
+for _unit in "$SCRIPT_DIR"/../*.service; do
+    grep -q '^RuntimeDirectory=' "$_unit" 2>/dev/null || continue
+    assert_contains "$(basename "$_unit"): RuntimeDirectory is preserved across restart" \
+        "$(cat "$_unit")" "RuntimeDirectoryPreserve=yes"
+done
+
+# ============================================================
 # Sync role reconciliation must be level-triggered
 # ------------------------------------------------------------
 # Issue #4: the primary believed it was the publisher and its build timer was

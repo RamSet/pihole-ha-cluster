@@ -8,6 +8,14 @@ Type=simple
 ExecStart=/usr/local/bin/pihole-ha
 RuntimeDirectory=pihole-ha
 RuntimeDirectoryMode=0755
+# systemd deletes RuntimeDirectory when the unit stops. /run/pihole-ha does not
+# belong to this unit alone: pihole-ha-sync writes the manifest, the payload and
+# the build hash there. Without this, every restart of the daemon destroys them,
+# the primary serves "no sync manifest" until the next 15-minute build tick, and
+# every standby logs "no peer has a manifest" in the meantime -- for a node that
+# restarts often, that is most of the time. Preserve across stop/restart; a
+# reboot still clears it, which is correct because it all rebuilds.
+RuntimeDirectoryPreserve=yes
 Restart=always
 RestartSec=10
 StandardOutput=journal
