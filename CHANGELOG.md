@@ -2,6 +2,21 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.12.5 — 2026-08-05
+- Stop a daemon restart from deleting the sync manifest and payload
+
+## v3.12.4 — 2026-08-05
+- Restart a stopped sync timer instead of stalling until the next role change
+- Name a publisher holding no manifest as the fault in the debug bundle
+
+## v3.12.3 — 2026-08-05
+- Collect sync state, sync logs and a cluster manifest table in the debug bundle
+- Never mistake the VIP for the node's own address
+- Fix DHCP notifications silently dying on a root-only notify.conf
+- Uninstall: remove pihole-ha-monitor, and unpatch the sidebar robustly
+- Stop reporting a connection error when the dashboard answered
+- inject: set sidebar.lp mode explicitly after patching
+
 ## v3.12.2 — 2026-08-01
 - Log every DHCP lease-hook invocation and skip reason
 
