@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.12.7 — 2026-08-20
+- Stop Docker nodes crash-looping when config syncs
+
 ## v3.12.6 — 2026-08-20
 - Sync local CNAME records to the standby nodes
 
