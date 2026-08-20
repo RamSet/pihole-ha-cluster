@@ -173,16 +173,25 @@ platform_set_dhcp() {
 
 platform_ftl_restart() {
     if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
+        # Reload in place -- never SIGTERM. In Docker, FTL is the pihole
+        # container's main process, and this sidecar shares that container's PID
+        # and network namespaces (pid: "service:pihole" in docker-compose.yml).
+        # Stopping FTL therefore stops the pihole container, which tears down the
+        # namespace and SIGKILLs whatever is running here -- including the
+        # sync-pull that asked for the restart, killed before it can record the
+        # hash it just applied. The node then looks stale forever, re-pulls, and
+        # kills itself again every cycle: a crash loop that also leaves the
+        # sidecar dead when Docker cannot rejoin a still-restarting namespace.
+        # SIGHUP makes FTL re-read pihole.toml and reload gravity.db in place,
+        # same PID, container untouched. Settings that genuinely need a full
+        # restart (listening ports, cache size) are picked up the next time the
+        # container restarts on its own.
         local pid
         pid="$(pgrep -x pihole-FTL 2>/dev/null)" || return 1
-        kill -TERM "$pid" 2>/dev/null || true
-        # Wait for FTL to come back (pihole container restart policy brings it back)
-        local waited=0
-        while (( waited < 10 )); do
-            sleep 1
-            (( waited++ ))
-            pgrep -x pihole-FTL >/dev/null 2>&1 && return 0
-        done
+        kill -HUP "$pid" 2>/dev/null || return 1
+        sleep 2
+        # Still the same live process? Then the reload landed.
+        kill -0 "$pid" 2>/dev/null && return 0
         return 1
     else
         systemctl restart pihole-FTL

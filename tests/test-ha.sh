@@ -620,6 +620,31 @@ assert_not_contains "panel no longer claims CNAMEs live in custom.list" \
     "$(cat "$SCRIPT_DIR/../ha.lp" 2>/dev/null)" "A/AAAA/CNAME) from Pi-hole's custom.list"
 
 # ============================================================
+echo
+echo "=== Docker FTL reload must not stop the container (issue #5) ==="
+# ------------------------------------------------------------
+# In Docker the sidecar shares the pihole container's PID and network namespaces
+# (pid: "service:pihole"). FTL is that container's main process, so SIGTERM
+# stops the container, tears down the namespace, and SIGKILLs whatever the
+# sidecar was running -- including the sync-pull that asked for the restart,
+# killed before it records the hash it just applied. The node then re-pulls and
+# kills itself again every cycle. Reproduced: pihole exits 0, sidecar exits 137,
+# last-pull-hash never written. SIGHUP reloads pihole.toml and gravity.db in
+# place instead, same PID, container untouched.
+_plat="$SCRIPT_DIR/../pihole-ha-platform"
+_ftl_restart_fn="$(extract_fn "$_plat" platform_ftl_restart)"
+_docker_branch="${_ftl_restart_fn%%else*}"
+
+assert_not_contains "docker reload never SIGTERMs FTL" "$_docker_branch" "kill -TERM"
+assert_not_contains "docker reload never plain-kills FTL" "$_docker_branch" 'kill "$pid"'
+assert_contains     "docker reload signals FTL with SIGHUP" "$_docker_branch" "kill -HUP"
+assert_contains     "bare-metal still uses systemctl restart" "$_ftl_restart_fn" "systemctl restart pihole-FTL"
+
+# The reload must report failure if FTL did not survive it, so an apply that
+# silently lost its daemon is not recorded as a success.
+assert_contains "docker reload verifies FTL is still alive" "$_docker_branch" "kill -0"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do
