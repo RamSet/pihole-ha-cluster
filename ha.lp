@@ -579,7 +579,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                             </td>
                             <td>
                                 Custom DNS Records<br>
-                                <small class="text-muted">Local DNS entries (A/AAAA/CNAME) from Pi-hole's custom.list</small>
+                                <small class="text-muted">Local DNS records (A/AAAA) and local CNAME records</small>
                             </td>
                         </tr>
                         <tr class="ha-sync-row ha-sync-component">

@@ -196,8 +196,10 @@ Two scripts handle config distribution:
 - Applies each component:
   - **Gravity DB**: copies to `/etc/pihole/gravity.db`, restarts `pihole-FTL` only if the md5 changed
   - **DHCP static leases**: applies via `pihole-FTL --config dhcp.hosts`
-  - **Custom DNS records**: applies via `pihole-FTL --config dns.hosts`
+  - **Custom DNS records**: applies local A/AAAA records via `pihole-FTL --config dns.hosts` and local CNAME records via `pihole-FTL --config dns.cnameRecords`
   - **FTL settings**: applies DNS, blocking, cache, and misc settings via `pihole-FTL --config`
+
+  Array-valued keys (`dns.hosts`, `dhcp.hosts`, `dns.cnameRecords`, `dns.revServers`) are carried as their own JSON file in the payload, because FTL prints an array as `[ a, b ]` but only accepts `["a","b"]` back — a raw round-trip is rejected. An empty list is never applied, so sync can't wipe records that exist only on the standby.
 
 Sync is entirely over HTTP on port 8887. No SSH keys, no rsync, no shared filesystem.
 

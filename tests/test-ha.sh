@@ -520,6 +520,106 @@ assert_contains "dhcp hook reports an unreadable notify.conf distinctly" \
     "notify_conf_unreadable"
 
 # ============================================================
+echo
+echo "=== Array-valued FTL config keys (CNAMEs, conditional forwarding) ==="
+# ------------------------------------------------------------
+# FTL prints an array as "[ a, b ]" but only accepts ["a","b"] back:
+#   $ pihole-FTL --config dns.cnameRecords "[ x.lan,pi.hole ]"
+#   Config setting dns.cnameRecords is invalid: not valid JSON
+# So an array key listed in SETTINGS_KEYS is exported in the display form and
+# silently rejected on the standby -- apply_settings swallows the error, the
+# pull still logs status=ok, and the records never sync. That is exactly how
+# local CNAME records went missing on every standby. Assert array keys stay out
+# of SETTINGS_KEYS and keep their own JSON file in the payload.
+_sync="$SCRIPT_DIR/../pihole-ha-sync"
+_pull="$SCRIPT_DIR/../pihole-ha-sync-pull"
+
+# Comments inside the block mention these keys by name, so strip them --
+# otherwise the assertion passes/fails on prose rather than on a real entry.
+_settings_keys_block="$(sed -n '/^SETTINGS_KEYS=(/,/^)/p' "$_sync" | sed 's/#.*//')"
+for _arraykey in dns.cnameRecords dns.revServers dns.hosts dhcp.hosts; do
+    assert_not_contains "array key $_arraykey stays out of SETTINGS_KEYS" \
+        "$_settings_keys_block" "$_arraykey"
+done
+
+assert_contains "CNAMEs are exported as JSON, not FTL's display form" \
+    "$(grep -A1 'config dns.cnameRecords' "$_sync")" "ftl_to_json"
+assert_contains "conditional forwarding is exported as JSON" \
+    "$(grep -A1 'config dns.revServers' "$_sync")" "ftl_to_json"
+assert_contains "CNAMEs ride the DNS toggle" "$(cat "$_sync")" 'STAGING_DIR/dns-cnames.json'
+assert_contains "CNAME changes are in the change-detection hash" \
+    "$(sed -n '/^current_hash()/,/^}/p' "$_sync")" "dns.cnameRecords"
+assert_contains "conditional forwarding is in the change-detection hash" \
+    "$(sed -n '/^current_hash()/,/^}/p' "$_sync")" "dns.revServers"
+
+# A missing array file means the publisher predates the key. It must be skipped,
+# never treated as a fatal payload -- otherwise a fixed standby refuses every
+# payload an older primary builds.
+assert_not_contains "a missing dns-cnames.json is not a fatal payload error" \
+    "$(grep 'pull_fail reason' "$_pull")" "dns-cnames.json"
+
+# The applier itself, run against the real implementation.
+_json_is_empty() { local s="${1//[[:space:]]/}"; [[ -z "$s" || "$s" == "[]" ]]; }
+eval "$(extract_fn "$_pull" apply_array_key)"
+eval "$(extract_fn "$_sync" ftl_to_json)"
+
+# FTL's real display output for two CNAME records, and for conditional
+# forwarding -- note the commas *inside* each entry, which is what makes the
+# naive "split on comma" conversion wrong.
+assert_eq "CNAME display form converts to JSON" \
+    '["nas.lan,server.lan","git.lan,server.lan"]' \
+    "$(printf '%s' '[ nas.lan,server.lan, git.lan,server.lan ]' | ftl_to_json)"
+assert_eq "CNAME with a TTL survives conversion" \
+    '["vpn.lan,gw.lan,300"]' \
+    "$(printf '%s' '[ vpn.lan,gw.lan,300 ]' | ftl_to_json)"
+assert_eq "conditional forwarding converts to JSON" \
+    '["true,192.168.1.0/24,192.168.1.1,lan"]' \
+    "$(printf '%s' '[ true,192.168.1.0/24,192.168.1.1,lan ]' | ftl_to_json)"
+
+_arr_stage="$(mktemp -d)"
+_run_apply() {   # $1=file contents (empty string = no file), $2=gate
+    STAGING_DIR="$_arr_stage"
+    rm -f "$_arr_stage/dns-cnames.json"
+    [[ -n "$1" ]] && printf '%s\n' "$1" > "$_arr_stage/dns-cnames.json"
+    APPLIED_SOMETHING=false; APPLY_FAILED=false; HOSTS_APPLIED=false
+    log_info() { echo "INFO $*"; }; log_warn() { echo "WARN $*"; }
+    # Stand-in for FTL that enforces the real contract: JSON accepted, display
+    # form rejected. Without this the test cannot tell the fix from the bug.
+    pihole-FTL() { [[ "$3" == '['*'"'* || "$3" == "[]" ]]; }
+    apply_array_key "$2" dns.cnameRecords dns-cnames.json dns_cnames
+    # Runs inside a command substitution, so the flags have to come back out
+    # on stdout -- assigning them here would not reach the caller.
+    echo "FLAGS hosts_applied=$HOSTS_APPLIED apply_failed=$APPLY_FAILED"
+}
+
+_out="$(_run_apply '["nas.lan,server.lan"]' true)"
+assert_contains "a JSON CNAME list applies" "$_out" "component=dns_cnames status=ok"
+assert_contains "applying CNAMEs triggers the FTL restart" "$_out" "hosts_applied=true"
+assert_contains "a successful apply is not marked failed" "$_out" "apply_failed=false"
+
+_out="$(_run_apply '[ nas.lan,server.lan ]' true)"
+assert_contains "the old display form is reported as a failure, not swallowed" \
+    "$_out" "event=apply_fail component=dns_cnames"
+assert_contains "a rejected apply blocks the hash, so the node retries" "$_out" "apply_failed=true"
+
+_out="$(_run_apply '[]' true)"
+assert_contains "an empty list never wipes the standby's CNAMEs" \
+    "$_out" "event=apply_skip component=dns_cnames"
+
+_out="$(_run_apply '' true)"
+assert_not_contains "an older primary with no CNAME file is not an error" "$_out" "apply_failed=true"
+assert_not_contains "an older primary with no CNAME file applies nothing" "$_out" "status=ok"
+
+_out="$(_run_apply '["nas.lan,server.lan"]' false)"
+assert_not_contains "CNAMEs are not applied when the DNS toggle is off" "$_out" "status=ok"
+rm -rf "$_arr_stage"
+unset -f pihole-FTL log_info log_warn
+
+# The panel must not promise CNAMEs under a toggle that does not carry them.
+assert_not_contains "panel no longer claims CNAMEs live in custom.list" \
+    "$(cat "$SCRIPT_DIR/../ha.lp" 2>/dev/null)" "A/AAAA/CNAME) from Pi-hole's custom.list"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do

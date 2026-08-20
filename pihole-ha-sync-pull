@@ -286,6 +286,28 @@ apply_dns_hosts() {
     fi
 }
 
+# Generic applier for the remaining array-valued keys (CNAMEs, conditional
+# forwarding). They are shipped as their own ftl_to_json'd file rather than
+# inside settings.json, because FTL only accepts an array back as JSON —
+# handing it FTL's own "[ a, b ]" display form is silently rejected.
+# A missing file means the publisher predates the key: skip, never fail, so a
+# newer standby still accepts payloads from an older primary.
+apply_array_key() {
+    local _gate="$1" _key="$2" _file="$3" _label="$4"
+    [[ "$_gate" == "true" && -f "$STAGING_DIR/$_file" ]] || return 0
+    local _v; _v="$(cat "$STAGING_DIR/$_file")"
+    if _json_is_empty "$_v"; then
+        log_warn "event=apply_skip component=$_label reason=\"refusing to apply an empty list — keeping local\""
+        return 0
+    fi
+    if pihole-FTL --config "$_key" "$_v" >/dev/null 2>&1; then
+        log_info "event=apply component=$_label status=ok"
+        APPLIED_SOMETHING=true; HOSTS_APPLIED=true
+    else
+        log_warn "event=apply_fail component=$_label"; APPLY_FAILED=true
+    fi
+}
+
 # FTL settings: defined as a function so we can apply them AFTER any
 # FTL restart (e.g. gravity update). Applying *before* a restart is
 # unsafe — FTL persists in-memory state on shutdown and can clobber
@@ -398,7 +420,9 @@ fi
 # gravity restart clobbering them.
 apply_dhcp_hosts
 apply_dns_hosts
+apply_array_key "$COMP_DNS" dns.cnameRecords dns-cnames.json dns_cnames
 apply_settings
+apply_array_key "$COMP_SETTINGS" dns.revServers dns-revservers.json dns_revservers
 
 # Restart FTL after settings apply so the running daemon (and admin UI)
 # reflects the new values. pihole-FTL --config writes to pihole.toml but

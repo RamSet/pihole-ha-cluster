@@ -112,8 +112,13 @@ ftl_to_json() {
 }
 
 # Compute current config fingerprint (only enabled components)
+# SCALAR-VALUED KEYS ONLY. Array-valued keys must never be listed here: FTL
+# prints an array as "[ a, b ]" but only accepts ["a","b"] back, so the raw
+# round-trip through export_settings is silently rejected by the standby and
+# the value never syncs. Array keys get their own ftl_to_json'd file in the
+# payload instead — see dns-cnames.json / dns-revservers.json below.
 SETTINGS_KEYS=(
-    dns.cnameRecords dns.revServers dns.blockTTL dns.blocking.mode dns.blocking.edns
+    dns.blockTTL dns.blocking.mode dns.blocking.edns
     dns.blocking.active dns.rateLimit.count dns.rateLimit.interval dns.queryLogging
     dns.dnssec dns.showDNSSEC dns.domainNeeded dns.expandHosts dns.bogusPriv
     dns.piholePTR dns.domain.name dns.domain.local dns.cache.size dns.cache.optimizer
@@ -136,13 +141,17 @@ current_hash() {
     {
         [[ "$SYNC_GRAVITY" == "true" ]] && md5sum /etc/pihole/gravity.db 2>/dev/null
         [[ "$SYNC_DHCP" == "true" ]] && pihole-FTL --config dhcp.hosts 2>/dev/null
-        [[ "$SYNC_DNS" == "true" ]] && pihole-FTL --config dns.hosts 2>/dev/null
+        if [[ "$SYNC_DNS" == "true" ]]; then
+            pihole-FTL --config dns.hosts 2>/dev/null
+            pihole-FTL --config dns.cnameRecords 2>/dev/null
+        fi
         # Adlists are always included in the payload
         export_adlists
         if [[ "$SYNC_SETTINGS" == "true" ]]; then
             for _sk in "${SETTINGS_KEYS[@]}"; do
                 pihole-FTL --config "$_sk" 2>/dev/null
             done
+            pihole-FTL --config dns.revServers 2>/dev/null
         fi
         [[ "$SYNC_NOTIFY" == "true" && -f /etc/pihole-ha/notify.conf ]] && md5sum /etc/pihole-ha/notify.conf 2>/dev/null
         # sync.conf always tracked so changes (e.g. SYNC_INTERVAL) propagate
@@ -252,11 +261,18 @@ fi
 if [[ "$SYNC_DNS" == "true" ]]; then
     pihole-FTL --config dns.hosts 2>/dev/null | ftl_to_json > "$STAGING_DIR/dns-hosts.json"
     TAR_FILES+=" dns-hosts.json"
+    # Local CNAME records are custom DNS records too, so they ride the DNS
+    # toggle alongside the A/AAAA entries — not the FTL-settings toggle.
+    pihole-FTL --config dns.cnameRecords 2>/dev/null | ftl_to_json > "$STAGING_DIR/dns-cnames.json"
+    TAR_FILES+=" dns-cnames.json"
 fi
 
 if [[ "$SYNC_SETTINGS" == "true" ]]; then
     export_settings > "$STAGING_DIR/settings.json"
     TAR_FILES+=" settings.json"
+    # Conditional forwarding is an array key — same JSON treatment as CNAMEs.
+    pihole-FTL --config dns.revServers 2>/dev/null | ftl_to_json > "$STAGING_DIR/dns-revservers.json"
+    TAR_FILES+=" dns-revservers.json"
 fi
 
 if [[ "$SYNC_NOTIFY" == "true" && -f /etc/pihole-ha/notify.conf ]]; then
