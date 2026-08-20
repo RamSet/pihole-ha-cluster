@@ -242,6 +242,20 @@ enforce_dns_pin() {
     first_ns="$(grep -E '^nameserver[[:space:]]+' /etc/resolv.conf 2>/dev/null | head -1 | awk '{print $2}')"
     [[ "$first_ns" == "127.0.0.1" ]] && return 0
 
+    # Only hand this host's DNS to the local resolver once it is actually
+    # answering. Pinning to a dead 127.0.0.1 does not degrade resolution, it
+    # removes it: the node can then resolve nothing at all. On a fresh container
+    # that is a hard deadlock -- FTL has not come up because gravity is still
+    # downloading its blocklists, and gravity cannot download them because we
+    # just took away the only working resolver, so startup stalls at "DNS
+    # resolution is currently unavailable" forever. Deferring costs nothing:
+    # the main loop re-runs this every CHECK_INTERVAL, so the pin lands on the
+    # first cycle after FTL starts listening.
+    if ! nc -z -w1 127.0.0.1 53 >/dev/null 2>&1; then
+        log_warn "event=dns_pin_deferred reason=\"local resolver not answering yet — leaving ${first_ns:-existing} resolver in place\""
+        return 0
+    fi
+
     log_warn "event=dns_pin_repair first_nameserver=${first_ns:-none} action=repinning"
 
     # NetworkManager: pin DNS on every active non-loopback connection
@@ -937,6 +951,12 @@ while true; do
     load_auth         # reload passwords in case user saved new ones via web UI
     load_notify_conf  # reload notify settings so per-kind mute toggles take effect live
     load_master       # reload DHCP master override (live config changes)
+    # Re-assert the DNS pin. Startup alone is not enough: the pin is deferred
+    # while the local resolver is not answering (a fresh node is still building
+    # gravity), and something else can rewrite resolv.conf later -- a DHCP lease
+    # renewal, NetworkManager. Cheap: returns immediately once it is already
+    # pinned, which is the steady state.
+    enforce_dns_pin
     if reload_vip_conf; then  # only update DNS option when VIP config actually changes
         ensure_dns_option
     fi

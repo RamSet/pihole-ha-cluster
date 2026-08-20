@@ -195,8 +195,28 @@ if [[ -f "$CLUSTER_KEY_FILE" ]]; then
     else
         _want_sig="$(echo "$MANIFEST" | grep -o '"signature":"[^"]*"' | cut -d'"' -f4)"
         _have_sig="$(openssl dgst -sha256 -hmac "$(cat "$CLUSTER_KEY_FILE")" "$STAGING_DIR/payload.tar.gz" 2>/dev/null | awk '{print $NF}')"
-        if [[ -z "$_want_sig" || "$_want_sig" != "$_have_sig" ]]; then
-            log_error "event=pull_reject reason=\"payload signature invalid — rejecting (tampering, MITM, or an unkeyed primary)\" from=$_PULL_FROM"
+        if [[ -z "$_want_sig" ]]; then
+            # Not a mismatch at all: the publisher shipped an unsigned payload
+            # while we hold a key. Say so, because the fix is specific and the
+            # generic "tampering" wording sends people hunting for an attacker.
+            log_error "event=pull_reject reason=\"peer published an UNSIGNED payload but this node holds cluster.key — copy the same /etc/pihole-ha/cluster.key to $_PULL_FROM\" from=$_PULL_FROM"
+            rm -rf "$STAGING_DIR"
+            exit 1
+        fi
+        if [[ "$_want_sig" != "$_have_sig" ]]; then
+            # Before calling this an attack: the publisher may simply have
+            # rebuilt the payload between our manifest read and our download, so
+            # the bytes we hold no longer match the signature we were handed.
+            # That is a benign race, not tampering, and it resolves itself. Only
+            # a signature that is STILL the one we checked against is evidence
+            # of a real problem.
+            _now_sig="$(curl -sf --max-time 5 "$PRIMARY_URL/api/sync/manifest" 2>/dev/null | grep -o '"signature":"[^"]*"' | cut -d'"' -f4)"
+            if [[ -n "$_now_sig" && "$_now_sig" != "$_want_sig" ]]; then
+                log_warn "event=pull_retry reason=\"publisher rebuilt the payload mid-download — retrying next cycle\" from=$_PULL_FROM"
+                rm -rf "$STAGING_DIR"
+                exit 0
+            fi
+            log_error "event=pull_reject reason=\"payload signature invalid — rejecting (tampering, MITM, a mismatched cluster.key, or a publisher restarting mid-transfer)\" from=$_PULL_FROM"
             rm -rf "$STAGING_DIR"
             exit 1
         fi

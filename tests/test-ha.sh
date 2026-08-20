@@ -645,6 +645,62 @@ assert_contains     "bare-metal still uses systemctl restart" "$_ftl_restart_fn"
 assert_contains "docker reload verifies FTL is still alive" "$_docker_branch" "kill -0"
 
 # ============================================================
+echo
+echo "=== Docker provisioning: peer auth + DNS pin ==="
+# ------------------------------------------------------------
+# A peer only counts as alive if an AUTHENTICATED call to its Pi-hole API
+# succeeds, and that password comes from auth.conf. On bare metal the operator
+# types it into the panel; a container has nobody to type it in, so auth.conf
+# stayed empty, every peer check 401'd, and each node -- which always counts
+# itself alive -- elected itself publisher. Two publishers, versions ratcheting,
+# and the only symptom a repeated sync_promote. Verified in a two-node Docker
+# cluster: seeding auth.conf is what made the roles settle.
+_entry="$SCRIPT_DIR/../docker/docker-entrypoint.sh"
+assert_contains "docker seeds peer API passwords"       "$(cat "$_entry")" "seed_auth_conf"
+assert_contains "seeded entries use the PASS_<ip> key"  "$(cat "$_entry")" 'PASS_${_ip//./_}'
+assert_contains "a password already set is never overwritten" \
+    "$(extract_fn "$_entry" seed_auth_conf)" 'grep -q "^${_key}=" /etc/pihole-ha/auth.conf'
+assert_contains "seeded auth.conf is not world-readable" \
+    "$(extract_fn "$_entry" seed_auth_conf)" "chmod 600"
+
+# PIN_DNS was reachable on bare metal but had no Docker equivalent, so a
+# container could never opt out of having its resolver rewritten.
+assert_contains "PIN_DNS is settable in docker" "$(cat "$_entry")" 'PIN_DNS=${PIHOLE_HA_PIN_DNS:-true}'
+
+# Pinning to a local resolver that is not answering does not degrade DNS, it
+# removes it -- and on a fresh container it deadlocks startup outright: FTL is
+# waiting on gravity, and gravity cannot download once the only working resolver
+# is gone. Observed live; the cluster would not boot until it was broken by hand.
+_pin_fn="$(extract_fn "$SCRIPT_DIR/../pihole-ha" enforce_dns_pin)"
+assert_contains "dns pin waits for the local resolver to answer" "$_pin_fn" "nc -z -w1 127.0.0.1 53"
+assert_contains "deferring the pin is reported"                  "$_pin_fn" "event=dns_pin_deferred"
+# The deferral must come BEFORE resolv.conf is rewritten, or it defers nothing.
+_before_write="${_pin_fn%%resolv.conf directly*}"
+assert_contains "the check runs before resolv.conf is touched" "$_before_write" "dns_pin_deferred"
+
+# Deferring is only safe if something re-tries it. Called once at startup, a
+# deferred pin would never be applied at all -- the node would silently keep the
+# resolver the pin exists to replace. It must also run inside the check loop.
+_ha_src="$(cat "$SCRIPT_DIR/../pihole-ha")"
+_loop_body="${_ha_src##*while true; do}"
+assert_contains "a deferred dns pin is retried by the main loop" "$_loop_body" "enforce_dns_pin"
+
+echo
+echo "=== Signature rejection must not cry tampering at a benign race ==="
+# ------------------------------------------------------------
+# A publisher that rebuilds between our manifest read and our download leaves us
+# holding bytes that do not match the signature we were given. That is a race,
+# not an attack, and it clears itself. Seen live: one pull rejected seconds after
+# the publisher's service restarted, the next pull verified fine.
+_sigblock="$(sed -n '/_want_sig=/,/^fi$/p' "$SCRIPT_DIR/../pihole-ha-sync-pull")"
+assert_contains "a moved signature is re-checked before rejecting" "$_sigblock" "_now_sig"
+assert_contains "a mid-download rebuild retries instead of failing" "$_sigblock" "event=pull_retry"
+assert_contains "an unsigned peer gets its own actionable message"  "$_sigblock" "UNSIGNED payload"
+assert_contains "the unsigned case names the fix"                   "$_sigblock" "cluster.key to"
+# A real mismatch must still be a hard reject -- this guard must never soften.
+assert_contains "a genuine mismatch is still rejected" "$_sigblock" "event=pull_reject"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do

@@ -65,6 +65,7 @@ VIP=${PIHOLE_HA_VIP:-}
 VIP_ENABLED=${PIHOLE_HA_VIP_ENABLED:-false}
 HA_ENABLED=${PIHOLE_HA_ENABLED:-true}
 DHCP_HA=${_dhcp_ha}
+PIN_DNS=${PIHOLE_HA_PIN_DNS:-true}
 HA_NODES=${PIHOLE_HA_NODES}
 EOF
 
@@ -89,6 +90,35 @@ fi
 # --- 3. Create runtime dirs and ensure empty config files exist ---
 mkdir -p /run/pihole-ha
 touch /etc/pihole-ha/master.conf /etc/pihole-ha/auth.conf /etc/pihole-ha/notify.conf
+
+# Peer API passwords. The daemon only counts a peer alive if it can make an
+# AUTHENTICATED call to that peer's Pi-hole API, and the password for that comes
+# from auth.conf. On bare metal the operator types it into the HA panel; a
+# container has nobody to type it in, so auth.conf stayed empty, every peer check
+# came back 401, and each node -- which always counts itself alive -- elected
+# itself publisher. The result is a silent split-brain: two publishers, config
+# versions ratcheting against each other, and the only symptom a repeated
+# sync_promote in the log. Seed the entries from the password this stack already
+# knows, and never touch one that already exists so a panel-set password wins.
+seed_auth_conf() {
+    local _pw="${PIHOLE_HA_API_PASSWORD:-${PIHOLE_PASSWORD:-${FTLCONF_webserver_api_password:-}}}"
+    [[ -z "$_pw" ]] && return 0
+    local _n _ip _key _added=0
+    IFS=',' read -ra _authnodes <<< "${PIHOLE_HA_NODES:-}"
+    for _n in "${_authnodes[@]}"; do
+        _ip="${_n%%:*}"
+        [[ -z "$_ip" ]] && continue
+        _key="PASS_${_ip//./_}"
+        grep -q "^${_key}=" /etc/pihole-ha/auth.conf 2>/dev/null && continue
+        printf '%s=%s\n' "$_key" "$_pw" >> /etc/pihole-ha/auth.conf
+        (( _added++ ))
+    done
+    # Holds cleartext passwords and only ever read by root-run pihole-ha.
+    chmod 600 /etc/pihole-ha/auth.conf 2>/dev/null || true
+    (( _added > 0 )) && log_info "event=auth_seeded peers=$_added"
+    return 0
+}
+seed_auth_conf
 
 # --- 4. Wait for pihole-FTL (shared PID namespace with pihole container) ---
 log_info "event=waiting_for_ftl"
