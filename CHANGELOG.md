@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.12.9 — 2026-08-21
+- Make Docker nodes honour the sync interval you set
+
 ## v3.12.8 — 2026-08-20
 - Fix Docker nodes both claiming the primary role, and a stalled first start
 
