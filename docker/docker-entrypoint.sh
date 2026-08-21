@@ -223,8 +223,29 @@ log_info "event=starting_dash"
 DASH_PID=$!
 
 # --- 10. Supervisor loop ---
-SYNC_INTERVAL="${PIHOLE_HA_SYNC_INTERVAL:-900}"  # 15 min default
+# Bootstrap default, in SECONDS. sync.conf's SYNC_INTERVAL -- written by the HA
+# panel, in MINUTES, and synced across the cluster -- overrides it when present.
+SYNC_INTERVAL_DEFAULT="${PIHOLE_HA_SYNC_INTERVAL:-900}"  # 15 min default
+SYNC_INTERVAL="$SYNC_INTERVAL_DEFAULT"
 LAST_SYNC=0
+
+# Honour the configured sync interval. Bare metal rewrites its systemd timer
+# drop-in whenever this changes; a container has no timer, so the supervisor has
+# to apply it itself. It never did -- the interval was read from the environment
+# once at startup and sync.conf was never consulted -- so changing the sync
+# interval in the panel did nothing at all on Docker, and the container kept
+# whatever it booted with for its whole life. Re-read every cycle so a change
+# made in the panel, or arriving from the publisher, takes effect immediately.
+read_sync_interval() {
+    local _m=""
+    [[ -f "$SYNC_CONF" ]] && _m="$(grep -E '^SYNC_INTERVAL=' "$SYNC_CONF" | head -1 | cut -d= -f2 | tr -dc '0-9')"
+    if [[ -n "$_m" ]] && (( _m > 0 )); then
+        echo $(( _m * 60 ))
+    else
+        echo "$SYNC_INTERVAL_DEFAULT"
+    fi
+}
+SYNC_INTERVAL="$(read_sync_interval)"
 
 log_info "event=supervisor_started sync_interval=${SYNC_INTERVAL}s"
 
@@ -258,6 +279,11 @@ while true; do
     fi
 
     # Run sync timers
+    _want_interval="$(read_sync_interval)"
+    if [[ "$_want_interval" != "$SYNC_INTERVAL" ]]; then
+        log_info "event=sync_interval_changed from=${SYNC_INTERVAL}s to=${_want_interval}s"
+        SYNC_INTERVAL="$_want_interval"
+    fi
     NOW="$(date +%s)"
     if (( NOW - LAST_SYNC >= SYNC_INTERVAL )); then
         if [[ -f /run/pihole-ha/sync-enabled ]]; then

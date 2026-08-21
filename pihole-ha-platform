@@ -251,7 +251,11 @@ platform_sync_pull_disable() {
 platform_sync_set_interval() {
     local minutes="${1:-15}"
     if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
-        # Docker uses SYNC_INTERVAL env var read from sync.conf each cycle
+        # Nothing to write: there is no timer unit to reconfigure. The container
+        # supervisor re-reads SYNC_INTERVAL from sync.conf every cycle and picks
+        # the new value up on its own. (It genuinely does now -- this branch sat
+        # empty behind that same claim while the supervisor only ever read the
+        # environment, so the panel's interval was ignored on Docker.)
         :
     else
         # Write systemd timer drop-ins for both sync and sync-pull

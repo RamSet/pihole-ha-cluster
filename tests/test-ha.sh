@@ -701,6 +701,43 @@ assert_contains "the unsigned case names the fix"                   "$_sigblock"
 assert_contains "a genuine mismatch is still rejected" "$_sigblock" "event=pull_reject"
 
 # ============================================================
+echo
+echo "=== Docker must honour the configured sync interval ==="
+# ------------------------------------------------------------
+# SYNC_INTERVAL lives in sync.conf in MINUTES, is written by the HA panel and
+# synced cluster-wide. Bare metal applies it by rewriting a systemd timer
+# drop-in. A container has no timer, so its supervisor has to apply it -- and it
+# did not: the interval was read from the environment once at startup and
+# sync.conf was never consulted, so changing it in the panel did nothing at all
+# and the container kept its boot value for life. Reported as "cluster isn't
+# syncing automatically" (it was, just never on the cadence that was set).
+_entry="$SCRIPT_DIR/../docker/docker-entrypoint.sh"
+_entry_src="$(cat "$_entry")"
+
+assert_contains "the supervisor reads SYNC_INTERVAL from sync.conf" \
+    "$(extract_fn "$_entry" read_sync_interval)" "'^SYNC_INTERVAL=' \"\$SYNC_CONF\""
+assert_contains "sync.conf minutes are converted to seconds" \
+    "$(extract_fn "$_entry" read_sync_interval)" '_m * 60'
+assert_contains "the env var remains the bootstrap default" "$_entry_src" 'PIHOLE_HA_SYNC_INTERVAL:-900'
+assert_contains "a zero or junk interval falls back to the default" \
+    "$(extract_fn "$_entry" read_sync_interval)" 'SYNC_INTERVAL_DEFAULT'
+
+# Reading it once at startup is what the bug was -- it has to be re-read in the
+# loop, or a change made after boot is still ignored.
+_sup_loop="${_entry_src##*while true; do}"
+assert_contains "the interval is re-read every supervisor cycle" "$_sup_loop" "read_sync_interval"
+assert_contains "an interval change is reported"                 "$_sup_loop" "sync_interval_changed"
+# ...and the re-read must happen BEFORE the elapsed-time comparison, or the new
+# value only takes effect one full old-interval later.
+_before_check="${_sup_loop%%NOW - LAST_SYNC*}"
+assert_contains "the re-read precedes the elapsed check" "$_before_check" "read_sync_interval"
+
+# The platform helper's docker branch is deliberately empty; it must stay empty
+# only because the supervisor does the work, so guard the claim.
+assert_contains "bare metal still writes a timer drop-in" \
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha-platform" platform_sync_set_interval)" 'OnUnitActiveSec=${minutes}min'
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do
