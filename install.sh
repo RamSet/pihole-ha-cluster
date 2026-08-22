@@ -13,6 +13,33 @@ CROSS="[${COL_RED}✗${COL_NC}]"
 INFO="[i]"
 OVER="\\r\\033[K"
 
+# Pick this host's LAN address.
+#
+# `hostname -I` is not portable: Arch ships inetutils' hostname, which has no -I
+# at all, so the installer died outright with "hostname: invalid option -- 'I'".
+# And where it does exist it prints EVERY address on the box in no defined
+# order, so `awk '{print $1}'` on a host with Docker bridges or a second NIC is
+# as likely to hand back 172.17.0.1 as the real LAN address.
+#
+# Ask the kernel which source address it would use to reach the default gateway
+# instead. That is the LAN address by construction, on the interface that
+# actually carries the default route, and it is never a docker bridge.
+detect_local_ip() {
+    local _gw _ip
+    _gw="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
+    _ip="$(ip -o route get "${_gw:-1.0.0.0}" 2>/dev/null \
+           | sed -n 's/.*[[:space:]]src[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' | head -1)"
+    # No default route at all: fall back to the first global IPv4 that is not on
+    # a bridge/virtual interface. Filtering by interface name rather than by
+    # address range, so a genuine 172.16/12 LAN is not mistaken for docker0.
+    if [[ -z "$_ip" ]]; then
+        _ip="$(ip -o -4 addr show scope global 2>/dev/null \
+               | grep -vE '[[:space:]](docker[0-9]*|br-[0-9a-f]+|veth[0-9a-z]*|virbr[0-9]*|tailscale[0-9]*)[[:space:]]' \
+               | awk '{print $4}' | cut -d/ -f1 | head -1)"
+    fi
+    printf '%s' "$_ip"
+}
+
 is_valid_ip() {
     [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
     local i; for i in 1 2 3 4; do (( ${BASH_REMATCH[$i]} > 255 )) && return 1; done; return 0
@@ -55,7 +82,7 @@ if [[ "${1:-}" == "--uninstall" || "${1:-}" == "-u" ]]; then
             _u_eip="${_u_e%%:*}"
             ip -o -4 addr show 2>/dev/null | grep -qw "$_u_eip" && { _u_self="$_u_eip"; break; }
         done
-        [[ -z "$_u_self" ]] && _u_self="$(hostname -I | awk '{print $1}')"
+        [[ -z "$_u_self" ]] && _u_self="$(detect_local_ip)"
         for _u_e in "${_u_peers[@]}"; do
             _u_pip="${_u_e%%:*}"
             [[ "$_u_pip" == "$_u_self" ]] && continue
@@ -239,7 +266,7 @@ fi
 printf "  %b Pi-hole detected\\n" "${TICK}"
 
 # --- 3. Auto-detect local IP and gateway ---
-local_ip="$(hostname -I | awk '{print $1}')"
+local_ip="$(detect_local_ip)"
 detected_gw="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
 detected_gw="${detected_gw:-}"
 subnet="$(echo "$local_ip" | cut -d. -f1-3)"

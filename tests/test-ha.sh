@@ -738,6 +738,49 @@ assert_contains "bare metal still writes a timer drop-in" \
     "$(extract_fn "$SCRIPT_DIR/../pihole-ha-platform" platform_sync_set_interval)" 'OnUnitActiveSec=${minutes}min'
 
 # ============================================================
+echo
+echo "=== Installers must not depend on \`hostname -I\` (issue #6) ==="
+# ------------------------------------------------------------
+# Arch ships inetutils' hostname, which has no -I, so the installer aborted with
+# "hostname: invalid option -- 'I'" before it could do anything. Where -I does
+# exist it prints every address on the box in no defined order, so taking the
+# first field hands back 172.17.0.1 as readily as the LAN address on any host
+# running Docker. Verified in a BusyBox environment (same limitation as Arch):
+# hostname -I fails outright and detect_local_ip returns the correct address.
+for _inst in install.sh docker-install.sh; do
+    _src="$SCRIPT_DIR/../$_inst"
+    # Strip comments -- the fix documents the old call by name on purpose.
+    _code="$(sed 's/#.*//' "$_src")"
+    assert_not_contains "$_inst does not call hostname -I" "$_code" "hostname -I"
+    assert_contains     "$_inst defines detect_local_ip"   "$(cat "$_src")" "detect_local_ip() {"
+    assert_contains     "$_inst derives the IP from the default route" \
+        "$(extract_fn "$_src" detect_local_ip)" "ip -o route get"
+    # The no-default-route fallback must not hand back a bridge address.
+    assert_contains "$_inst fallback skips bridge interfaces" \
+        "$(extract_fn "$_src" detect_local_ip)" "docker[0-9]*|br-"
+done
+
+# A host with two NICs on one LAN has two valid answers; only the operator knows
+# which one the peers will use. The reporter had to edit the script by hand.
+assert_contains "docker installer lets the operator override the detected IP" \
+    "$(cat "$SCRIPT_DIR/../docker-install.sh")" "LAN IP [\$detected_ip]"
+
+echo
+echo "=== Pi-hole port probe must use an endpoint that exists ==="
+# ------------------------------------------------------------
+# /api/info 404s on Pi-hole v6 -- confirmed against two live instances -- so the
+# probe could never succeed on any port for anyone. The installer then concluded
+# no Pi-hole was anywhere, found the port in use (by Pi-hole itself), and
+# reported "Port 80 is in use by another service (not Pi-hole)".
+_probe="$(extract_fn "$SCRIPT_DIR/../docker-install.sh" _is_pihole_port)"
+assert_not_contains "the probe does not use the 404-ing /api/info" "$_probe" '/api/info"'
+assert_contains     "the probe uses a real endpoint"               "$_probe" "/api/info/ftl"
+# A password-protected Pi-hole answers 401 -- still proof Pi-hole is listening.
+assert_contains "a password-protected Pi-hole still counts as Pi-hole" "$_probe" '"key":"unauthorized"'
+# curl -f suppresses the body on a 401, which is exactly what is being matched.
+assert_not_contains "the probe does not use curl -f" "$_probe" "curl -sf"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do

@@ -13,6 +13,33 @@ CROSS="[${COL_RED}✗${COL_NC}]"
 INFO="[i]"
 OVER="\\r\\033[K"
 
+# Pick this host's LAN address.
+#
+# `hostname -I` is not portable: Arch ships inetutils' hostname, which has no -I
+# at all, so the installer died outright with "hostname: invalid option -- 'I'".
+# And where it does exist it prints EVERY address on the box in no defined
+# order, so `awk '{print $1}'` on a host with Docker bridges or a second NIC is
+# as likely to hand back 172.17.0.1 as the real LAN address.
+#
+# Ask the kernel which source address it would use to reach the default gateway
+# instead. That is the LAN address by construction, on the interface that
+# actually carries the default route, and it is never a docker bridge.
+detect_local_ip() {
+    local _gw _ip
+    _gw="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
+    _ip="$(ip -o route get "${_gw:-1.0.0.0}" 2>/dev/null \
+           | sed -n 's/.*[[:space:]]src[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' | head -1)"
+    # No default route at all: fall back to the first global IPv4 that is not on
+    # a bridge/virtual interface. Filtering by interface name rather than by
+    # address range, so a genuine 172.16/12 LAN is not mistaken for docker0.
+    if [[ -z "$_ip" ]]; then
+        _ip="$(ip -o -4 addr show scope global 2>/dev/null \
+               | grep -vE '[[:space:]](docker[0-9]*|br-[0-9a-f]+|veth[0-9a-z]*|virbr[0-9]*|tailscale[0-9]*)[[:space:]]' \
+               | awk '{print $4}' | cut -d/ -f1 | head -1)"
+    fi
+    printf '%s' "$_ip"
+}
+
 is_valid_ip() {
     [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
     local i; for i in 1 2 3 4; do (( ${BASH_REMATCH[$i]} > 255 )) && return 1; done; return 0
@@ -183,7 +210,23 @@ fi
 user_web_port="${user_web_port:-$_ftl_port}"
 
 # Check if the configured port is actually available for Pi-hole
-_is_pihole_port() { curl -sf --max-time 2 "http://localhost:${1}/api/info" 2>/dev/null | grep -q "FTL" 2>/dev/null; }
+# Is Pi-hole the thing answering on this port?
+#
+# /api/info does not exist in Pi-hole v6 -- it 404s -- so this probe could never
+# succeed, on any port, for anyone. The installer then fell through to "no
+# Pi-hole anywhere", found the port genuinely in use (by Pi-hole itself), and
+# reported it as taken by another service.
+#
+# Probe a real endpoint, and accept BOTH answers that prove Pi-hole is there:
+# an unprotected instance returns 200 with an "ftl" object, and a
+# password-protected one returns 401 carrying Pi-hole's own error shape. `-f` is
+# deliberately absent: it suppresses the body on a 401, which is the very thing
+# being matched.
+_is_pihole_port() {
+    local _b
+    _b="$(curl -s --max-time 2 "http://localhost:${1}/api/info/ftl" 2>/dev/null)" || return 1
+    [[ "$_b" == *'"ftl"'* || "$_b" == *'"key":"unauthorized"'* ]]
+}
 _port_in_use() { ss -tlnH "sport = :${1}" 2>/dev/null | grep -q . 2>/dev/null; }
 
 if ! _is_pihole_port "$user_web_port"; then
@@ -251,18 +294,33 @@ if [[ "$net_mode" != "host" ]]; then
 fi
 
 # --- 6. Auto-detect local IP and gateway ---
-local_ip="$(hostname -I | awk '{print $1}')"
+detected_ip="$(detect_local_ip)"
 detected_gw="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
 detected_gw="${detected_gw:-}"
-subnet="$(echo "$local_ip" | cut -d. -f1-3)"
 
 printf "\\n"
-printf "  %b Local IP:    %b%s%b\\n" "${INFO}" "${COL_BOLD}" "$local_ip" "${COL_NC}"
+printf "  %b Local IP:    %b%s%b\\n" "${INFO}" "${COL_BOLD}" "${detected_ip:-not detected}" "${COL_NC}"
 printf "  %b Gateway:     %b%s%b\\n" "${INFO}" "${COL_BOLD}" "$detected_gw" "${COL_NC}"
-printf "  %b Subnet:      %b%s.0/24%b\\n" "${INFO}" "${COL_BOLD}" "$subnet" "${COL_NC}"
 printf "\\n"
 
 # --- 7. Interactive questions ---
+
+# 7z. This node's LAN IP. Asked, not assumed: a host with two NICs on the same
+# LAN has two equally valid answers and only the operator knows which one the
+# other nodes will reach it on.
+read -erp "  This node's LAN IP [$detected_ip]: " input_ip
+local_ip="${input_ip:-$detected_ip}"
+if ! is_valid_ip "$local_ip"; then
+    printf "  %b %bInvalid local IP: %s%b\\n" "${CROSS}" "${COL_RED}" "$local_ip" "${COL_NC}"
+    exit 1
+fi
+if ! ip -o -4 addr show 2>/dev/null | grep -qw "$local_ip"; then
+    printf "  %b %bWarning: %s is not an address on this host — the other nodes will not reach it here.%b\\n" \
+        "${INFO}" "${COL_YELLOW:-}" "$local_ip" "${COL_NC}"
+fi
+printf "  %b Local IP: %s\\n" "${TICK}" "$local_ip"
+subnet="$(echo "$local_ip" | cut -d. -f1-3)"
+printf "  %b Subnet:   %s.0/24\\n" "${TICK}" "$subnet"
 
 # 7a. Gateway
 read -erp "  Gateway IP [$detected_gw]: " input_gw
