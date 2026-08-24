@@ -88,7 +88,8 @@ else
 fi
 
 # --- 3. Create runtime dirs and ensure empty config files exist ---
-mkdir -p /run/pihole-ha
+mkdir -p /run/pihole-ha /var/lib/pihole-ha
+rm -f /run/pihole-ha/sync-payload.tar.gz /run/pihole-ha/sync-manifest.json 2>/dev/null || true
 touch /etc/pihole-ha/master.conf /etc/pihole-ha/auth.conf /etc/pihole-ha/notify.conf
 
 # Peer API passwords. The daemon only counts a peer alive if it can make an

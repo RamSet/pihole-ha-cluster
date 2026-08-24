@@ -127,6 +127,7 @@ if [[ "${1:-}" == "--uninstall" || "${1:-}" == "-u" ]]; then
           /usr/local/bin/pihole-ha-sync-pull /usr/local/bin/pihole-ha-inject /usr/local/bin/pihole-ha-debug \
           /usr/local/bin/new_dhcp_device /usr/local/bin/pihole-ha-oui-update
     rm -f /etc/systemd/system/pihole-ha*.service /etc/systemd/system/pihole-ha*.timer /etc/systemd/system/pihole-ha*.path
+    rm -rf /var/lib/pihole-ha
     systemctl daemon-reload 2>/dev/null || true
 
     # Remove the admin-panel files and revert the sidebar nav patch
@@ -758,6 +759,13 @@ fi
 # --- 15. Write /etc/pihole-ha/nodes.conf ---
 printf "  %b Writing configuration..." "${INFO}"
 mkdir -p /etc/pihole-ha
+# Bulk sync artifacts (payload, manifest, staging) live here rather than in /run:
+# /run is tmpfs sized at ~10% of RAM, and a payload carrying a full gravity.db
+# copy does not fit on a small board. See the note in pihole-ha-sync.
+mkdir -p /var/lib/pihole-ha
+chmod 755 /var/lib/pihole-ha
+# Reclaim tmpfs from versions that kept the payload in /run.
+rm -f /run/pihole-ha/sync-payload.tar.gz /run/pihole-ha/sync-manifest.json 2>/dev/null || true
 cat > /etc/pihole-ha/nodes.conf <<NCONF
 CONFIG_VERSION=1
 GATEWAY=$gateway

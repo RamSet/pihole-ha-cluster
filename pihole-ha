@@ -741,6 +741,22 @@ write_status() {
         done
         printf '}}\n'
     } > "$tmp"
+    # A partial write must never replace a good status file. When /run filled up
+    # the printfs above failed one by one, the truncated leftover was promoted
+    # anyway, and the admin panel then read invalid JSON -- reporting a problem
+    # with nothing to do with the real one. Only promote a document that is
+    # actually complete; otherwise keep the last good one and say why.
+    if [[ ! -s "$tmp" ]] || [[ "$(tail -c 3 "$tmp" 2>/dev/null | tr -d '\n')" != "}}" ]]; then
+        rm -f "$tmp"
+        if [[ "${_status_write_warned:-}" != "true" ]]; then
+            _status_write_warned=true
+            local _free
+            _free="$(df -Pk "$STATUS_DIR" 2>/dev/null | awk 'NR==2{print int($4/1024)}')"
+            log_error "event=status_write_failed file=$STATUS_FILE free_mb=${_free:-unknown} reason=\"could not write a complete status file (is the filesystem full?) — keeping the previous one so the panel is not fed a truncated document\""
+        fi
+        return 1
+    fi
+    _status_write_warned=false
     mv "$tmp" "$STATUS_FILE"
 }
 

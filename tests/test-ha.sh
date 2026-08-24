@@ -820,6 +820,52 @@ assert_contains "the warning is limited to real peers" "$_ha_src" '"$ip" != "$LO
 assert_contains "the warning is emitted once per peer" "$_ha_src" "peer_auth_warned[\$ip]=\"true\""
 
 # ============================================================
+echo
+echo "=== Bulk sync artifacts must not live on tmpfs ==="
+# ------------------------------------------------------------
+# /run is tmpfs sized at ~10% of RAM: 182M on a 1GB Raspberry Pi. The payload
+# carries a full gravity.db copy -- tens of megabytes -- and /tmp is tmpfs on a
+# stock Pi too, so staging doubled the cost. A reported cluster filled tmpfs,
+# tar failed with "tar.gz creation failed", and then the daemon could no longer
+# write status.json either, so the admin panel reported a problem nowhere near
+# the cause. Small transient state stays in /run; the blobs go on disk.
+_sync_src="$(cat "$SCRIPT_DIR/../pihole-ha-sync")"
+_pull_src="$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")"
+
+assert_contains "the payload is written to disk"   "$_sync_src" 'PAYLOAD_FILE="$SYNC_BLOB_DIR/sync-payload.tar.gz"'
+assert_contains "the manifest is written to disk"  "$_sync_src" 'MANIFEST_FILE="$SYNC_BLOB_DIR/sync-manifest.json"'
+assert_contains "the blob dir is a disk path"      "$_sync_src" 'SYNC_BLOB_DIR="/var/lib/pihole-ha"'
+assert_not_contains "the payload is not in /run"   "$_sync_src" 'PAYLOAD_FILE="$SYNC_DIR'
+assert_not_contains "build staging is not in /tmp" "$_sync_src" 'STAGING_DIR="/tmp/'
+assert_not_contains "pull staging is not in /tmp"  "$_pull_src" 'STAGING_DIR="/tmp/'
+# Small, genuinely transient state SHOULD stay in /run.
+assert_contains "the build hash stays in /run" "$_sync_src" 'HASH_FILE="$SYNC_DIR/last-sync-hash"'
+assert_contains "the pull hash stays in /run"  "$_pull_src" 'LAST_HASH_FILE="$SYNC_DIR/last-pull-hash"'
+# A failed build must say why -- "tar.gz creation failed" alone explains nothing.
+assert_contains "a failed build reports free space" "$_sync_src" "free_mb="
+# The dash must still find a payload built by the previous version.
+assert_contains "the dash falls back to the old tmpfs path" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-dash")" '/run/pihole-ha/sync-payload.tar.gz'
+# Upgrades must reclaim the tmpfs the old layout consumed.
+assert_contains "the installer reclaims the old tmpfs payload" \
+    "$(cat "$SCRIPT_DIR/../install.sh")" "rm -f /run/pihole-ha/sync-payload.tar.gz"
+
+echo
+echo "=== A truncated status file must never replace a good one ==="
+# ------------------------------------------------------------
+# When the filesystem filled, each printf failed but the truncated leftover was
+# moved over the live status.json anyway, so the panel read invalid JSON and
+# reported something unrelated. Verified on a real full tmpfs: the previous
+# status file is kept and still parses.
+_ws="$(extract_fn "$SCRIPT_DIR/../pihole-ha" write_status)"
+assert_contains "an incomplete status file is rejected"     "$_ws" 'tail -c 3'
+assert_contains "the failure is reported with free space"   "$_ws" "event=status_write_failed"
+assert_contains "the previous status file is kept"          "$_ws" "keeping the previous one"
+# The guard has to run BEFORE the file is promoted, or it guards nothing.
+_before_mv="${_ws%%mv \"\$tmp\"*}"
+assert_contains "the check precedes the promotion" "$_before_mv" "status_write_failed"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do

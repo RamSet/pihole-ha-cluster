@@ -29,12 +29,23 @@ for (( _ri=0; _ri<NODE_COUNT; _ri++ )); do
 done
 
 LOCAL_IP="$(platform_get_local_ip)"
+# Bulk sync artifacts live on DISK, not in /run.
+#
+# /run is tmpfs, sized by default at 10% of RAM. The payload is a full copy of
+# gravity.db -- tens of megabytes -- so on a Raspberry Pi (182M of /run on a 1GB
+# board) a single build could not fit. It filled tmpfs, tar died with the
+# useless "tar.gz creation failed", and then everything else that writes to
+# /run went down with it: the daemon could no longer write status.json, so the
+# admin panel had nothing to read and reported a problem nowhere near the cause.
+# Small, genuinely transient state (status.json, role markers, hashes) stays in
+# /run where it belongs; the big blobs do not.
+SYNC_BLOB_DIR="/var/lib/pihole-ha"
 SYNC_DIR="/run/pihole-ha"
 LAST_HASH_FILE="$SYNC_DIR/last-pull-hash"
-STAGING_DIR="/tmp/pihole-ha-pull-staging"
+STAGING_DIR="$SYNC_BLOB_DIR/staging-pull"
 SYNC_CONF="/etc/pihole-ha/sync.conf"
 
-mkdir -p "$SYNC_DIR"
+mkdir -p "$SYNC_DIR" "$SYNC_BLOB_DIR"
 
 # Determine this node's index and role
 MY_IDX=-1

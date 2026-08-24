@@ -245,8 +245,13 @@ if [[ "${1:-}" == "--handle" ]]; then
         fi
     }
 
-    SYNC_MANIFEST="/run/pihole-ha/sync-manifest.json"
-    SYNC_PAYLOAD="/run/pihole-ha/sync-payload.tar.gz"
+    # On disk, not /run -- see the note in pihole-ha-sync. Fall back to the old
+    # tmpfs location so a node still serves its payload before its first
+    # post-upgrade build has run.
+    SYNC_MANIFEST="/var/lib/pihole-ha/sync-manifest.json"
+    SYNC_PAYLOAD="/var/lib/pihole-ha/sync-payload.tar.gz"
+    [[ -f "$SYNC_MANIFEST" ]] || SYNC_MANIFEST="/run/pihole-ha/sync-manifest.json"
+    [[ -f "$SYNC_PAYLOAD" ]]  || SYNC_PAYLOAD="/run/pihole-ha/sync-payload.tar.gz"
     SYNC_CONF="/etc/pihole-ha/sync.conf"
 
     # Who may enable/disable the VIP from the UI:

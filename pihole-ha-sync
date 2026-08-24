@@ -30,14 +30,29 @@ for (( _ri=0; _ri<NODE_COUNT; _ri++ )); do
 done
 
 LOCAL_IP="$(platform_get_local_ip)"
+# Bulk sync artifacts live on DISK, not in /run.
+#
+# /run is tmpfs, sized by default at 10% of RAM. The payload is a full copy of
+# gravity.db -- tens of megabytes -- so on a Raspberry Pi (182M of /run on a 1GB
+# board) a single build could not fit. It filled tmpfs, tar died with the
+# useless "tar.gz creation failed", and then everything else that writes to
+# /run went down with it: the daemon could no longer write status.json, so the
+# admin panel had nothing to read and reported a problem nowhere near the cause.
+# Small, genuinely transient state (status.json, role markers, hashes) stays in
+# /run where it belongs; the big blobs do not.
+SYNC_BLOB_DIR="/var/lib/pihole-ha"
 SYNC_DIR="/run/pihole-ha"
 HASH_FILE="$SYNC_DIR/last-sync-hash"
-PAYLOAD_FILE="$SYNC_DIR/sync-payload.tar.gz"
-MANIFEST_FILE="$SYNC_DIR/sync-manifest.json"
-STAGING_DIR="/tmp/pihole-ha-sync-staging"
+PAYLOAD_FILE="$SYNC_BLOB_DIR/sync-payload.tar.gz"
+MANIFEST_FILE="$SYNC_BLOB_DIR/sync-manifest.json"
+# Staging holds another full gravity.db copy, and /tmp is tmpfs on a stock
+# Raspberry Pi too -- so staging there doubled the RAM cost of a sync.
+STAGING_DIR="$SYNC_BLOB_DIR/staging-build"
 SYNC_CONF="/etc/pihole-ha/sync.conf"
 
-mkdir -p "$SYNC_DIR"
+mkdir -p "$SYNC_DIR" "$SYNC_BLOB_DIR"
+# Reclaim the tmpfs space earlier versions used for these.
+rm -f /run/pihole-ha/sync-payload.tar.gz /run/pihole-ha/sync-manifest.json 2>/dev/null || true
 
 # Determine this node's index and role
 MY_IDX=-1
@@ -295,7 +310,11 @@ fi
 
 # Build tar.gz payload
 tar -czf "$PAYLOAD_FILE.tmp" -C "$STAGING_DIR" $TAR_FILES 2>/dev/null || {
-    log_error "event=build_fail reason=\"tar.gz creation failed\""
+    # Name the usual cause. "tar.gz creation failed" on its own sent someone
+    # hunting through logs for an hour while the disk was simply full.
+    _avail="$(df -Pk "$SYNC_BLOB_DIR" 2>/dev/null | awk 'NR==2{print int($4/1024)}')"
+    log_error "event=build_fail reason=\"tar.gz creation failed\" free_mb=${_avail:-unknown} dir=$SYNC_BLOB_DIR"
+    rm -f "$PAYLOAD_FILE.tmp"
     rm -rf "$STAGING_DIR"
     exit 1
 }
