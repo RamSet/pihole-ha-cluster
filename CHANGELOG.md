@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.12.11 — 2026-08-23
+- Say what actually failed when the HA panel cannot load
+
 ## v3.12.10 — 2026-08-22
 - Fix the installer failing on Arch and misreporting the Pi-hole port
 
