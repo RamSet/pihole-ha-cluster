@@ -247,6 +247,12 @@ if [[ "${1:-}" == "--update" ]]; then
         [[ -f "$_u" ]] && cp "$_u" /etc/systemd/system/
     done
     systemctl daemon-reload 2>/dev/null || true
+    # Bulk sync artifacts moved from /run (tmpfs) to disk. Do this on the update
+    # path too, not just a fresh install: a standby never runs the build script,
+    # which is the only other thing that clears the old copy, so without this it
+    # would keep tens of megabytes of tmpfs occupied forever after upgrading.
+    mkdir -p /var/lib/pihole-ha && chmod 755 /var/lib/pihole-ha
+    rm -f /run/pihole-ha/sync-payload.tar.gz /run/pihole-ha/sync-manifest.json 2>/dev/null || true
     # re-inject the admin panel with the refreshed files
     [[ -x /usr/local/bin/pihole-ha-inject ]] && /usr/local/bin/pihole-ha-inject >/dev/null 2>&1 || true
     # restart the running services so the new code takes effect

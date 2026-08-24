@@ -849,6 +849,12 @@ assert_contains "the dash falls back to the old tmpfs path" \
 # Upgrades must reclaim the tmpfs the old layout consumed.
 assert_contains "the installer reclaims the old tmpfs payload" \
     "$(cat "$SCRIPT_DIR/../install.sh")" "rm -f /run/pihole-ha/sync-payload.tar.gz"
+# ...and specifically on the --update path. A standby never runs the build
+# script, which is the only other thing that clears the old copy, so an upgrade
+# that skips this leaves tens of megabytes of tmpfs occupied forever.
+_upd_branch="$(sed -n '/--update/,/^fi$/p' "$SCRIPT_DIR/../install.sh")"
+assert_contains "the update path reclaims it too" "$_upd_branch" "rm -f /run/pihole-ha/sync-payload.tar.gz"
+assert_contains "the update path creates the disk dir" "$_upd_branch" "mkdir -p /var/lib/pihole-ha"
 
 echo
 echo "=== A truncated status file must never replace a good one ==="
