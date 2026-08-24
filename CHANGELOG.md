@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.12.12 — 2026-08-24
+- Stop the config payload from filling memory on small systems
+
 ## v3.12.11 — 2026-08-23
 - Say what actually failed when the HA panel cannot load
 
