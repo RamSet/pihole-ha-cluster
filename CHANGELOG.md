@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.12.13 — 2026-08-24
+- Reclaim the old memory-disk payload when updating, not only on a fresh install
+
 ## v3.12.12 — 2026-08-24
 - Stop the config payload from filling memory on small systems
 
