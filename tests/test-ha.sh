@@ -781,6 +781,45 @@ assert_contains "a password-protected Pi-hole still counts as Pi-hole" "$_probe"
 assert_not_contains "the probe does not use curl -f" "$_probe" "curl -sf"
 
 # ============================================================
+echo
+echo "=== Panel errors must name the component that actually failed ==="
+# ------------------------------------------------------------
+# The panel's status call goes to Pi-hole's OWN web server (ha-api, same
+# origin); it reads the status file directly and never touches port 8887. Every
+# failure -- 404, a login redirect, a Lua error, a timeout -- used to print
+# "Cannot reach the local HA service on port 8887", which sent a user off
+# debugging a socat listener that was healthy the whole time while the real
+# cause went unmentioned. Confirmed against a password-protected Pi-hole: the
+# panel API answers 302 to the login page, which jQuery reports as a parse
+# error, not as a connection failure.
+_js="$(cat "$SCRIPT_DIR/../ha.js")"
+assert_not_contains "the panel no longer blames port 8887 for every failure" \
+    "$_js" "Cannot reach the local HA service on port 8887"
+assert_contains "a login redirect is reported as a session problem" "$_js" "parsererror"
+assert_contains "a missing ha-api page names the injector fix"       "$_js" "pihole-ha-inject"
+assert_contains "an HTTP status is surfaced to the user"             "$_js" "xhr.status"
+assert_contains "the failure handler receives the xhr"               "$_js" "showHaError(null, xhr, textStatus)"
+assert_not_contains "the static fallback text drops the 8887 claim" \
+    "$(cat "$SCRIPT_DIR/../ha.lp")" "Cannot reach the local HA service on port 8887"
+
+echo
+echo "=== A peer we cannot authenticate to must say so ==="
+# ------------------------------------------------------------
+# A peer that fails authentication is treated as DOWN, so every node elects
+# itself publisher and nothing is ever pulled: config sync stops dead with no
+# error anywhere. Verified live by emptying auth.conf on a running cluster.
+_ha_src="$(cat "$SCRIPT_DIR/../pihole-ha")"
+assert_contains "an unauthenticatable peer is logged"          "$_ha_src" "event=peer_auth_missing"
+assert_contains "a rejected password is logged distinctly"     "$_ha_src" "event=peer_auth_denied"
+assert_contains "the warning names the file and key to set"    "$_ha_src" 'PASS_${ip//./_}'
+assert_contains "the warning says sync will not run"           "$_ha_src" "config sync will not run"
+# Must not fire for our own address: a failed self-check never gates publishing,
+# so claiming sync is broken there would be false.
+assert_contains "the warning is limited to real peers" "$_ha_src" '"$ip" != "$LOCAL_IP" && "${peer_auth_warned[$ip]:-}"'
+# Must not repeat every 10s check cycle.
+assert_contains "the warning is emitted once per peer" "$_ha_src" "peer_auth_warned[\$ip]=\"true\""
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do

@@ -116,9 +116,9 @@ $(function () {
                 showHaError(data && data.error);
             }
         })
-        .fail(function () {
+        .fail(function (xhr, textStatus) {
             statusData = null;
-            showHaError(null);
+            showHaError(null, xhr, textStatus);
         })
         .always(function () {
             renderOverview();
@@ -167,12 +167,41 @@ $(function () {
 
     // reason === null means the request itself failed; anything else is an
     // error string the dashboard returned, which means it is reachable.
-    function showHaError(reason) {
+    function showHaError(reason, xhr, textStatus) {
         var title, text;
         if (reason === null || reason === undefined) {
-            title = "Connection Error";
-            text = "Cannot reach the local HA service on port 8887. Is " +
-                   "<code>pihole-ha-dash</code> running?";
+            // This request goes to Pi-hole's own web server (ha-api, same origin),
+            // NOT to port 8887 -- the panel API reads the status file directly.
+            // Blaming 8887 for any failure here sent at least one person off
+            // debugging a socat listener that was healthy the whole time, so
+            // name what actually failed instead.
+            var code = xhr ? xhr.status : 0;
+            title = "Cannot load HA status";
+            if (textStatus === "parsererror") {
+                title = "Not logged in";
+                text = "Pi-hole answered the panel with something other than data " +
+                       "&mdash; almost always its login page. Your admin session has " +
+                       "probably expired: reload this page and log in again.";
+            } else if (code === 404) {
+                text = "Pi-hole's web server has no <code>ha-api</code> page " +
+                       "(404). The admin files were likely replaced by a Pi-hole " +
+                       "update. Re-run <code>sudo pihole-ha-inject</code> " +
+                       "(or <code>sudo ./install.sh --update</code>) to put them back.";
+            } else if (code === 401 || code === 403) {
+                title = "Not logged in";
+                text = "Pi-hole refused the panel's request (" + code + "). Reload " +
+                       "this page and log in again.";
+            } else if (code === 0) {
+                text = "The request to Pi-hole's web server did not complete " +
+                       "(it timed out, or the page was closed mid-request). If this " +
+                       "persists, check that Pi-hole's web interface itself is healthy.";
+            } else {
+                text = "Pi-hole's web server returned HTTP " + code + " for the " +
+                       "<code>ha-api</code> page. Check Pi-hole's own web interface " +
+                       "first; this panel is served by it.";
+            }
+            text += " <br><small>This panel talks to Pi-hole's web server, not to " +
+                    "port 8887 &mdash; a listener on 8887 being up does not rule this out.</small>";
         } else if (String(reason).indexOf("no status file") !== -1) {
             title = "HA daemon not running";
             text = "<code>pihole-ha-dash</code> is reachable, but the " +

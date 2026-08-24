@@ -132,7 +132,7 @@ ensure_ftl_running() {
 
 declare -i activate_count=0 deactivate_count=0 stable_count=0
 declare -A peer_ping peer_dns peer_api peer_dhcp peer_leases peer_clients peer_auth
-declare -A peer_password peer_sid
+declare -A peer_password peer_sid peer_auth_warned
 
 # Load per-node Pi-hole API passwords (for password-protected instances)
 # Format: PASS_10_33_47_5=secretpass (dots replaced with underscores)
@@ -509,10 +509,29 @@ check_peer() {
             peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="\"denied\""; return
         }
         if [[ "$resp" == *'"unauthorized"'* ]]; then
-            peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="\"denied\""; return
+            peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="\"denied\""
+            # Say this out loud, once per peer. A peer we cannot authenticate to
+            # is treated as DOWN, so every node elects itself publisher and
+            # nothing is ever pulled -- config sync silently stops dead. Without
+            # a line naming the cause, the only visible symptom is a repeated
+            # sync_promote and records that never arrive.
+            # Only for real peers: a failed check against our OWN API never
+            # gates publishing (is_alive_for_publish short-circuits on self), so
+            # warning that sync will stop would be false there.
+            if [[ "$ip" != "$LOCAL_IP" && "${peer_auth_warned[$ip]:-}" != "true" ]]; then
+                peer_auth_warned[$ip]="true"
+                if [[ -z "${peer_password[$ip]:-}" ]]; then
+                    log_warn "event=peer_auth_missing peer=$ip reason=\"peer's Pi-hole needs a password and none is set for it here — add it in the HA panel (Cluster Nodes) or in $AUTH_CONF as PASS_${ip//./_}=... ; until then this peer counts as down and config sync will not run\""
+                else
+                    log_warn "event=peer_auth_denied peer=$ip reason=\"the password configured here was rejected by that peer's Pi-hole — until it is corrected this peer counts as down and config sync will not run\""
+                fi
+            fi
+            return
         fi
     fi
     peer_api[$ip]="true"
+    # Recovered: allow a future failure to warn again.
+    peer_auth_warned[$ip]="false"
     # Distinguish "authenticated with a session" from "open, no password". We only
     # ever hold a SID for a peer we actually logged into (ensure_sid no-ops when no
     # password is configured), so a successful call with no SID means the peer has
