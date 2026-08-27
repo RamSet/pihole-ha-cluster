@@ -872,6 +872,36 @@ _before_mv="${_ws%%mv \"\$tmp\"*}"
 assert_contains "the check precedes the promotion" "$_before_mv" "status_write_failed"
 
 # ============================================================
+echo
+echo "=== The sync storage location is per-node and overridable ==="
+# ------------------------------------------------------------
+# Storage layout is a property of the machine, not the cluster: one node may
+# have an SSD at /mnt/ssd and its peer none. sync.conf is shipped INSIDE the
+# payload and applied on every node, so putting a path there would push one
+# machine's layout onto peers that cannot honour it. nodes.conf is local.
+for _f in pihole-ha-sync pihole-ha-sync-pull; do
+    _src="$(cat "$SCRIPT_DIR/../$_f")"
+    assert_contains "$_f honours SYNC_BLOB_DIR from nodes.conf" "$_src" 'SYNC_BLOB_DIR="${SYNC_BLOB_DIR:-/var/lib/pihole-ha}"'
+    assert_contains "$_f rejects a relative path"               "$_src" '"$SYNC_BLOB_DIR" != /*'
+    assert_contains "$_f falls back instead of failing"         "$_src" "event=blob_dir_unusable"
+done
+# It must NOT be written into the file that gets synced to every node.
+_syncconf_block="$(sed -n '/cat > "\$SYNC_CONF"/,/^EOF$/p' "$SCRIPT_DIR/../docker/docker-entrypoint.sh")"
+assert_not_contains "the storage path is not put in the synced sync.conf" "$_syncconf_block" "SYNC_BLOB_DIR"
+_nodesconf_block="$(sed -n '/cat > "\$NODES_CONF"/,/^EOF$/p' "$SCRIPT_DIR/../docker/docker-entrypoint.sh")"
+assert_contains "docker writes it to the per-node nodes.conf" "$_nodesconf_block" "SYNC_BLOB_DIR="
+# The dash serves the payload, so it has to look in the same place.
+assert_contains "the dash honours the override" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-dash")" '_BLOB_DIR="${SYNC_BLOB_DIR:-/var/lib/pihole-ha}"'
+# Logging identity must be set before anything that can log, or the warning
+# above comes out with an empty role tag.
+for _f in pihole-ha-sync pihole-ha-sync-pull; do
+    _head="$(sed -n '1,/Where the bulk sync artifacts live/p' "$SCRIPT_DIR/../$_f")"
+    assert_contains "$_f sets its log identity before validating the path" "$_head" "PIHOLE_HA_LOG_TAG="
+done
+assert_contains "the option is documented" "$(cat "$SCRIPT_DIR/../README.md")" "SYNC_BLOB_DIR"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do

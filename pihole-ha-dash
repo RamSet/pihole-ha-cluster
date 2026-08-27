@@ -248,8 +248,10 @@ if [[ "${1:-}" == "--handle" ]]; then
     # On disk, not /run -- see the note in pihole-ha-sync. Fall back to the old
     # tmpfs location so a node still serves its payload before its first
     # post-upgrade build has run.
-    SYNC_MANIFEST="/var/lib/pihole-ha/sync-manifest.json"
-    SYNC_PAYLOAD="/var/lib/pihole-ha/sync-payload.tar.gz"
+    _BLOB_DIR="${SYNC_BLOB_DIR:-/var/lib/pihole-ha}"
+    [[ "$_BLOB_DIR" == /* ]] || _BLOB_DIR="/var/lib/pihole-ha"
+    SYNC_MANIFEST="$_BLOB_DIR/sync-manifest.json"
+    SYNC_PAYLOAD="$_BLOB_DIR/sync-payload.tar.gz"
     [[ -f "$SYNC_MANIFEST" ]] || SYNC_MANIFEST="/run/pihole-ha/sync-manifest.json"
     [[ -f "$SYNC_PAYLOAD" ]]  || SYNC_PAYLOAD="/run/pihole-ha/sync-payload.tar.gz"
     SYNC_CONF="/etc/pihole-ha/sync.conf"

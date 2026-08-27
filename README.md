@@ -136,6 +136,7 @@ VIP_ENABLED=true
 HA_ENABLED=true
 DHCP_HA=true
 PIN_DNS=true
+SYNC_BLOB_DIR=/var/lib/pihole-ha
 HA_NODES=192.168.1.3,192.168.1.5,192.168.1.55,192.168.1.81:8081
 DHCP_START=192.168.1.11
 DHCP_END=192.168.1.150
@@ -150,6 +151,7 @@ Nodes in `HA_NODES` can optionally include a `:PORT` suffix for the Pi-hole web 
 | `HA_ENABLED` | `true`/`false` | `true` | Master kill-switch for all HA functions |
 | `DHCP_HA` | `true`/`false` | `true` | `true` = DHCP-HA mode (manage DHCP + VIP). `false` = DNS-only (never touch DHCP; VIP follows the DNS-healthy primary if set) |
 | `PIN_DNS` | `true`/`false` | `true` | Pin this host's resolver to `127.0.0.1`. `false` = never touch system DNS |
+| `SYNC_BLOB_DIR` | absolute path | `/var/lib/pihole-ha` | Where the sync payload, manifest and staging copies are written. Point it at another volume to keep them off the SD card. Per-node and never synced — set it only on the machines that have that path; an unusable value falls back to the default and logs `blob_dir_unusable` |
 | `CHECK_INTERVAL` | seconds | `10` | How often each node health-checks its peers. Failover ≈ `CHECK_INTERVAL × ACTIVATE_AFTER` |
 | `ACTIVATE_AFTER` | integer | `2` | Consecutive failed checks before a standby takes over (the last node waits +2 to avoid a tie). Lower = faster failover, higher = ignores brief blips |
 | `DEACTIVATE_AFTER` | integer | `3` | Consecutive healthy checks before a standby yields back to a recovered primary |

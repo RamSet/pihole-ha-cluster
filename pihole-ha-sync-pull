@@ -39,7 +39,25 @@ LOCAL_IP="$(platform_get_local_ip)"
 # admin panel had nothing to read and reported a problem nowhere near the cause.
 # Small, genuinely transient state (status.json, role markers, hashes) stays in
 # /run where it belongs; the big blobs do not.
-SYNC_BLOB_DIR="/var/lib/pihole-ha"
+ROLE="SYNC-PULL"
+PIHOLE_HA_LOG_TAG="pihole-ha-sync-pull"  # _log/log_* come from pihole-ha-platform
+# Where the bulk sync artifacts live. Overridable per node in nodes.conf
+# (SYNC_BLOB_DIR=/mnt/ssd/pihole-ha) for anyone who wants them off the SD card
+# or onto a bigger volume.
+#
+# Deliberately NOT a sync.conf setting: that file is shipped inside the payload
+# and applied on every node, so a path that exists on one machine -- an SSD at
+# /mnt/ssd -- would be pushed onto peers that have no such mount and break them.
+# Storage layout is a property of the machine, not of the cluster.
+#
+# A bad value must not take sync down, so an unusable path falls back to the
+# default and says so rather than failing every build from then on.
+SYNC_BLOB_DIR="${SYNC_BLOB_DIR:-/var/lib/pihole-ha}"
+if [[ "$SYNC_BLOB_DIR" != /* ]] || ! mkdir -p "$SYNC_BLOB_DIR" 2>/dev/null || [[ ! -w "$SYNC_BLOB_DIR" ]]; then
+    log_warn "event=blob_dir_unusable configured=\"$SYNC_BLOB_DIR\" reason=\"not an absolute path, or could not be created/written — falling back to /var/lib/pihole-ha\""
+    SYNC_BLOB_DIR="/var/lib/pihole-ha"
+    mkdir -p "$SYNC_BLOB_DIR" 2>/dev/null || true
+fi
 SYNC_DIR="/run/pihole-ha"
 LAST_HASH_FILE="$SYNC_DIR/last-pull-hash"
 STAGING_DIR="$SYNC_BLOB_DIR/staging-pull"
@@ -56,8 +74,6 @@ done
 
 MY_ROLE="${ROLES[$MY_IDX]}"
 
-ROLE="SYNC-PULL"
-PIHOLE_HA_LOG_TAG="pihole-ha-sync-pull"  # _log/log_* come from pihole-ha-platform
 
 # Pushover load+send come from pihole-ha-platform. Oneshot scripts run
 # notify() synchronously — the script exits as soon as it finishes, so
