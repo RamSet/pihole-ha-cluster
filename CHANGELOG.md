@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.12.14 — 2026-08-26
+- Let each node choose where its sync files are stored
+
 ## v3.12.13 — 2026-08-24
 - Reclaim the old memory-disk payload when updating, not only on a fresh install
 
