@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.12.15 — 2026-08-27
+- Report the hash that actually changes, and stop failed builds inflating the version
+
 ## v3.12.14 — 2026-08-26
 - Let each node choose where its sync files are stored
 
