@@ -915,6 +915,15 @@ _hash_line="$(grep -n '_h=' "$SCRIPT_DIR/../pihole-ha-debug" | head -1)"
 assert_not_contains "the HASH column is not gravity_md5" "$_hash_line" "gravity_md5"
 assert_contains     "the HASH column reads the config hash" "$_hash_line" '"hash"'
 
+# The payload moved off /run in 3.12.12; this tool kept looking in the old place
+# and so reported "(none built on this node)" on every node since -- on the very
+# line people read to decide whether the publisher is publishing at all.
+assert_contains "the debug tool looks for the payload in the blob dir" "$_dbg" 'BLOB_DIR/sync-payload.tar.gz'
+assert_contains "it honours a per-node override"                       "$_dbg" "sed -n 's/^SYNC_BLOB_DIR=//p'"
+assert_contains "it falls back to the pre-3.12.12 location"            "$_dbg" 'BLOB_DIR="$RUN_DIR"'
+# State that genuinely stayed in /run must keep reading from there.
+assert_contains "the pull hash is still read from /run" "$_dbg" 'RUN_DIR/last-pull-hash'
+
 echo
 echo "=== A failed build must not advance the config version ==="
 # ------------------------------------------------------------

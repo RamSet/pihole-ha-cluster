@@ -9,6 +9,15 @@
 
 CONF_DIR="/etc/pihole-ha"
 RUN_DIR="/run/pihole-ha"
+# The payload moved out of /run (tmpfs) onto disk, and is overridable per node.
+# This tool kept looking in the old place and so reported "(none built on this
+# node)" on every node, on a line people read to decide whether the publisher is
+# publishing at all -- while the payload sat exactly where it was configured to.
+BLOB_DIR="$(sed -n 's/^SYNC_BLOB_DIR=//p' "$CONF_DIR/nodes.conf" 2>/dev/null | tail -1)"
+[[ "$BLOB_DIR" == /* ]] || BLOB_DIR="/var/lib/pihole-ha"
+# Fall back to the pre-3.12.12 location so this still reports honestly on a node
+# that has not rebuilt since upgrading.
+[[ -f "$BLOB_DIR/sync-payload.tar.gz" ]] || BLOB_DIR="$RUN_DIR"
 SHARE_DIR="/usr/local/share/pihole-ha"
 
 _hr()  { printf '\n===== %s =====\n' "$1"; }
@@ -125,10 +134,10 @@ printf 'sync role file:   %s\n' "$(cat "$RUN_DIR/sync-role" 2>/dev/null || echo 
 printf 'config version:   %s\n' "$(cat "$CONF_DIR/sync-version" 2>/dev/null || echo '(none)')"
 printf 'generation:       %s\n' "$(cat "$CONF_DIR/sync-generation" 2>/dev/null || echo '(none)')"
 printf 'last pulled hash: %s\n' "$(cat "$RUN_DIR/last-pull-hash" 2>/dev/null || echo '(never pulled)')"
-if [[ -f "$RUN_DIR/sync-payload.tar.gz" ]]; then
+if [[ -f "$BLOB_DIR/sync-payload.tar.gz" ]]; then
     printf 'local payload:    %s bytes, built %s\n' \
-        "$(stat -c%s "$RUN_DIR/sync-payload.tar.gz" 2>/dev/null)" \
-        "$(date -r "$RUN_DIR/sync-payload.tar.gz" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null)"
+        "$(stat -c%s "$BLOB_DIR/sync-payload.tar.gz" 2>/dev/null)" \
+        "$(date -r "$BLOB_DIR/sync-payload.tar.gz" '+%Y-%m-%dT%H:%M:%S' 2>/dev/null)"
 else
     printf 'local payload:    (none built on this node)\n'
 fi
