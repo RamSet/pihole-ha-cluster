@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.12.16 — 2026-08-27
+- Report the local payload again in the diagnostics
+
 ## v3.12.15 — 2026-08-27
 - Report the hash that actually changes, and stop failed builds inflating the version
 
