@@ -902,6 +902,41 @@ done
 assert_contains "the option is documented" "$(cat "$SCRIPT_DIR/../README.md")" "SYNC_BLOB_DIR"
 
 # ============================================================
+echo
+echo "=== Diagnostics must report the hash that actually moves ==="
+# ------------------------------------------------------------
+# The debug tool's manifest table filled its HASH column from gravity_md5, which
+# only changes when the blocklists change. Two nodes days apart in config showed
+# an identical frozen value, directly beneath a line telling the reader to look
+# at whichever node's hash differs. Confirmed live: config hash 31750dd1...,
+# gravity_md5 c59f12a9... -- the table was showing the wrong one.
+_dbg="$(cat "$SCRIPT_DIR/../pihole-ha-debug")"
+_hash_line="$(grep -n '_h=' "$SCRIPT_DIR/../pihole-ha-debug" | head -1)"
+assert_not_contains "the HASH column is not gravity_md5" "$_hash_line" "gravity_md5"
+assert_contains     "the HASH column reads the config hash" "$_hash_line" '"hash"'
+
+echo
+echo "=== A failed build must not advance the config version ==="
+# ------------------------------------------------------------
+# The version was written to disk before the payload was built, so every failed
+# build advanced it with nothing to match. A node whose disk was full reached
+# version 112 while still serving the payload it built at version 2 -- and the
+# version is what peers compare to decide who is newer. Verified live: a build
+# that fails leaves the file untouched, the next successful one advances it.
+_sync_src="$(cat "$SCRIPT_DIR/../pihole-ha-sync")"
+# The write must come after the manifest exists, not before the build.
+_after_manifest="${_sync_src##*mv \"\$MANIFEST_FILE.tmp\" \"\$MANIFEST_FILE\"}"
+assert_contains "the version is persisted only after the manifest is written" \
+    "$_after_manifest" 'echo "$CONFIG_VERSION" > "$VER_FILE"'
+# ...and nowhere before it.
+_before_build="${_sync_src%%log_info \"event=build_start*}"
+assert_not_contains "the version is not persisted before the build" \
+    "$_before_build" 'echo "$CONFIG_VERSION" > "$VER_FILE"'
+# The bump must not be announced for a build that then fails.
+assert_contains "the bump is logged where it is persisted" \
+    "$_after_manifest" "event=version_bump"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do

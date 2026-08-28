@@ -258,10 +258,14 @@ fi
 # adopted a peer's higher version. This is the number other nodes compare to
 # decide who holds the newest config.
 CONFIG_VERSION="$(cat "$VER_FILE" 2>/dev/null || echo 0)"
+# Decide the new version here, but do NOT persist it yet -- the build below can
+# still fail (no space, unreadable gravity.db). Recording it first meant every
+# failed build advanced the version with no payload to match, so a node whose
+# disk was full climbed to version 112 while still advertising the payload it
+# built at version 2. The number is meant to say "this is how new my config is",
+# and it can only honestly say that once the config has actually been written.
 if [[ "$CURRENT" != "$PREVIOUS" ]]; then
     CONFIG_VERSION=$(( CONFIG_VERSION + 1 ))
-    echo "$CONFIG_VERSION" > "$VER_FILE"
-    log_info "event=version_bump version=$CONFIG_VERSION"
 fi
 
 log_info "event=build_start reason=\"changes detected\""
@@ -371,6 +375,14 @@ printf '{"timestamp":"%s","hash":"%s","config_version":%d,"gravity_md5":"%s","si
     "$TIMESTAMP" "$CURRENT" "$CONFIG_VERSION" "$GRAVITY_MD5" "$PAYLOAD_SIZE" "$SIGNATURE" \
     "$SYNC_GRAVITY" "$SYNC_DHCP" "$SYNC_DNS" "$SYNC_SETTINGS" "$SYNC_NOTIFY" "$SYNCCONF_PRESENT" > "$MANIFEST_FILE.tmp"
 mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
+
+# The payload and the manifest describing it now exist, so the version is true.
+# Announced here, not where it was chosen: a build that fails afterwards would
+# otherwise log a bump that never happened.
+if [[ "$CURRENT" != "$PREVIOUS" ]]; then
+    echo "$CONFIG_VERSION" > "$VER_FILE"
+    log_info "event=version_bump version=$CONFIG_VERSION"
+fi
 
 # Cleanup staging
 rm -rf "$STAGING_DIR"

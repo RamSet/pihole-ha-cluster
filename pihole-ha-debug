@@ -170,7 +170,12 @@ for n in $_nodes_list; do
         continue
     fi
     _v="$(printf '%s' "$_man" | sed -n 's/.*"config_version"[: ]*"\?\([^",}]*\)"\?.*/\1/p' | head -1)"
-    _h="$(printf '%s' "$_man" | sed -n 's/.*"gravity_md5"[: ]*"\([^"]*\)".*/\1/p' | head -1)"
+    # The CONFIG hash -- the thing that actually advances when config changes and
+    # that a standby compares against. This read gravity_md5 for a while, which
+    # only moves when the blocklists change: two nodes days out of sync showed an
+    # identical, frozen value under a column captioned HASH, directly under a
+    # line telling the reader to look at whichever node's hash differs.
+    _h="$(printf '%s' "$_man" | sed -n 's/.*"hash"[: ]*"\([^"]*\)".*/\1/p' | head -1)"
     _t="$(printf '%s' "$_man" | sed -n 's/.*"timestamp"[: ]*"\([^"]*\)".*/\1/p' | head -1)"
     _g="$(curl -sf --max-time 4 "http://$ip:8887/api/sync/generation" 2>/dev/null | sed -n 's/.*"generation"[: ]*\([0-9]*\).*/\1/p')"
     printf '%-18s %-8s %-6s %-34s %s\n' "$ip" "${_v:--}" "${_g:--}" "${_h:--}" "${_t:--}"
