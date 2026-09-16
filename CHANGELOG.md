@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.12.17 — 2026-09-16
+- Keep sync timers firing after a reboot once the interval is changed
+
 ## v3.12.16 — 2026-08-27
 - Report the local payload again in the diagnostics
 
