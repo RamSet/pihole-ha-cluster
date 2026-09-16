@@ -198,11 +198,29 @@ platform_ftl_restart() {
     fi
 }
 
+# A timer can be active and still never fire again. systemd calls that state
+# "elapsed": no trigger is left to wait on -- e.g. a timer holding only
+# OnUnitActiveSec= after a reboot, which counts from a service run that has not
+# happened yet. `is-active` answers "active" for it all the same, which is how
+# issue #7 went unnoticed on both nodes.
+_sync_timer_elapsed() {
+    [[ "$(systemctl show -p SubState --value "$1" 2>/dev/null)" == "elapsed" ]]
+}
+
+# Start a sync timer so that it will actually fire. Running the service once
+# gives OnUnitActiveSec= the anchor it counts from, re-arming an elapsed timer.
+_sync_timer_start() {
+    systemctl start "$1.timer" 2>/dev/null || true
+    if _sync_timer_elapsed "$1.timer"; then
+        systemctl start --no-block "$1.service" 2>/dev/null || true
+    fi
+}
+
 platform_sync_enable() {
     if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
         touch /run/pihole-ha/sync-enabled
     else
-        systemctl start pihole-ha-sync.timer 2>/dev/null || true
+        _sync_timer_start pihole-ha-sync
     fi
 }
 
@@ -218,17 +236,18 @@ platform_sync_pull_enable() {
     if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
         touch /run/pihole-ha/sync-pull-enabled
     else
-        systemctl start pihole-ha-sync-pull.timer 2>/dev/null || true
+        _sync_timer_start pihole-ha-sync-pull
     fi
 }
 
 # Is the role's timer actually running? The role bookkeeping below is only
-# believed state; these report the real thing.
+# believed state; these report the real thing -- active AND due to fire again.
 platform_sync_is_running() {
     if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
         [[ -f /run/pihole-ha/sync-enabled ]]
     else
-        systemctl is-active --quiet pihole-ha-sync.timer 2>/dev/null
+        systemctl is-active --quiet pihole-ha-sync.timer 2>/dev/null &&
+            ! _sync_timer_elapsed pihole-ha-sync.timer
     fi
 }
 
@@ -236,7 +255,8 @@ platform_sync_pull_is_running() {
     if [[ "$PIHOLE_HA_PLATFORM" == "docker" ]]; then
         [[ -f /run/pihole-ha/sync-pull-enabled ]]
     else
-        systemctl is-active --quiet pihole-ha-sync-pull.timer 2>/dev/null
+        systemctl is-active --quiet pihole-ha-sync-pull.timer 2>/dev/null &&
+            ! _sync_timer_elapsed pihole-ha-sync-pull.timer
     fi
 }
 
@@ -258,13 +278,21 @@ platform_sync_set_interval() {
         # environment, so the panel's interval was ignored on Docker.)
         :
     else
-        # Write systemd timer drop-ins for both sync and sync-pull
+        # Write systemd timer drop-ins for both sync and sync-pull.
+        # The empty assignment is the only way to replace the unit's interval,
+        # but systemd reads it as "reset EVERY trigger", so it also erased the
+        # unit's OnActiveSec= -- the one trigger that does not need the service
+        # to have run already. Changing the interval once left both timers
+        # active but dead after the next reboot (issue #7). Carry every other
+        # trigger the unit declares back in after the reset.
         for unit in pihole-ha-sync.timer pihole-ha-sync-pull.timer; do
-            local dir="/etc/systemd/system/${unit}.d"
+            local dir="/etc/systemd/system/${unit}.d" keep
+            keep="$(grep -E '^On[A-Za-z]+=' "/etc/systemd/system/$unit" 2>/dev/null | grep -v '^OnUnitActiveSec=' || true)"
             mkdir -p "$dir"
             cat > "$dir/interval.conf" <<EOF
 [Timer]
 OnUnitActiveSec=
+${keep}
 OnUnitActiveSec=${minutes}min
 EOF
         done

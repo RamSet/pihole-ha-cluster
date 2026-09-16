@@ -214,6 +214,17 @@ _save_orig() {
     printf '%s=%s\n' "$key" "$val" >> "$f"
 }
 
+# Rewrite the sync timers' interval drop-ins from sync.conf using the platform
+# code just installed. A drop-in written by an older version erased the timers'
+# OnActiveSec= (issue #7), and refreshing the unit files alone leaves it in
+# place. Subshell, so the platform library cannot redefine anything here.
+_reapply_sync_interval() {
+    local iv
+    iv="$(grep -E '^SYNC_INTERVAL=' /etc/pihole-ha/sync.conf 2>/dev/null | cut -d= -f2 || true)"
+    [[ -n "$iv" && -f /usr/local/lib/pihole-ha/pihole-ha-platform ]] || return 0
+    ( . /usr/local/lib/pihole-ha/pihole-ha-platform && platform_sync_set_interval "$iv" ) >/dev/null 2>&1 || true
+}
+
 # --- 1c. Update mode: refresh code only, keep config + cluster membership ---
 if [[ "${1:-}" == "--update" ]]; then
     printf "\\n  %b ${COL_BOLD}Update pihole-ha (code only)${COL_NC}\\n" "${INFO}"
@@ -247,6 +258,7 @@ if [[ "${1:-}" == "--update" ]]; then
         [[ -f "$_u" ]] && cp "$_u" /etc/systemd/system/
     done
     systemctl daemon-reload 2>/dev/null || true
+    _reapply_sync_interval
     # Bulk sync artifacts moved from /run (tmpfs) to disk. Do this on the update
     # path too, not just a fresh install: a standby never runs the build script,
     # which is the only other thing that clears the old copy, so without this it
@@ -1073,6 +1085,8 @@ printf "  %b Starting services..." "${INFO}"
 systemctl enable --now pihole-ha.service >/dev/null 2>&1
 systemctl enable --now pihole-ha-dash.service >/dev/null 2>&1
 printf "%b  %b Services started\\n" "${OVER}" "${TICK}"
+
+_reapply_sync_interval
 
 # Both timers run on every node. pihole-ha-sync and pihole-ha-sync-pull each
 # resolve their own role at runtime (the sync primary is NODES[0]) and skip when

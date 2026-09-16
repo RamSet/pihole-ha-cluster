@@ -935,11 +935,13 @@ manage_sync_role() {
         # role CHANGES, so a node that already believes it is the publisher never
         # re-checks that its build timer is actually running -- and if something
         # stopped it (a demotion during a failover, a manual stop), it stays
-        # stopped forever. The primary then serves no manifest, every standby
+        # stopped forever. "Running" also means due to fire: a timer can be
+        # active with no trigger left to wait on (issue #7), which is just as
+        # dead. The primary then serves no manifest, every standby
         # logs "no peer has a manifest" on every tick, and nothing above INFO
         # says so. Converge the real state to the believed role each cycle.
         if ! platform_sync_is_running; then
-            log_warn "event=sync_timer_recovered role=publisher reason=\"build timer was not running\""
+            log_warn "event=sync_timer_recovered role=publisher reason=\"build timer was stopped or not due to fire\""
             platform_sync_enable
         fi
     else
@@ -960,7 +962,7 @@ manage_sync_role() {
         # needs -- stopping the other timer is what creates the trap, and the
         # sync scripts already exit early when the role is not theirs.
         if ! platform_sync_pull_is_running; then
-            log_warn "event=sync_timer_recovered role=standby reason=\"pull timer was not running\""
+            log_warn "event=sync_timer_recovered role=standby reason=\"pull timer was stopped or not due to fire\""
             platform_sync_pull_enable
         fi
     fi

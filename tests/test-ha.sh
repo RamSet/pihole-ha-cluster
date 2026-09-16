@@ -456,6 +456,70 @@ assert_contains "debug flags a publisher with no manifest" \
     "$(cat "$SCRIPT_DIR/../pihole-ha-debug")" "THIS IS THE PUBLISHER"
 
 # ============================================================
+# Sync timers must still fire after a reboot once the interval is changed
+# ------------------------------------------------------------
+# Issue #7: the interval drop-in opened with "OnUnitActiveSec=", which systemd
+# reads as "reset every trigger" -- so it also erased the unit's OnActiveSec=.
+# What was left counts from a service run, so after a reboot neither timer ever
+# fired. Both still reported "active", so the daemon's recovery check and the
+# debug bundle both called them healthy.
+_t7="$(mktemp -d)"
+cp "$SCRIPT_DIR/../pihole-ha-sync.timer" "$SCRIPT_DIR/../pihole-ha-sync-pull.timer" "$_t7/"
+(
+    PIHOLE_HA_PLATFORM=systemd
+    systemctl() { :; }
+    eval "$(extract_fn "$SCRIPT_DIR/../pihole-ha-platform" platform_sync_set_interval | sed "s#/etc/systemd/system#$_t7#g")"
+    platform_sync_set_interval 1
+)
+for _unit in pihole-ha-sync.timer pihole-ha-sync-pull.timer; do
+    _base_act="$(grep '^OnActiveSec=' "$_t7/$_unit")"
+    assert_contains "$_unit ships an OnActiveSec= trigger" "$_base_act" "OnActiveSec="
+    _drop="$(cat "$_t7/$_unit.d/interval.conf" 2>/dev/null)"
+    # Order matters: anything above the reset line is erased by it.
+    _after_reset="${_drop#*"OnUnitActiveSec="$'\n'}"
+    assert_contains "$_unit: interval drop-in restores $_base_act after the reset" "$_after_reset" "$_base_act"
+    assert_contains "$_unit: interval drop-in sets the new interval" "$_after_reset" "OnUnitActiveSec=1min"
+done
+rm -rf "$_t7"
+
+# "elapsed" is systemd's state for an active timer with no trigger left.
+_timer_probe() {
+    local active="$1" sub="$2" snippet="$3"
+    bash -c '
+        source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
+        PIHOLE_HA_PLATFORM=systemd
+        systemctl() {
+            case "$*" in
+                "is-active --quiet "*)          [[ "'"$active"'" == active ]] ;;
+                "show -p SubState --value "*)   echo "'"$sub"'" ;;
+                "start --no-block "*)           echo "KICKED ${*: -1}" ;;
+            esac
+        }
+        '"$snippet"'
+    ' 2>/dev/null
+}
+assert_eq "an active but elapsed build timer counts as not running" \
+    "" "$(_timer_probe active elapsed 'platform_sync_is_running && echo RUNNING')"
+assert_eq "an active but elapsed pull timer counts as not running" \
+    "" "$(_timer_probe active elapsed 'platform_sync_pull_is_running && echo RUNNING')"
+assert_eq "an active, waiting build timer counts as running" \
+    "RUNNING" "$(_timer_probe active waiting 'platform_sync_is_running && echo RUNNING')"
+assert_eq "starting an elapsed build timer runs the service once to re-arm it" \
+    "KICKED pihole-ha-sync.service" "$(_timer_probe active elapsed platform_sync_enable)"
+assert_eq "starting an elapsed pull timer runs the service once to re-arm it" \
+    "KICKED pihole-ha-sync-pull.service" "$(_timer_probe active elapsed platform_sync_pull_enable)"
+assert_eq "starting a waiting timer does not run the service early" \
+    "" "$(_timer_probe active waiting platform_sync_pull_enable)"
+
+# Nodes that already hold the old drop-in must get it rewritten on upgrade.
+assert_eq "installer re-applies the interval drop-in on update and on install" \
+    "2" "$(grep -cE '^[[:space:]]*_reapply_sync_interval$' "$SCRIPT_DIR/../install.sh")"
+assert_contains "the installer re-apply goes through the platform writer" \
+    "$(extract_fn "$SCRIPT_DIR/../install.sh" _reapply_sync_interval)" "platform_sync_set_interval"
+assert_contains "debug flags a timer that will never fire" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-debug")" '"$_s" == "elapsed"'
+
+# ============================================================
 # platform_get_local_ip must never return the VIP
 # ------------------------------------------------------------
 # `hostname -I` guarantees no ordering, so on a VIP-holding node the VIP can be

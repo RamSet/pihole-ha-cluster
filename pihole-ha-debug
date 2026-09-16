@@ -149,7 +149,13 @@ if _have systemctl; then
         # when it is genuinely empty.
         _a="$(systemctl is-active "$t" 2>/dev/null)"
         _e="$(systemctl is-enabled "$t" 2>/dev/null)"
-        printf '%-26s %s / %s\n' "$t" "${_a:-n/a}" "${_e:-n/a}"
+        _s="$(systemctl show -p SubState --value "$t" 2>/dev/null)"
+        printf '%-26s %s / %s (%s)\n' "$t" "${_a:-n/a}" "${_e:-n/a}" "${_s:-n/a}"
+        # "active / enabled" alone is what hid issue #7: an elapsed timer is
+        # active, has no trigger left, and will never run again.
+        if [[ "$_s" == "elapsed" ]]; then
+            printf '%-26s %s\n' "" "*** ACTIVE BUT NOTHING LEFT TO TRIGGER IT - this timer will never run ***"
+        fi
     done
 fi
 
@@ -169,7 +175,7 @@ for n in $_nodes_list; do
         if curl -sf --max-time 4 -o /dev/null "http://$ip:8887/api/status" 2>/dev/null; then
             if [[ "$ip" == "${_sync_primary%% *}" ]]; then
                 printf '%-18s %s\n' "$ip" "*** NO MANIFEST, BUT THIS IS THE PUBLISHER - nothing to sync from ***"
-                printf '%-18s %s\n' "" "   check on $ip: systemctl is-active pihole-ha-sync.timer"
+                printf '%-18s %s\n' "" "   check on $ip: systemctl show -p ActiveState -p SubState pihole-ha-sync.timer (SubState=elapsed means it will never fire)"
             else
                 printf '%-18s %s\n' "$ip" "(no manifest - normal for a standby that has never published)"
             fi
