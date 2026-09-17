@@ -414,7 +414,11 @@ ensure_sid() {
     # operator is not left guessing between "slow", "wrong password" and "full".
     peer_auth_next[$ip]=$(( now_s + AUTH_RETRY_SEC ))
     if (( rc == 28 )); then
-        peer_auth_why[$ip]="timed out after ${AUTH_TIMEOUT}s (the peer is still hashing the password — raise AUTH_TIMEOUT in nodes.conf)"
+        # Name the knob that exists on THIS deployment. Telling a Docker operator
+        # to edit nodes.conf sends them to a file the entrypoint regenerates.
+        local _hint="raise AUTH_TIMEOUT in nodes.conf"
+        [[ "${PIHOLE_HA_PLATFORM:-}" == "docker" ]] && _hint="raise PIHOLE_HA_AUTH_TIMEOUT in the container environment"
+        peer_auth_why[$ip]="timed out after ${AUTH_TIMEOUT}s (the peer is still hashing the password — ${_hint})"
     elif [[ "$resp" == *"seats exceeded"* ]]; then
         peer_auth_why[$ip]="the peer reports API seats exceeded (raise webserver.api.max_sessions there, and check nothing is opening sessions it never closes)"
     elif (( rc != 0 )); then

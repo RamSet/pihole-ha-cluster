@@ -52,7 +52,7 @@ _auth_countdown() {   # $1=peer $2=port $3=password $4=timeout
     if (( rc == 28 )); then
         printf "%b  %b %s did not answer the login within %ss\n" "${OVER}" "${CROSS}" "$peer" "$tmo" >&2
         printf "      Pi-hole hashes the password on purpose slowly; on a 1-core Pi this can take longer than %ss.\n" "$tmo" >&2
-        printf "      Raise AUTH_TIMEOUT in /etc/pihole-ha/nodes.conf on both nodes and try again.\n" >&2
+        printf "      Raise PIHOLE_HA_AUTH_TIMEOUT in the container environment on both nodes and try again.\n" >&2
     elif (( seats )); then
         printf "%b  %b %s reports API seats exceeded\n" "${OVER}" "${CROSS}" "$peer" >&2
         printf "      Raise webserver.api.max_sessions there, or restart pihole-FTL to drop stale sessions.\n" >&2

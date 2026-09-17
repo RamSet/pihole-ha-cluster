@@ -2,6 +2,10 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.13.1 — 2026-09-17
+- Make the login timeout tunable in Docker too, via `PIHOLE_HA_AUTH_TIMEOUT`
+- Point a login-timeout message at the knob that exists on that deployment
+
 ## v3.13.0 — 2026-09-17
 - Wait longer for a peer login, and show a countdown instead of appearing to hang
 - Say why a login failed: too slow, wrong password, unreachable, or out of API seats
