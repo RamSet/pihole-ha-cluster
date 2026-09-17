@@ -151,6 +151,16 @@ declare -A peer_password peer_sid peer_auth_warned peer_auth_next peer_auth_why
 # Format: PASS_10_33_47_5=secretpass (dots replaced with underscores)
 AUTH_CONF="/etc/pihole-ha/auth.conf"
 load_auth() {
+    # Runs every loop, so it is also where a password CHANGE is noticed. A new
+    # password is new information: it must clear that peer's retry backoff and
+    # cached session immediately, or the operator saves the fix in the panel and
+    # watches the Auth row sit there for up to AUTH_RETRY_SEC while the daemon
+    # honours a backoff from the old, wrong password. Cleared per peer, not
+    # wholesale — otherwise reloading every CHECK_INTERVAL would defeat the
+    # backoff entirely and put us back to re-hashing on every round.
+    local -A _was=()
+    local _k
+    for _k in "${!peer_password[@]}"; do _was[$_k]="${peer_password[$_k]}"; done
     peer_password=()
     [[ -f "$AUTH_CONF" ]] || return
     while IFS='=' read -r key val; do
@@ -158,6 +168,9 @@ load_auth() {
         local ip="${key#PASS_}"
         ip="${ip//_/.}"
         peer_password[$ip]="$val"
+        if [[ "${_was[$ip]:-}" != "$val" ]]; then
+            unset "peer_auth_next[$ip]" "peer_auth_why[$ip]" "peer_sid[$ip]" "peer_auth_warned[$ip]"
+        fi
     done < "$AUTH_CONF"
 }
 load_auth
@@ -387,7 +400,14 @@ get_dhcp() { platform_get_dhcp; }
 # API session seats ("API seats exceeded").
 ensure_sid() {
     local ip="$1"
-    [[ -z "${peer_password[$ip]:-}" ]] && return  # no password configured
+    if [[ -z "${peer_password[$ip]:-}" ]]; then
+        # auth.conf is per-node: each node holds the passwords for the peers IT
+        # talks to, and saving one in the panel writes it only on the node serving
+        # that panel. Setting it on one node and expecting the other to have it is
+        # the single most common way to end up here, so say so by name.
+        peer_auth_why[$ip]="no password for this peer is stored on THIS node (auth.conf is per-node — save it in this node's own HA panel, not a peer's)"
+        return
+    fi
     [[ -n "${peer_sid[$ip]:-}" ]] && return        # already have one — reuse it
     # Back off after a failure. Without this a peer that cannot authenticate is
     # re-hashed every CHECK_INTERVAL forever, which is itself enough to hold a
@@ -775,12 +795,19 @@ write_status() {
         local sep=""
         for (( i=0; i<NODE_COUNT; i++ )); do
             local ip="${NODES[$i]}"
-            printf '%s"%s":{"role":"%s","priority":%d,"ping":%s,"dns":%s,"api":%s,"dhcp":%s,"leases":%s,"clients":%s,"auth":%s}' \
+            # auth_why carries the SPECIFIC login failure to the panel. Without it
+            # the panel can only say "denied", so a misconfiguration and a timeout
+            # look identical and the Auth row just spins. JSON-escape it: the text
+            # is operator-facing prose and contains quotes and backslashes.
+            local _why="${peer_auth_why[$ip]:-}"
+            _why="${_why//\\/\\\\}"; _why="${_why//\"/\\\"}"
+            local _why_json="null"; [[ -n "$_why" ]] && _why_json="\"${_why}\""
+            printf '%s"%s":{"role":"%s","priority":%d,"ping":%s,"dns":%s,"api":%s,"dhcp":%s,"leases":%s,"clients":%s,"auth":%s,"auth_why":%s}' \
                 "$sep" "$ip" "${ROLES[$i]}" "$((i+1))" \
                 "${peer_ping[$ip]:-null}" "${peer_dns[$ip]:-null}" \
                 "${peer_api[$ip]:-null}" "${peer_dhcp[$ip]:-null}" \
                 "${peer_leases[$ip]:-null}" "${peer_clients[$ip]:-null}" \
-                "${peer_auth[$ip]:-null}"
+                "${peer_auth[$ip]:-null}" "$_why_json"
             sep=","
         done
         printf '}}\n'

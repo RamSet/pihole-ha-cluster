@@ -38,7 +38,12 @@ $(function () {
     var masterCfg = null;
     var vipCfg = null;
     var haCfg = null;
-    var authPending = {};  // track nodes with pending auth saves
+    var authPending = {};  // ip -> Date.now() of the last auth save (bounds the spinner)
+    // Long enough for the daemon to reload auth.conf on its next CHECK_INTERVAL
+    // round and finish a password hash, short enough that a wrong password does
+    // not look like a hang. The daemon clears its retry backoff when a password
+    // actually changes, so this does not have to cover AUTH_RETRY_SEC.
+    var AUTH_SPIN_MS = 30000;
 
     // Initial polls
     pollStatus();
@@ -419,14 +424,27 @@ $(function () {
                 delete authPending[node.ip];
                 html += '<tr><td><i class="fa fa-lock" style="color:#00a65a"></i> Auth</td>' +
                     '<td><span style="color:#00a65a">Authenticated</span></td></tr>';
-            } else if (peer.auth === "denied" && authPending[node.ip]) {
-                // Password was just saved, waiting for pihole-ha to pick it up
+            } else if (peer.auth === "denied" && authPending[node.ip] &&
+                       (Date.now() - authPending[node.ip]) < AUTH_SPIN_MS) {
+                // Password was just saved, waiting for pihole-ha to pick it up.
+                // BOUNDED: this used to spin forever whenever the daemon never
+                // reached "ok", which turned an ordinary misconfiguration into a
+                // hang with nothing on screen to explain it.
                 html += '<tr><td><i class="fa fa-lock" style="color:#f0ad4e"></i> Auth</td>' +
                     '<td><span style="color:#f0ad4e">' +
                     '<i class="fa fa-spinner fa-spin"></i> Authenticating\u2026</span></td></tr>';
             } else if (peer.auth === "denied") {
+                delete authPending[node.ip];
+                // Say WHY, in the daemon's words. It distinguishes a timeout from a
+                // wrong password from exhausted API seats from "this node has no
+                // password stored for that peer at all" — the last being the common
+                // trap, since auth.conf is per-node and the panel writes it only on
+                // the node serving the page.
+                var whyHtml = peer.auth_why
+                    ? '<br><span style="color:#888;font-size:11px">' + escapeHtml(peer.auth_why) + '</span>'
+                    : '';
                 html += '<tr><td><i class="fa fa-lock" style="color:#dd4b39"></i> Auth</td>' +
-                    '<td><span style="color:#dd4b39">Password required</span><br>' +
+                    '<td><span style="color:#dd4b39">Password required</span>' + whyHtml + '<br>' +
                     '<div style="margin-top:4px;display:flex;gap:4px">' +
                     '<input type="password" class="form-control input-sm ha-auth-input" ' +
                     'id="auth-pw-' + i + '" placeholder="Password" style="width:120px;display:inline-block">' +
@@ -1274,7 +1292,7 @@ $(function () {
         if (!pw) return;
         // Set flag and update DOM immediately (before AJAX) so any in-flight
         // pollStatus that completes won't flash the password field back
-        authPending[ip] = true;
+        authPending[ip] = Date.now();
         var $row = $("#auth-pw-" + idx).closest("tr");
         $row.find("td:last").html(
             '<span style="color:#f0ad4e">' +

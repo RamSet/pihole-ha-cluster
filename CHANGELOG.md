@@ -2,6 +2,12 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.13.2 — 2026-09-17
+- Stop the Auth row spinning forever when a peer login never succeeds
+- Say why a login failed in the panel, not just in the log
+- Name the common trap by name: auth.conf is per-node, so a password saved on one node is not on the others
+- Retry a peer login immediately when its password changes, instead of waiting out the backoff
+
 ## v3.13.1 — 2026-09-17
 - Make the login timeout tunable in Docker too, via `PIHOLE_HA_AUTH_TIMEOUT`
 - Point a login-timeout message at the knob that exists on that deployment
