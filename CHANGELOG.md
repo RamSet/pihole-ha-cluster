@@ -2,6 +2,12 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.13.0 — 2026-09-17
+- Wait longer for a peer login, and show a countdown instead of appearing to hang
+- Say why a login failed: too slow, wrong password, unreachable, or out of API seats
+- Back off after a failed login instead of re-hashing the password every 10 seconds
+- New `AUTH_TIMEOUT` (default 10s) and `AUTH_RETRY_SEC` (default 60s) in `nodes.conf`
+
 ## v3.12.17 — 2026-09-16
 - Keep sync timers firing after a reboot once the interval is changed
 

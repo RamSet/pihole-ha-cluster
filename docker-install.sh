@@ -13,6 +13,58 @@ CROSS="[${COL_RED}✗${COL_NC}]"
 INFO="[i]"
 OVER="\\r\\033[K"
 
+# Pick up AUTH_TIMEOUT from an existing cluster config when there is one, so the
+# value the installer waits with is the same one the daemon will use, and so the
+# "raise AUTH_TIMEOUT in nodes.conf" advice below is actually true.
+if [[ -f /etc/pihole-ha/nodes.conf ]]; then
+    _cfg_auth_timeout="$(sed -n 's/^AUTH_TIMEOUT=\([0-9]\+\).*/\1/p' /etc/pihole-ha/nodes.conf | head -1)"
+    [[ -n "$_cfg_auth_timeout" ]] && AUTH_TIMEOUT="$_cfg_auth_timeout"
+fi
+AUTH_TIMEOUT="${AUTH_TIMEOUT:-10}"
+
+# Authenticate to a peer, ticking the remaining seconds down while we wait.
+# Pi-hole v6 hashes the app password with a deliberately memory-hard function; on
+# a small Pi that legitimately takes several seconds, and a silent pause there is
+# indistinguishable from a hang. Progress goes to stderr so the SID can still be
+# captured from stdout. Echoes the SID and returns 0 on success.
+_auth_countdown() {   # $1=peer $2=port $3=password $4=timeout
+    local peer="$1" port="$2" pass="$3" tmo="$4"
+    local out; out="$(mktemp)"
+    local pw="${pass//\\/\\\\}"; pw="${pw//\"/\\\"}"
+    curl -s --max-time "$tmo" -X POST "http://${peer}:${port}/api/auth" \
+        -H "Content-Type: application/json" -d "{\"password\":\"${pw}\"}" -o "$out" 2>/dev/null &
+    local pid=$! left="$tmo"
+    while kill -0 "$pid" 2>/dev/null && (( left > 0 )); do
+        printf "%b  %b Authenticating with %s - %ss left..." "${OVER}" "${INFO}" "$peer" "$left" >&2
+        sleep 1
+        left=$(( left - 1 ))
+    done
+    local rc=0; wait "$pid" || rc=$?
+    local sid="" seats=0
+    [[ -s "$out" ]] && sid="$(grep -o '"sid":"[^"]*"' "$out" | cut -d'"' -f4)"
+    grep -q "seats exceeded" "$out" 2>/dev/null && seats=1
+    rm -f "$out"
+    if [[ -n "$sid" && "$sid" != "null" ]]; then
+        printf "%b  %b Authenticated with %s\n" "${OVER}" "${TICK}" "$peer" >&2
+        printf '%s' "$sid"
+        return 0
+    fi
+    if (( rc == 28 )); then
+        printf "%b  %b %s did not answer the login within %ss\n" "${OVER}" "${CROSS}" "$peer" "$tmo" >&2
+        printf "      Pi-hole hashes the password on purpose slowly; on a 1-core Pi this can take longer than %ss.\n" "$tmo" >&2
+        printf "      Raise AUTH_TIMEOUT in /etc/pihole-ha/nodes.conf on both nodes and try again.\n" >&2
+    elif (( seats )); then
+        printf "%b  %b %s reports API seats exceeded\n" "${OVER}" "${CROSS}" "$peer" >&2
+        printf "      Raise webserver.api.max_sessions there, or restart pihole-FTL to drop stale sessions.\n" >&2
+    elif (( rc != 0 )); then
+        printf "%b  %b Could not reach the Pi-hole API on %s (curl rc=%s)\n" "${OVER}" "${CROSS}" "$peer" "$rc" >&2
+    else
+        printf "%b  %b %s rejected that password\n" "${OVER}" "${CROSS}" "$peer" >&2
+    fi
+    return 1
+}
+
+
 # Pick this host's LAN address.
 #
 # `hostname -I` is not portable: Arch ships inetutils' hostname, which has no -I
@@ -831,9 +883,7 @@ if [[ ${#discovered_nodes[@]} -gt 0 ]]; then
                 printf "  %b Registering this node with cluster..." "${INFO}"
             fi
             _peer_pihole_port="${node_ports[$_peer]:-80}"
-            _join_sid="$(curl -s --max-time 5 -X POST "http://$_peer:$_peer_pihole_port/api/auth" \
-                -H "Content-Type: application/json" \
-                -d "{\"password\":\"$_join_pass\"}" 2>/dev/null | grep -o '"sid":"[^"]*"' | cut -d'"' -f4)"
+            _join_sid="$(_auth_countdown "$_peer" "$_peer_pihole_port" "$_join_pass" "${AUTH_TIMEOUT:-10}")" || true
             if [[ -n "$_join_sid" && "$_join_sid" != "null" ]]; then
                 _join_resp="$(curl -sf --max-time 5 "http://$_peer:8887/api/nodes/join?node=$_local_entry&sid=$_join_sid" 2>/dev/null)" || true
                 if echo "$_join_resp" | grep -q '"ok":true'; then

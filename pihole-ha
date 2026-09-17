@@ -78,6 +78,19 @@ IFACE="$(ip -o route get "$GATEWAY" 2>/dev/null | sed -n 's/.*dev \([^ ]*\).*/\1
 CHECK_INTERVAL="${CHECK_INTERVAL:-10}"     # seconds between peer health-check rounds
 DEACTIVATE_AFTER="${DEACTIVATE_AFTER:-3}"  # consecutive healthy checks before yielding back
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-2}"      # per-check timeout (ping/DNS/API)
+# Authentication is NOT a health check and must not share its timeout. Pi-hole v6
+# hashes the app password with a deliberately memory-hard function, so a single
+# POST /api/auth can take many seconds on modest hardware — measured in the field
+# at 6.4s and 8.7s on a 1-core/512MB Pi, against a timeout that used to be a
+# hardcoded 3s. The result was an auth that could never succeed: no session was
+# ever cached, so every node re-authenticated to every peer every CHECK_INTERVAL,
+# each attempt costing the peer another full password hash. That pegs a small Pi,
+# which makes the hash slower still, and the cluster never recovers — peers read
+# as denied, config sync stops, and Pi-hole eventually reports "API seats
+# exceeded". A passwordless Pi-hole answers the same call in 0.0001s, which is
+# why this only ever bit password-protected clusters.
+AUTH_TIMEOUT="${AUTH_TIMEOUT:-10}"         # how long to allow for a password hash
+AUTH_RETRY_SEC="${AUTH_RETRY_SEC:-60}"     # after a failed auth, wait this long before trying again
 _ACTIVATE_BASE="${ACTIVATE_AFTER:-2}"      # base down-checks before a standby takes over
 STATUS_DIR="/run/pihole-ha"
 STATUS_FILE="$STATUS_DIR/status.json"
@@ -132,7 +145,7 @@ ensure_ftl_running() {
 
 declare -i activate_count=0 deactivate_count=0 stable_count=0
 declare -A peer_ping peer_dns peer_api peer_dhcp peer_leases peer_clients peer_auth
-declare -A peer_password peer_sid peer_auth_warned
+declare -A peer_password peer_sid peer_auth_warned peer_auth_next peer_auth_why
 
 # Load per-node Pi-hole API passwords (for password-protected instances)
 # Format: PASS_10_33_47_5=secretpass (dots replaced with underscores)
@@ -376,20 +389,40 @@ ensure_sid() {
     local ip="$1"
     [[ -z "${peer_password[$ip]:-}" ]] && return  # no password configured
     [[ -n "${peer_sid[$ip]:-}" ]] && return        # already have one — reuse it
-    local resp
+    # Back off after a failure. Without this a peer that cannot authenticate is
+    # re-hashed every CHECK_INTERVAL forever, which is itself enough to hold a
+    # small Pi down. Retrying a wrong password faster does not make it righter.
+    local now_s="$EPOCHSECONDS"
+    [[ -n "${peer_auth_next[$ip]:-}" ]] && (( now_s < peer_auth_next[$ip] )) && return
+    local resp rc=0
     local port="${NODE_PORTS[$ip]:-80}"
     # JSON-escape password: backslashes before quotes, then literal quotes.
     local _pw="${peer_password[$ip]}"
     _pw="${_pw//\\/\\\\}"
     _pw="${_pw//\"/\\\"}"
-    resp="$(curl -s --max-time 3 -X POST "http://$ip:${port}/api/auth" \
+    resp="$(curl -s --max-time "$AUTH_TIMEOUT" -X POST "http://$ip:${port}/api/auth" \
         -H "Content-Type: application/json" \
-        -d "{\"password\":\"${_pw}\"}" 2>/dev/null)" || return
-    local sid
-    # Same result as `grep -o '"sid":"[^"]*"' | cut -d'"' -f4`, no forks.
-    sid=""
+        -d "{\"password\":\"${_pw}\"}" 2>/dev/null)" || rc=$?
+    local sid=""
     [[ "$resp" =~ \"sid\":\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
-    [[ -n "$sid" && "$sid" != "null" ]] && peer_sid[$ip]="$sid"
+    if [[ -n "$sid" && "$sid" != "null" ]]; then
+        peer_sid[$ip]="$sid"
+        unset "peer_auth_next[$ip]" "peer_auth_why[$ip]"
+        return
+    fi
+    # Failed. Record WHY, in the peer's own words where it gave us any, so the
+    # operator is not left guessing between "slow", "wrong password" and "full".
+    peer_auth_next[$ip]=$(( now_s + AUTH_RETRY_SEC ))
+    if (( rc == 28 )); then
+        peer_auth_why[$ip]="timed out after ${AUTH_TIMEOUT}s (the peer is still hashing the password — raise AUTH_TIMEOUT in nodes.conf)"
+    elif [[ "$resp" == *"seats exceeded"* ]]; then
+        peer_auth_why[$ip]="the peer reports API seats exceeded (raise webserver.api.max_sessions there, and check nothing is opening sessions it never closes)"
+    elif (( rc != 0 )); then
+        peer_auth_why[$ip]="could not reach the peer's API (curl rc=${rc})"
+    else
+        peer_auth_why[$ip]="the peer rejected the password"
+    fi
+    return
 }
 
 # Override local node's port from env var or FTL query (Docker may differ from nodes.conf)
@@ -523,7 +556,14 @@ check_peer() {
                 if [[ -z "${peer_password[$ip]:-}" ]]; then
                     log_warn "event=peer_auth_missing peer=$ip reason=\"peer's Pi-hole needs a password and none is set for it here — add it in the HA panel (Cluster Nodes) or in $AUTH_CONF as PASS_${ip//./_}=... ; until then this peer counts as down and config sync will not run\""
                 else
-                    log_warn "event=peer_auth_denied peer=$ip reason=\"the password configured here was rejected by that peer's Pi-hole — until it is corrected this peer counts as down and config sync will not run\""
+                    # NOTE: no apostrophes inside this ${...:-default}. Bash parses
+                    # the default value with its own quoting rules, so a lone ' opens
+                    # a quote even inside the surrounding double quotes and swallows
+                    # the rest of the script (it failed to parse 146 lines later).
+                    # Report the SPECIFIC failure ensure_sid recorded. "Denied"
+                    # alone sent at least one operator chasing their hardware
+                    # when the real answer was a timeout that could never be met.
+                    log_warn "event=peer_auth_denied peer=$ip reason=\"${peer_auth_why[$ip]:-the password configured here was rejected by that peer} — until this is fixed the peer counts as down and config sync will not run; retrying in ${AUTH_RETRY_SEC}s\""
                 fi
             fi
             return

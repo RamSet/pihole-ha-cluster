@@ -218,7 +218,7 @@ if [[ "${1:-}" == "--handle" ]]; then
         fi
         [[ -z "$_pass" ]] && return
         local resp sid
-        resp="$(curl -s --max-time 3 -X POST "http://$ip/api/auth" \
+        resp="$(curl -s --max-time "${AUTH_TIMEOUT:-10}" -X POST "http://$ip/api/auth" \
             -H "Content-Type: application/json" \
             -d "{\"password\":\"$_pass\"}" 2>/dev/null)" || return
         sid="$(echo "$resp" | grep -o '"sid":"[^"]*"' | cut -d'"' -f4)"
