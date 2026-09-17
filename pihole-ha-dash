@@ -182,12 +182,30 @@ if [[ "${1:-}" == "--handle" ]]; then
         resp="$(curl -s --max-time 2 "${_PIHOLE_BASE}/api/dns/blocking" 2>/dev/null)" || return 1
         echo "$resp" | grep -q '"unauthorized"'
     }
+    # Validate the caller's Pi-hole session. Sets _AUTH_FAIL_WHY so a refusal can
+    # say WHICH refusal it was: a session Pi-hole rejected, versus not being able
+    # to ask Pi-hole at all. Those are different problems with different fixes,
+    # and collapsing them is what makes a failed save look like "it just doesn't
+    # work" — the 2s budget this used to have would time out on a loaded Pi and
+    # be reported as an invalid session.
     _validate_sid() {
         local sid="$1"
-        [[ -z "$sid" ]] && return 1
-        local resp
-        resp="$(curl -s --max-time 2 "${_PIHOLE_BASE}/api/dns/blocking?sid=$sid" 2>/dev/null)" || return 1
-        ! echo "$resp" | grep -q '"unauthorized"'
+        _AUTH_FAIL_WHY=""
+        if [[ -z "$sid" ]]; then
+            _AUTH_FAIL_WHY="no Pi-hole session was sent with the request — log in to this node's own Pi-hole admin page, then retry (a browser blocking the sid cookie will also do this)"
+            return 1
+        fi
+        local resp rc=0
+        resp="$(curl -s --max-time "${SID_VALIDATE_TIMEOUT:-5}" "${_PIHOLE_BASE}/api/dns/blocking?sid=$sid" 2>/dev/null)" || rc=$?
+        if (( rc != 0 )); then
+            _AUTH_FAIL_WHY="could not reach this node's own Pi-hole API to check the session within ${SID_VALIDATE_TIMEOUT:-5}s (curl rc=${rc}) — the session may well be fine"
+            return 1
+        fi
+        if echo "$resp" | grep -q '"unauthorized"'; then
+            _AUTH_FAIL_WHY="this node's Pi-hole rejected the session — log in to its admin page again and retry"
+            return 1
+        fi
+        return 0
     }
     _check_auth() {
         local qs="$1"
@@ -203,7 +221,11 @@ if [[ "${1:-}" == "--handle" ]]; then
     }
     _send_401() {
         send_headers "401 Unauthorized" "application/json"
-        echo '{"error":"unauthorized","auth_required":true}'
+        local _w="${_AUTH_FAIL_WHY:-}"
+        _w="${_w//\\/\\\\}"; _w="${_w//\"/\\\"}"
+        printf '{"error":"unauthorized","auth_required":true,"reason":%s}\n' \
+            "$([[ -n "$_w" ]] && printf '"%s"' "$_w" || printf 'null')"
+        return 0
     }
 
     # Get SID for propagation to peer nodes

@@ -44,6 +44,7 @@ $(function () {
     // not look like a hang. The daemon clears its retry backoff when a password
     // actually changes, so this does not have to cover AUTH_RETRY_SEC.
     var AUTH_SPIN_MS = 30000;
+    var saveError = {};  // ip -> why the last password save was refused
 
     // Initial polls
     pollStatus();
@@ -418,10 +419,12 @@ $(function () {
             // or password required / auth failed.
             if (peer.auth === "none") {
                 delete authPending[node.ip];
+                delete saveError[node.ip];
                 html += '<tr><td><i class="fa fa-unlock-alt" style="color:#888"></i> Auth</td>' +
                     '<td><span style="color:#888">No password (open)</span></td></tr>';
             } else if (peer.auth === "ok") {
                 delete authPending[node.ip];
+                delete saveError[node.ip];
                 html += '<tr><td><i class="fa fa-lock" style="color:#00a65a"></i> Auth</td>' +
                     '<td><span style="color:#00a65a">Authenticated</span></td></tr>';
             } else if (peer.auth === "denied" && authPending[node.ip] &&
@@ -440,8 +443,11 @@ $(function () {
                 // password stored for that peer at all" — the last being the common
                 // trap, since auth.conf is per-node and the panel writes it only on
                 // the node serving the page.
-                var whyHtml = peer.auth_why
-                    ? '<br><span style="color:#888;font-size:11px">' + escapeHtml(peer.auth_why) + '</span>'
+                // A refused SAVE outranks the daemon's login reason: if the password
+                // never reached disk, the daemon's view is describing the old state.
+                var whyText = saveError[node.ip] || peer.auth_why;
+                var whyHtml = whyText
+                    ? '<br><span style="color:#888;font-size:11px">' + escapeHtml(whyText) + '</span>'
                     : '';
                 html += '<tr><td><i class="fa fa-lock" style="color:#dd4b39"></i> Auth</td>' +
                     '<td><span style="color:#dd4b39">Password required</span>' + whyHtml + '<br>' +
@@ -1298,20 +1304,34 @@ $(function () {
             '<span style="color:#f0ad4e">' +
             '<i class="fa fa-spinner fa-spin"></i> Authenticating\u2026</span>'
         );
+        delete saveError[ip];
         $.ajax({
             url: API + "?action=set-auth&ip=" + encodeURIComponent(ip) + "&password=" + encodeURIComponent(pw),
-            timeout: 4000,
+            // Must exceed the Lua page's 10s, which must exceed _validate_sid's 5s.
+            timeout: 15000,
             dataType: "json"
         })
         .done(function (data) {
             if (!data || !data.ok) {
+                // The save was refused. Saying nothing here is what made this look
+                // like "the button does nothing" — the row just reverted to the
+                // password box with no hint that anything had been rejected.
+                saveError[ip] = (data && (data.reason || data.error)) || "the node refused the save";
                 delete authPending[ip];
-                pollStatus();  // re-render with actual state
+                pollStatus();
             }
         })
-        .fail(function () {
+        .fail(function (xhr, textStatus) {
+            if (textStatus === "timeout") {
+                saveError[ip] = "timed out talking to this node — it may be busy; try again";
+            } else if (xhr && xhr.status === 401) {
+                saveError[ip] = (xhr.responseJSON && xhr.responseJSON.reason) ||
+                    "this node did not accept your Pi-hole session";
+            } else {
+                saveError[ip] = "save failed (HTTP " + ((xhr && xhr.status) || "?") + ")";
+            }
             delete authPending[ip];
-            pollStatus();  // re-render with actual state
+            pollStatus();
         });
     };
 });

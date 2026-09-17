@@ -2,6 +2,11 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.13.3 — 2026-09-17
+- Say why a password save was refused, instead of silently restoring the password box
+- Tell a rejected session apart from not being able to check the session at all
+- Stop a busy node's session check timing out at 2s and being reported as a bad password
+
 ## v3.13.2 — 2026-09-17
 - Stop the Auth row spinning forever when a peer login never succeeds
 - Say why a login failed in the panel, not just in the log

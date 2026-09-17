@@ -266,7 +266,11 @@ elseif action == "set-auth" then
     local password = get_param("password") or ""
     -- Validate IP format (digits and dots only)
     if ip:match("^%d+%.%d+%.%d+%.%d+$") then
-        local content = curl_local("/api/auth/set?ip=" .. url_encode(ip) .. "&password=" .. url_encode(password))
+        -- 10s, not the 4s default. Timeouts here must INCREASE outward:
+        -- _validate_sid (5s) < this (10s) < the browser's ajax (15s). If an outer
+        -- budget is the smaller one it fires first, and the specific reason the
+        -- inner layer worked out is thrown away in favour of a bare timeout.
+        local content = curl_local("/api/auth/set?ip=" .. url_encode(ip) .. "&password=" .. url_encode(password), 10)
         mg.write(content or '{"error":"auth save failed"}')
     else
         mg.write('{"error":"invalid IP"}')
