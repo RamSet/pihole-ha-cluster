@@ -600,7 +600,14 @@ check_peer() {
             peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="\"denied\""; return
         }
         if [[ "$resp" == *'"unauthorized"'* ]]; then
-            peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="\"denied\""
+            # api=TRUE on purpose. The peer answered us — with a refusal, but it
+            # answered, which proves its API is alive. Recording false here meant
+            # is_serving() saw a dead peer and this node seized DHCP and the VIP
+            # from a primary that was healthily serving the network, logging the
+            # plainly untrue "API unreachable". An authentication problem must not
+            # be able to cause an outage; it stops SYNC (which needs authorised
+            # writes — see is_alive_for_publish) and nothing else.
+            peer_api[$ip]="true"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="\"denied\""
             # Say this out loud, once per peer. A peer we cannot authenticate to
             # is treated as DOWN, so every node elects itself publisher and
             # nothing is ever pulled -- config sync silently stops dead. Without
@@ -672,10 +679,17 @@ is_serving() {
     local ip="$1"
     # Defaults matter: a pinned DHCP_MASTER that has left the cluster is never
     # health-checked, and a bare lookup would abort the daemon under `set -u`.
-    [[ "${peer_ping[$ip]:-}" == "true" ]] &&
-    [[ "${peer_dns[$ip]:-}" == "true" ]] &&
-    [[ "${peer_api[$ip]:-}" == "true" ]] &&
-    [[ "${peer_dhcp[$ip]:-}" == "true" ]]
+    [[ "${peer_ping[$ip]:-}" == "true" ]] || return 1
+    [[ "${peer_dns[$ip]:-}" == "true" ]]  || return 1
+    [[ "${peer_api[$ip]:-}" == "true" ]]  || return 1
+    [[ "${peer_dhcp[$ip]:-}" == "true" ]] && return 0
+    # DHCP state is UNKNOWN because we cannot authenticate to read it — but ping,
+    # DNS and the API all answered, so the peer is alive and most likely serving.
+    # Taking over on "unknown" is how you end up with two DHCP servers on one
+    # LAN; refusing to take over merely leaves the existing one in charge. The
+    # loud peer_auth_denied warning is what gets this fixed, not a failover.
+    [[ "${peer_auth[$ip]:-}" == '"denied"' ]] && return 0
+    return 1
 }
 
 get_fail_reason() {
@@ -690,6 +704,7 @@ get_fail_reason() {
     [[ "${peer_ping[$ip]:-}" != "true" ]] && r+="ping failed, "
     [[ "${peer_dns[$ip]:-}" != "true" ]] && r+="DNS:53 down, "
     [[ "${peer_api[$ip]:-}" != "true" ]] && r+="API unreachable, "
+    [[ "${peer_auth[$ip]:-}" == '"denied"' ]] && r+="API answering but refusing our login, "
     [[ "${peer_dhcp[$ip]:-}" == "false" ]] && r+="DHCP disabled, "
     [[ "${peer_dhcp[$ip]:-}" == "null" && "${peer_api[$ip]:-}" == "true" ]] && r+="DHCP unknown, "
     echo "${r%, }"
@@ -941,6 +956,10 @@ is_alive_for_publish() {
     [[ "${peer_ping[$ip]:-}" == "true" ]] || return 1
     [[ "${peer_dns[$ip]:-}" == "true" ]] || return 1
     [[ "${peer_api[$ip]:-}" == "true" ]] || return 1
+    # Sync writes need an authorised session, so a denied peer really cannot be
+    # published to. This is the ONE place an auth failure should stop something —
+    # api=true above now means "answered", not "authorised".
+    [[ "${peer_auth[$ip]:-}" == '"denied"' ]] && return 1
     return 0
 }
 
@@ -1091,6 +1110,10 @@ fi
 while true; do
     sleep "$CHECK_INTERVAL"
     load_auth         # reload passwords in case user saved new ones via web UI
+    # Re-read STANDBY_ONLY each round so it can be set or lifted without a restart —
+    # the point of it is to calm a cluster that is already misbehaving.
+    STANDBY_ONLY="$(sed -n 's/^STANDBY_ONLY=//p' "$NODES_CONF" 2>/dev/null | tr -d '"'"'"'" ' | head -1)"
+    STANDBY_ONLY="${STANDBY_ONLY:-false}"
     load_notify_conf  # reload notify settings so per-kind mute toggles take effect live
     load_master       # reload DHCP master override (live config changes)
     # Re-assert the DNS pin. Startup alone is not enough: the pin is deferred
@@ -1144,6 +1167,21 @@ while true; do
     fi
 
     current="$(get_dhcp)"
+
+    # STANDBY_ONLY: never take over, whatever the peers look like. Asked for after
+    # a cluster where a node that could not authenticate promoted itself, seized
+    # DHCP and the VIP, and fought the healthy primary — leaving no safe way to
+    # bring a node up and look at it. Re-read every loop from nodes.conf, so it can
+    # be lifted without a restart.
+    if [[ "${STANDBY_ONLY:-false}" == "true" ]]; then
+        if [[ "$(get_dhcp)" == "true" ]]; then
+            log_warn "event=standby_only_release reason=\"STANDBY_ONLY is set but this node holds DHCP — releasing it\""
+            set_dhcp "false" || true
+            has_vip && remove_vip || true
+        fi
+        write_status "STANDBY_ONLY set - this node will never take over"
+        continue
+    fi
 
     if should_i_serve; then
         deactivate_count=0; stable_count=0

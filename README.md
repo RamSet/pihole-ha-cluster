@@ -156,6 +156,7 @@ Nodes in `HA_NODES` can optionally include a `:PORT` suffix for the Pi-hole web 
 | `ACTIVATE_AFTER` | integer | `2` | Consecutive failed checks before a standby takes over (the last node waits +2 to avoid a tie). Lower = faster failover, higher = ignores brief blips |
 | `DEACTIVATE_AFTER` | integer | `3` | Consecutive healthy checks before a standby yields back to a recovered primary |
 | `HEALTH_TIMEOUT` | seconds | `2` | Per-check timeout for ping / DNS:53 / API |
+| `STANDBY_ONLY` | bool | `false` | This node never takes over DHCP or the VIP, whatever the peers look like. Releases them if it already holds them. Re-read every round, so it can be set or lifted without a restart — use it to bring a node up quietly, or to calm a cluster that is already fighting |
 | `AUTH_TIMEOUT` | seconds | `10` | How long to allow for a peer login. Pi-hole hashes the app password deliberately slowly, so a 1-core Pi can need well over 5s. Raise this if the log reports a login timeout |
 | `AUTH_RETRY_SEC` | seconds | `60` | How long to wait before retrying a peer login that failed. Stops a bad or slow login re-hashing the password every `CHECK_INTERVAL` |
 | `HA_NODES` | CSV | *(required)* | Node IPs in priority order. Format: `IP` or `IP:PORT` |

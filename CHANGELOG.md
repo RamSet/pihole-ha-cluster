@@ -2,6 +2,11 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.14.0 — 2026-09-18
+- A node that cannot log in to a peer no longer seizes DHCP and the VIP from it
+- New `STANDBY_ONLY` in nodes.conf: a node that will never take over
+- Stop reporting "API unreachable" for a peer whose API is answering and refusing the login
+
 ## v3.13.5 — 2026-09-18
 - Read the last line of auth.conf even when the file has no trailing newline
 
