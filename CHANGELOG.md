@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.13.5 — 2026-09-18
+- Read the last line of auth.conf even when the file has no trailing newline
+
 ## v3.13.4 — 2026-09-17
 - Stop reporting a peer that has no Pi-hole password as having rejected ours
 - Make pressing Save retry straight away, even when the password is unchanged

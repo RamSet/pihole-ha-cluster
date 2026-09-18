@@ -234,9 +234,12 @@ if [[ "${1:-}" == "--handle" ]]; then
         local _AUTH_CONF="/etc/pihole-ha/auth.conf" _pass="" _key
         _key="PASS_${ip//\./_}"
         if [[ -f "$_AUTH_CONF" ]]; then
+            # Trailing `echo` so a file with no final newline still yields its last
+            # line: plain `read` returns non-zero there and the loop would exit
+            # before processing it, silently losing the last stored password.
             while IFS='=' read -r _k _v; do
                 [[ "$_k" == "$_key" ]] && _pass="$_v"
-            done < "$_AUTH_CONF"
+            done < <(cat "$_AUTH_CONF"; echo)
         fi
         [[ -z "$_pass" ]] && return
         local resp sid

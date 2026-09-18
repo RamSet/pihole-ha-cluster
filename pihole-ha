@@ -181,7 +181,12 @@ load_auth() {
         if [[ "${_was[$ip]:-}" != "$val" ]]; then
             unset "peer_auth_next[$ip]" "peer_auth_why[$ip]" "peer_sid[$ip]" "peer_auth_warned[$ip]"
         fi
-    done < "$AUTH_CONF"
+    # `|| [[ -n "$key" ]]`: read returns non-zero on a final line with no trailing
+    # newline, which made the loop exit BEFORE processing it — the last entry in
+    # auth.conf was silently dropped. The panel always writes a newline, so this
+    # only bit hand-edited files, and it failed as "no password stored for that
+    # peer" with the file plainly showing one.
+    done < <(cat "$AUTH_CONF"; echo)
 }
 load_auth
 
