@@ -2,6 +2,10 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.13.4 — 2026-09-17
+- Stop reporting a peer that has no Pi-hole password as having rejected ours
+- Make pressing Save retry straight away, even when the password is unchanged
+
 ## v3.13.3 — 2026-09-17
 - Say why a password save was refused, instead of silently restoring the password box
 - Tell a rejected session apart from not being able to check the session at all

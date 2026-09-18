@@ -146,6 +146,7 @@ ensure_ftl_running() {
 declare -i activate_count=0 deactivate_count=0 stable_count=0
 declare -A peer_ping peer_dns peer_api peer_dhcp peer_leases peer_clients peer_auth
 declare -A peer_password peer_sid peer_auth_warned peer_auth_next peer_auth_why
+_auth_conf_mtime=""   # detects a SAVE even when the value is unchanged
 
 # Load per-node Pi-hole API passwords (for password-protected instances)
 # Format: PASS_10_33_47_5=secretpass (dots replaced with underscores)
@@ -161,6 +162,15 @@ load_auth() {
     local -A _was=()
     local _k
     for _k in "${!peer_password[@]}"; do _was[$_k]="${peer_password[$_k]}"; done
+    # A SAVE, not just a changed value, must force a fresh attempt. Re-entering the
+    # same password is what an operator does to mean "try again now", and comparing
+    # values alone made that a silent no-op: same value, backoff intact, warning
+    # already emitted, nothing in the log. mtime moves on every save regardless.
+    local _mtime; _mtime="$(stat -c %Y "$AUTH_CONF" 2>/dev/null || echo 0)"
+    if [[ "$_mtime" != "${_auth_conf_mtime:-}" ]]; then
+        _auth_conf_mtime="$_mtime"
+        peer_auth_next=(); peer_auth_warned=()
+    fi
     peer_password=()
     [[ -f "$AUTH_CONF" ]] || return
     while IFS='=' read -r key val; do
@@ -443,8 +453,27 @@ ensure_sid() {
         peer_auth_why[$ip]="the peer reports API seats exceeded (raise webserver.api.max_sessions there, and check nothing is opening sessions it never closes)"
     elif (( rc != 0 )); then
         peer_auth_why[$ip]="could not reach the peer's API (curl rc=${rc})"
+    elif [[ "$resp" == *'"valid":true'* ]]; then
+        # Not a rejection: this peer needs no session at all.
+        #
+        # Keyed on "valid":true, NOT on the message, because the message lies.
+        # Measured against a real passwordless Pi-hole:
+        #   password ""      -> {"valid":true,"sid":null,"message":"no password set"}
+        #   password "abc"   -> {"valid":true,"sid":null,"message":"password incorrect"}
+        # So a passwordless peer literally answers "password incorrect" to any
+        # password, and matching that prose would report the exact opposite of the
+        # truth. "valid":true means the session state is already fine; the sid is a
+        # literal null, which is why the quoted-sid match above misses.
+        #
+        # This used to land in the final else and be reported as "the peer rejected
+        # the password", sending the operator to hunt a mismatch that never existed.
+        # Calls to such a peer need no session, so there is nothing to retry: clear
+        # the backoff and let the unauthenticated call through, which reports
+        # auth="none".
+        unset "peer_auth_next[$ip]"
+        peer_auth_why[$ip]="that peer has NO Pi-hole password set, so it needs none from us — remove the password saved for it here (the stored one is unused)"
     else
-        peer_auth_why[$ip]="the peer rejected the password"
+        peer_auth_why[$ip]="the peer rejected the password we have stored for it here"
     fi
     return
 }
