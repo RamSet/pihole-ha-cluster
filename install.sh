@@ -13,6 +13,34 @@ CROSS="[${COL_RED}✗${COL_NC}]"
 INFO="[i]"
 OVER="\\r\\033[K"
 
+# Persist a Pi-hole password for a node into auth.conf, which is what the daemon
+# and the panel read. The installer used to prompt for a password during join and
+# then throw it away, so a password-protected cluster came up with NO auth.conf at
+# all: every peer read as denied, sync never ran, and before v3.14.0 the node went
+# on to seize DHCP from a healthy primary. Collecting the password and discarding
+# it was the single most expensive bug in this whole area.
+_save_peer_pass() {   # $1 = node ip   $2 = password
+    local _ip="$1" _pw="$2" _key
+    [[ -z "$_ip" || -z "$_pw" ]] && return 0
+    _key="PASS_${_ip//./_}"
+    install -o root -g root -m 0700 -d /etc/pihole-ha 2>/dev/null || mkdir -p /etc/pihole-ha
+    touch /etc/pihole-ha/auth.conf
+    grep -v "^${_key}=" /etc/pihole-ha/auth.conf > /etc/pihole-ha/auth.conf.tmp 2>/dev/null || true
+    printf '%s=%s\n' "$_key" "$_pw" >> /etc/pihole-ha/auth.conf.tmp
+    mv /etc/pihole-ha/auth.conf.tmp /etc/pihole-ha/auth.conf
+    chmod 600 /etc/pihole-ha/auth.conf 2>/dev/null || true
+}
+
+# Does THIS node's own Pi-hole require a password? A node has to authenticate to
+# its own API the same as to any peer, so without its own entry it reports itself
+# as denied — a red "Password required" row against the very node you are looking
+# at, which is worse than useless.
+_local_pihole_needs_pass() {   # $1 = local pihole port
+    local _r
+    _r="$(curl -s --max-time 5 "http://127.0.0.1:${1}/api/auth" 2>/dev/null)"
+    [[ "$_r" == *'"valid":false'* ]]
+}
+
 # Pick up AUTH_TIMEOUT from an existing cluster config when there is one, so the
 # value the installer waits with is the same one the daemon will use, and so the
 # "raise AUTH_TIMEOUT in nodes.conf" advice below is actually true.
@@ -1176,6 +1204,9 @@ if [[ ${#discovered_nodes[@]} -gt 0 ]]; then
             _peer_pihole_port="${node_ports[$_peer]:-80}"
             _join_sid="$(_auth_countdown "$_peer" "$_peer_pihole_port" "$_join_pass" "${AUTH_TIMEOUT:-10}")" || true
             if [[ -n "$_join_sid" && "$_join_sid" != "null" ]]; then
+                # It worked, so keep it. The daemon needs this every cycle, not
+                # just once during registration.
+                _save_peer_pass "$_peer" "$_join_pass"
                 _join_resp="$(curl -sf --max-time 5 "http://$_peer:8887/api/nodes/join?node=$_local_entry&sid=$_join_sid" 2>/dev/null)" || true
                 if echo "$_join_resp" | grep -q '"ok":true'; then
                     _join_ok=$(( _join_ok + 1 ))
@@ -1189,6 +1220,25 @@ if [[ ${#discovered_nodes[@]} -gt 0 ]]; then
             _join_fail=$(( _join_fail + 1 ))
         fi
     done
+    # This node's OWN password, which nothing else can supply. If join already
+    # established a working password and this node's Pi-hole also wants one, reuse
+    # it rather than asking twice — a cluster almost always shares one.
+    if _local_pihole_needs_pass "${_local_web_port:-80}"; then
+        if [[ -n "${_join_pass:-}" ]] && _auth_countdown "127.0.0.1" "${_local_web_port:-80}" "$_join_pass" "${AUTH_TIMEOUT:-10}" >/dev/null 2>&1; then
+            _save_peer_pass "$local_ip" "$_join_pass"
+            printf "  %b Stored this node's own Pi-hole password\\n" "${TICK}"
+        else
+            printf "  %b This node's Pi-hole needs a password of its own\\n" "${INFO}"
+            read -ersp "      Enter the Pi-hole password for THIS node ($local_ip): " _self_pass
+            printf "\\n"
+            if [[ -n "$_self_pass" ]] && _auth_countdown "127.0.0.1" "${_local_web_port:-80}" "$_self_pass" "${AUTH_TIMEOUT:-10}" >/dev/null 2>&1; then
+                _save_peer_pass "$local_ip" "$_self_pass"
+                printf "  %b Stored this node's own Pi-hole password\\n" "${TICK}"
+            else
+                printf "  %b %bCould not verify that password - set it later in the HA panel%b\\n" "${CROSS}" "${COL_RED}" "${COL_NC}"
+            fi
+        fi
+    fi
     if [[ $_join_fail -eq 0 ]]; then
         printf "%b  %b Registered with %d node(s)\\n" "${OVER}" "${TICK}" "$_join_ok"
     elif [[ $_join_ok -gt 0 ]]; then

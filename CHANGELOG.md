@@ -2,6 +2,10 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.14.1 — 2026-09-18
+- Keep the Pi-hole password the installer asks for, instead of discarding it
+- Store this node's own password too, so it stops reporting itself as locked
+
 ## v3.14.0 — 2026-09-18
 - A node that cannot log in to a peer no longer seizes DHCP and the VIP from it
 - New `STANDBY_ONLY` in nodes.conf: a node that will never take over
