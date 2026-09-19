@@ -570,6 +570,37 @@ set_dhcp() {
     [[ "$have" == "$want" ]]
 }
 
+# Hand a Pi-hole session back instead of abandoning it.
+#
+# Pi-hole allows a fixed number of concurrent API sessions (webserver.api.
+# max_sessions, default 16) and each one we open lives for its full validity
+# (30 min by default) whether or not we still hold it. The daemon cached one
+# session per peer and never released it, so every restart — every update, every
+# reboot, every config reload — orphaned one per peer for half an hour. Restart
+# often enough while debugging and the peer answers "API seats exceeded" to
+# everyone, including the operator's own browser. That is exactly what a reporter
+# hit, and it read as an authentication fault rather than as exhaustion.
+#
+# Best-effort by design: a peer that has gone away cannot be logged out of, and
+# failing to release must never delay or block shutdown.
+release_sid() {
+    local ip="$1"
+    local sid="${peer_sid[$ip]:-}"
+    [[ -z "$sid" ]] && return 0
+    local port="${NODE_PORTS[$ip]:-80}"
+    curl -s --max-time 3 -X DELETE "http://${ip}:${port}/api/auth?sid=${sid}" >/dev/null 2>&1 || true
+    unset "peer_sid[$ip]"
+}
+
+release_all_sids() {
+    local ip
+    for ip in "${!peer_sid[@]}"; do release_sid "$ip"; done
+}
+
+# systemd sends SIGTERM on stop and on restart, so this covers updates and reboots
+# as well as a plain stop. EXIT also catches an unexpected abort under `set -e`.
+trap 'release_all_sids' EXIT INT TERM
+
 # Does this peer's Pi-hole require a password RIGHT NOW?
 #
 # GET /api/auth with no credentials answers it for any node, and needs none to
@@ -619,7 +650,7 @@ update_needs_pass() {
     # so a credential left over from before it was removed does not sit there
     # looking configured and meaningful.
     if [[ "$now_v" == "false" ]]; then
-        unset "peer_sid[$ip]"
+        release_sid "$ip"
         if [[ -n "${peer_password[$ip]:-}" ]]; then
             peer_auth_why[$ip]="that peer no longer requires a password — the one stored for it here is unused and can be cleared"
         fi
@@ -641,6 +672,27 @@ check_peer() {
         peer_dns[$ip]="false"; peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="null"
         return
     fi
+    # This node checking ITSELF never needs a session. Everything the API call
+    # below would tell us about ourselves is already available locally: get_dhcp()
+    # reads the DHCP state directly, and an unauthenticated GET /api/auth proves
+    # our own web tier is alive. Authenticating to yourself only ever produced a
+    # red "Password required" row against the node the operator is looking at —
+    # for a node whose Pi-hole is password-protected but which has no password
+    # stored for itself, which is the default after any install.
+    if [[ "$ip" == "$LOCAL_IP" ]]; then
+        update_needs_pass "$ip"
+        if [[ -n "$(peer_requires_password "$ip")" ]]; then
+            peer_api[$ip]="true"
+        else
+            peer_api[$ip]="false"
+        fi
+        peer_dhcp[$ip]="$(get_dhcp)"
+        [[ "${peer_dhcp[$ip]}" == "true" || "${peer_dhcp[$ip]}" == "false" ]] || peer_dhcp[$ip]="null"
+        peer_leases[$ip]="null"; peer_clients[$ip]="null"
+        peer_auth[$ip]="\"none\""
+        unset "peer_auth_why[$ip]"
+        return
+    fi
     local resp url
     update_needs_pass "$ip"
     # Only attempt a login when the peer actually wants one. On a passwordless
@@ -652,7 +704,10 @@ check_peer() {
     }
     # If 401, our SID expired/was evicted — drop it, re-auth once, and retry.
     if [[ "$resp" == *'"unauthorized"'* ]]; then
-        unset "peer_sid[$ip]"
+        # Give the dead session back before minting another. This path runs
+        # whenever a session is evicted or expires, so abandoning here leaks a
+        # seat far more often than a restart does.
+        release_sid "$ip"
         ensure_sid "$ip"
         api_url "$ip" /api/config/dhcp/active; url="$API_URL"
         resp="$(curl -s --max-time "$HEALTH_TIMEOUT" "$url" 2>/dev/null)" || {

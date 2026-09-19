@@ -2,6 +2,11 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.16.0 — 2026-09-18
+- Hand Pi-hole API sessions back instead of abandoning them, so restarts stop exhausting the seats
+- A node no longer authenticates to itself, so it stops reporting itself as locked
+- Docker can finally tune failover timing and `STANDBY_ONLY`
+
 ## v3.15.0 — 2026-09-18
 - Detect whether a peer needs a password, instead of discovering it by failing a login
 - Notice when a password is added or removed on a live cluster, without waiting for a restart
