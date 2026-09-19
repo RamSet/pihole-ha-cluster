@@ -889,6 +889,53 @@ assert_contains "the warning is limited to real peers" "$_ha_src" '"$ip" != "$LO
 # Must not repeat every 10s check cycle.
 assert_contains "the warning is emitted once per peer" "$_ha_src" "peer_auth_warned[\$ip]=\"true\""
 
+# Only "valid":false means the password is wrong. Anything else that comes back
+# -- a redirect to https, another service on that port, a rate-limit page, an
+# empty body -- is not an answer about the password, and reporting it as one
+# sent a reporter hunting a password that was never wrong (Discourse 86667).
+_auth_probe() {   # $1 body, $2 http status, $3 curl rc
+    # The canned reply travels in the environment, not interpolated into this
+    # script: a body containing a double quote closed the string and the probe
+    # failed for its own reason.
+    PROBE_BODY="$1" PROBE_CODE="$2" PROBE_RC="${3:-0}" bash -c '
+        AUTH_TIMEOUT=10; AUTH_RETRY_SEC=60
+        declare -A peer_password peer_sid peer_auth_next peer_auth_why NODE_PORTS
+        peer_password[10.0.0.9]="stored-pw"
+        curl() { printf "%s\n%s" "$PROBE_BODY" "$PROBE_CODE"; return "$PROBE_RC"; }
+        '"$(sed -n "/^_api_snippet()/,/^}/p" "$SCRIPT_DIR/../pihole-ha")"'
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" ensure_sid)"'
+        ensure_sid 10.0.0.9
+        printf "%s|%s" "${peer_sid[10.0.0.9]:-none}" "${peer_auth_why[10.0.0.9]:-none}"
+    '
+}
+assert_contains "a real rejection is still called a rejection" \
+    "$(_auth_probe '{"valid":false,"sid":null,"message":"password incorrect"}' 401)" "rejected the password"
+assert_contains "an https redirect is not called a wrong password" \
+    "$(_auth_probe '<html>301 Moved</html>' 301)" "unexpected reply"
+assert_contains "the unexpected reply names the status and port" \
+    "$(_auth_probe '<html>301 Moved</html>' 301)" "port 80 (HTTP 301)"
+assert_contains "an empty body is not called a wrong password" \
+    "$(_auth_probe '' 204)" "unexpected reply"
+# FTL sends both spellings (src/api/auth.c): the key api_seats_exceeded and the
+# message "API seats exceeded", with HTTP 429. Match either, so a reworded
+# message does not turn seat exhaustion back into "wrong password".
+assert_contains "seats exhaustion is named from the message" \
+    "$(_auth_probe '{"error":{"key":"api_seats_exceeded","message":"API seats exceeded"}}' 429)" "API seats exceeded"
+assert_contains "seats exhaustion is named from the key alone" \
+    "$(_auth_probe '{"error":{"key":"api_seats_exceeded"}}' 429)" "API seats exceeded"
+assert_contains "a timeout is still named" \
+    "$(_auth_probe '' 000 28)" "timed out"
+assert_contains "a passwordless peer is still not a rejection" \
+    "$(_auth_probe '{"valid":true,"sid":null,"message":"password incorrect"}' 200)" "NO Pi-hole password"
+assert_eq "a good login still caches the session" \
+    "SID42" "$(_auth_probe '{"valid":true,"sid":"SID42"}' 200 | cut -d'|' -f1)"
+# The snippet goes into a log line and into status.json, which is assembled by
+# hand: a quote or a newline from the peer would break the JSON.
+_msg="$(_auth_probe '<html>
+"quoted" \back\slash</html>' 500)"
+assert_not_contains "the quoted reply carries no double quote" "$_msg" '"'
+assert_eq "the quoted reply carries no newline" "0" "$(printf '%s' "$_msg" | wc -l | tr -d ' ')"
+
 # ============================================================
 echo
 echo "=== Bulk sync artifacts must not live on tmpfs ==="

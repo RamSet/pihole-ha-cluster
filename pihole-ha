@@ -405,6 +405,18 @@ fi
 load_notify_conf
 get_dhcp() { platform_get_dhcp; }
 
+# A peer reply we did not recognise, trimmed to something safe to put in a log
+# line and in the status JSON: printable ASCII only, no control characters, and
+# short. The caller escapes quotes for JSON; stripping them here too keeps the
+# journal line readable.
+_api_snippet() {
+    local s="${1//[$'\t\r\n']/ }"
+    s="${s//[^ -~]/}"
+    s="${s//\"/\'}"
+    s="${s//\\//}"
+    printf '%.160s' "$s"
+}
+
 # Ensure we hold a valid cached SID for $ip, authenticating only if we don't
 # already have one. MUST be called directly, never inside $(...): the whole point
 # is that the peer_sid write below persists in the daemon process so we reuse one
@@ -435,9 +447,16 @@ ensure_sid() {
     local _pw="${peer_password[$ip]}"
     _pw="${_pw//\\/\\\\}"
     _pw="${_pw//\"/\\\"}"
-    resp="$(curl -s --max-time "$AUTH_TIMEOUT" -X POST "http://$ip:${port}/api/auth" \
+    local _raw=""
+    # Keep the HTTP status: a reply that is not JSON at all (a redirect to https,
+    # a different service on that port, a rate-limit page) is not a rejected
+    # password, and calling it one sent an operator hunting a password that was
+    # never wrong.
+    _raw="$(curl -s --max-time "$AUTH_TIMEOUT" -w $'\n%{http_code}' -X POST "http://$ip:${port}/api/auth" \
         -H "Content-Type: application/json" \
         -d "{\"password\":\"${_pw}\"}" 2>/dev/null)" || rc=$?
+    local http="${_raw##*$'\n'}"
+    resp="${_raw%$'\n'*}"
     local sid=""
     [[ "$resp" =~ \"sid\":\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
     if [[ -n "$sid" && "$sid" != "null" ]]; then
@@ -454,7 +473,7 @@ ensure_sid() {
         local _hint="raise AUTH_TIMEOUT in nodes.conf"
         [[ "${PIHOLE_HA_PLATFORM:-}" == "docker" ]] && _hint="raise PIHOLE_HA_AUTH_TIMEOUT in the container environment"
         peer_auth_why[$ip]="timed out after ${AUTH_TIMEOUT}s (the peer is still hashing the password — ${_hint})"
-    elif [[ "$resp" == *"seats exceeded"* ]]; then
+    elif [[ "$resp" == *"seats exceeded"* || "$resp" == *"api_seats_exceeded"* ]]; then
         peer_auth_why[$ip]="the peer reports API seats exceeded (raise webserver.api.max_sessions there, and check nothing is opening sessions it never closes)"
     elif (( rc != 0 )); then
         peer_auth_why[$ip]="could not reach the peer's API (curl rc=${rc})"
@@ -477,8 +496,14 @@ ensure_sid() {
         # auth="none".
         unset "peer_auth_next[$ip]"
         peer_auth_why[$ip]="that peer has NO Pi-hole password set, so it needs none from us — remove the password saved for it here (the stored one is unused)"
-    else
+    elif [[ "$resp" =~ \"valid\"[[:space:]]*:[[:space:]]*false ]]; then
+        # The ONLY reply that means the password is wrong. Pi-hole says so in
+        # "valid"; its "message" is unreliable (a passwordless peer answers
+        # "password incorrect" to everything), and everything else that can come
+        # back here is not an answer about the password at all.
         peer_auth_why[$ip]="the peer rejected the password we have stored for it here"
+    else
+        peer_auth_why[$ip]="unexpected reply from the peer API on port ${port} (HTTP ${http:-none}): $(_api_snippet "$resp")"
     fi
     return
 }
