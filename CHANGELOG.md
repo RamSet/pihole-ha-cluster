@@ -2,6 +2,10 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.16.1 — 2026-09-19
+- Stop calling every unrecognised auth reply a wrong password
+- Declare the peer maps in tests the way the daemon does
+
 ## v3.16.0 — 2026-09-18
 - Hand Pi-hole API sessions back instead of abandoning them, so restarts stop exhausting the seats
 - A node no longer authenticates to itself, so it stops reporting itself as locked
