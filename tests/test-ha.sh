@@ -154,7 +154,13 @@ eval "$(extract_fn "$HA_SRC" is_serving)"
 eval "$(extract_fn "$HA_SRC" get_fail_reason)"
 eval "$(extract_fn "$HA_SRC" is_cluster_member)"
 
-declare -A peer_ping peer_dns peer_api peer_dhcp
+# Declare the peer_* maps exactly as the daemon does, rather than listing the
+# ones these tests happen to set. An undeclared name makes bash read the
+# subscript as arithmetic, so the first IP lookup dies with "invalid arithmetic
+# operator" and the extracted function returns nothing -- the test then fails
+# for its own reason, not the code's. That is what happened when peer_auth
+# joined get_fail_reason and this line did not.
+eval "$(grep -E '^declare -A peer_' "$HA_SRC")"
 peer_ping["10.33.47.3"]="true";  peer_dns["10.33.47.3"]="true"
 peer_api["10.33.47.3"]="true";   peer_dhcp["10.33.47.3"]="true"
 peer_ping["10.33.47.5"]="false"; peer_dns["10.33.47.5"]="false"
