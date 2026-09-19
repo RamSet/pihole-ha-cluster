@@ -2,6 +2,11 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.15.0 — 2026-09-18
+- Detect whether a peer needs a password, instead of discovering it by failing a login
+- Notice when a password is added or removed on a live cluster, without waiting for a restart
+- Skip the login entirely on a peer that needs none, and flag a stored password that is now unused
+
 ## v3.14.1 — 2026-09-18
 - Keep the Pi-hole password the installer asks for, instead of discarding it
 - Store this node's own password too, so it stops reporting itself as locked

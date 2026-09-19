@@ -145,7 +145,7 @@ ensure_ftl_running() {
 
 declare -i activate_count=0 deactivate_count=0 stable_count=0
 declare -A peer_ping peer_dns peer_api peer_dhcp peer_leases peer_clients peer_auth
-declare -A peer_password peer_sid peer_auth_warned peer_auth_next peer_auth_why
+declare -A peer_password peer_sid peer_auth_warned peer_auth_next peer_auth_why peer_needs_pass
 _auth_conf_mtime=""   # detects a SAVE even when the value is unchanged
 
 # Load per-node Pi-hole API passwords (for password-protected instances)
@@ -570,6 +570,62 @@ set_dhcp() {
     [[ "$have" == "$want" ]]
 }
 
+# Does this peer's Pi-hole require a password RIGHT NOW?
+#
+# GET /api/auth with no credentials answers it for any node, and needs none to
+# ask. Measured on both states:
+#   passwordless -> {"valid":true,  "sid":null, "message":"no password set"}
+#   protected    -> {"valid":false, "sid":null, "message":"no SID provided"}
+# "valid" is the discriminator. The message is NOT usable: a passwordless Pi-hole
+# answers "password incorrect" to an actual login attempt, which is the opposite
+# of the truth.
+#
+# Asking is cheaper than finding out the hard way. It costs ~10us server-side
+# (no password hash) against 0.7s on a fast Pi and 6-9s on a slow one, so on a
+# passwordless peer — the default — this REPLACES the login attempt rather than
+# adding to it. Before this existed the only way to learn the state was to try to
+# log in and misinterpret the failure, which is how removing a password from a
+# live cluster used to look like a rejected password.
+#
+# Echoes "true", "false", or nothing when it cannot be determined.
+peer_requires_password() {
+    # Split deliberately: `local ip="$1" port="${NODE_PORTS[$ip]...}"` reads $ip
+    # before the same statement has finished assigning it, so the subscript comes
+    # out empty and bash errors with "bad array subscript".
+    local ip="$1"
+    local port="${NODE_PORTS[$ip]:-80}" resp
+    resp="$(curl -s --max-time "${HEALTH_TIMEOUT:-2}" "http://${ip}:${port}/api/auth" 2>/dev/null)" || return 1
+    case "$resp" in
+        *'"valid":false'*) printf 'true'  ;;
+        *'"valid":true'*)  printf 'false' ;;
+        *) return 1 ;;
+    esac
+}
+
+# Track the peer's password state and react to a CHANGE. A cached session keeps
+# working against a peer whose password was just removed (a passwordless Pi-hole
+# accepts any call), so without this the daemon can sit on a stale session
+# indefinitely and only notice at the next restart.
+update_needs_pass() {
+    local ip="$1" now_v prev_v
+    now_v="$(peer_requires_password "$ip")" || return 0   # unknown: leave everything alone
+    prev_v="${peer_needs_pass[$ip]:-}"
+    if [[ -n "$prev_v" && "$prev_v" != "$now_v" ]]; then
+        log_info "event=peer_auth_mode_changed peer=$ip requires_password=$now_v reason=\"password state changed on that peer; dropping any cached session and re-evaluating\""
+        unset "peer_sid[$ip]" "peer_auth_next[$ip]" "peer_auth_why[$ip]" "peer_auth_warned[$ip]"
+    fi
+    peer_needs_pass[$ip]="$now_v"
+    # A peer that needs no password never needs a login. Say so if one is stored,
+    # so a credential left over from before it was removed does not sit there
+    # looking configured and meaningful.
+    if [[ "$now_v" == "false" ]]; then
+        unset "peer_sid[$ip]"
+        if [[ -n "${peer_password[$ip]:-}" ]]; then
+            peer_auth_why[$ip]="that peer no longer requires a password — the one stored for it here is unused and can be cleared"
+        fi
+    fi
+}
+
 check_peer() {
     local ip="$1"
     if ping -c1 -W"$HEALTH_TIMEOUT" "$ip" >/dev/null 2>&1; then
@@ -586,7 +642,10 @@ check_peer() {
         return
     fi
     local resp url
-    ensure_sid "$ip"   # authenticate once (cached); direct call so the cache persists
+    update_needs_pass "$ip"
+    # Only attempt a login when the peer actually wants one. On a passwordless
+    # peer this skips a multi-second password hash entirely.
+    [[ "${peer_needs_pass[$ip]:-true}" == "false" ]] || ensure_sid "$ip"
     api_url "$ip" /api/config/dhcp/active; url="$API_URL"
     resp="$(curl -s --max-time "$HEALTH_TIMEOUT" "$url" 2>/dev/null)" || {
         peer_api[$ip]="false"; peer_dhcp[$ip]="null"; peer_leases[$ip]="null"; peer_clients[$ip]="null"; peer_auth[$ip]="null"; return
@@ -851,12 +910,13 @@ write_status() {
             local _why="${peer_auth_why[$ip]:-}"
             _why="${_why//\\/\\\\}"; _why="${_why//\"/\\\"}"
             local _why_json="null"; [[ -n "$_why" ]] && _why_json="\"${_why}\""
-            printf '%s"%s":{"role":"%s","priority":%d,"ping":%s,"dns":%s,"api":%s,"dhcp":%s,"leases":%s,"clients":%s,"auth":%s,"auth_why":%s}' \
+            printf '%s"%s":{"role":"%s","priority":%d,"ping":%s,"dns":%s,"api":%s,"dhcp":%s,"leases":%s,"clients":%s,"auth":%s,"auth_why":%s,"needs_password":%s}' \
                 "$sep" "$ip" "${ROLES[$i]}" "$((i+1))" \
                 "${peer_ping[$ip]:-null}" "${peer_dns[$ip]:-null}" \
                 "${peer_api[$ip]:-null}" "${peer_dhcp[$ip]:-null}" \
                 "${peer_leases[$ip]:-null}" "${peer_clients[$ip]:-null}" \
-                "${peer_auth[$ip]:-null}" "$_why_json"
+                "${peer_auth[$ip]:-null}" "$_why_json" \
+                "$([[ -n "${peer_needs_pass[$ip]:-}" ]] && printf '%s' "${peer_needs_pass[$ip]}" || printf 'null')"
             sep=","
         done
         printf '}}\n'
