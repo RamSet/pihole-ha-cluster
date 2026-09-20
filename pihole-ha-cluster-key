@@ -1,0 +1,184 @@
+#!/bin/bash
+# pihole-ha-cluster-key — create the config-sync signing key and copy it to peers.
+#
+#   sudo pihole-ha-cluster-key           # create the key if absent, then offer to copy it to each peer
+#   sudo pihole-ha-cluster-key --show    # print the existing key and the manual copy command
+#   sudo pihole-ha-cluster-key --force   # replace an existing key (breaks sync until every node has the new one)
+#
+# Every node in the cluster must hold the SAME secret in /etc/pihole-ha/cluster.key.
+# Without it, pihole-ha-sync-pull skips signature verification entirely and a node
+# applies whatever config any peer publishes, over plain HTTP, as root.
+#
+# The key is never passed as a command-line argument, locally or remotely — argv is
+# world-readable via /proc. It travels over ssh stdin.
+set -uo pipefail
+
+CONF_DIR="/etc/pihole-ha"
+KEY_FILE="$CONF_DIR/cluster.key"
+NODES_CONF="$CONF_DIR/nodes.conf"
+SYNC_CONF="$CONF_DIR/sync.conf"
+REMOTE_TMP=".pihole-ha-cluster-key.staged"
+
+_c() { command -v "$1" >/dev/null 2>&1; }
+
+# Short, non-secret identifier for a key, so two nodes can be compared without
+# either end printing the key itself.
+_fingerprint() { sha256sum < "$1" 2>/dev/null | cut -c1-12; }
+
+_need_root() {
+    [[ $EUID -eq 0 ]] && return 0
+    echo "This needs root — re-run with: sudo $0 $*" >&2
+    exit 1
+}
+
+_local_ip() {
+    ip -o route get 1.0.0.0 2>/dev/null | sed -n 's/.*src \([^ ]*\).*/\1/p' | head -1
+}
+
+# Peers = HA_NODES minus this node. Entries may be IP or IP:PORT (the Pi-hole web
+# port); ssh wants the bare host, so strip the port.
+_peers() {
+    local raw me entry ip
+    raw="$(sed -n 's/^HA_NODES=//p' "$NODES_CONF" 2>/dev/null | tail -1)"
+    [[ -z "$raw" ]] && return 0
+    me="$(_local_ip)"
+    IFS=',' read -ra _entries <<< "$raw"
+    for entry in "${_entries[@]}"; do
+        ip="${entry%%:*}"
+        [[ -z "$ip" || "$ip" == "$me" ]] && continue
+        printf '%s\n' "$ip"
+    done
+}
+
+_sync_primary() {
+    sed -n 's/^SYNC_PRIMARY=//p' "$SYNC_CONF" 2>/dev/null | tail -1
+}
+
+usage() {
+    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+}
+
+MODE="ensure"
+case "${1:-}" in
+    --show)          MODE="show" ;;
+    --force)         MODE="force" ;;
+    -h|--help|help)  usage ;;
+    "")              ;;
+    *) echo "Unknown option: $1" >&2; echo "Try --help" >&2; exit 1 ;;
+esac
+
+_need_root "${1:-}"
+_c openssl || { echo "openssl is required to generate the key." >&2; exit 1; }
+
+# --- 1. Get or create the key -----------------------------------------------
+if [[ -f "$KEY_FILE" && "$MODE" == "force" ]]; then
+    printf 'A key already exists (fingerprint %s).\n' "$(_fingerprint "$KEY_FILE")"
+    printf 'Replacing it breaks config sync on every node that still holds the old one,\n'
+    printf 'until you copy the new key to all of them.\n\n'
+    read -r -p "Replace it? [y/N] " _ans
+    [[ "$_ans" == [Yy]* ]] || { echo "Left the existing key in place."; exit 0; }
+    rm -f "$KEY_FILE"
+fi
+
+if [[ -f "$KEY_FILE" ]]; then
+    [[ "$MODE" == "show" ]] || printf 'This node already has a cluster key — not regenerating.\n'
+    printf 'Use --force to replace it.\n\n'
+else
+    [[ "$MODE" == "show" ]] && { echo "No key on this node yet. Run without --show to create one." >&2; exit 1; }
+    # umask before the redirect: the file must never exist at a readable mode,
+    # not even briefly. chmod-after-write leaves a window.
+    ( umask 077; openssl rand -hex 32 > "$KEY_FILE" ) || {
+        echo "Could not write $KEY_FILE" >&2; exit 1; }
+    chown root:root "$KEY_FILE" 2>/dev/null || true
+    chmod 600 "$KEY_FILE"
+    printf 'Created %s\n\n' "$KEY_FILE"
+fi
+
+KEY_FP="$(_fingerprint "$KEY_FILE")"
+printf 'Cluster key (fingerprint %s):\n\n' "$KEY_FP"
+printf '    %s\n\n' "$(cat "$KEY_FILE")"
+printf 'Treat this like a password. It is now in your terminal scrollback.\n\n'
+
+# --- 2. Say which nodes still need it ---------------------------------------
+mapfile -t PEERS < <(_peers)
+PRIMARY="$(_sync_primary)"
+ME="$(_local_ip)"
+
+if (( ${#PEERS[@]} == 0 )); then
+    printf 'No peers found in %s — copy the key to your other Pi-hole nodes manually:\n\n' "$NODES_CONF"
+    printf "    sudo sh -c 'umask 077; cat > %s' <<< '<the key above>'\n\n" "$KEY_FILE"
+    exit 0
+fi
+
+# Rollout order matters and is not symmetric. A node holding the key REJECTS an
+# unsigned payload; a node without the key ignores signatures entirely. So the
+# publisher must be keyed first — key a standby first and its sync stops until
+# the primary catches up.
+if [[ -n "$PRIMARY" && "$PRIMARY" != "$ME" ]]; then
+    printf 'NOTE: %s is the sync primary and should be keyed FIRST.\n' "$PRIMARY"
+    printf 'A standby that holds the key rejects unsigned payloads, so keying this\n'
+    printf 'node before the primary stops its config sync until the primary has it too.\n\n'
+fi
+
+printf 'Peers that need this same key: %s\n\n' "${PEERS[*]}"
+
+# --- 3. Offer to copy it over ssh -------------------------------------------
+if ! _c ssh; then
+    printf 'ssh is not installed here. Copy the key to each peer manually.\n'
+    exit 0
+fi
+
+read -r -p "Copy the key to these peers over ssh now? [y/N] " _go
+if [[ "$_go" != [Yy]* ]]; then
+    printf '\nSkipped. To do it by hand, on each peer run:\n\n'
+    printf "    sudo sh -c 'umask 077; cat > %s'\n" "$KEY_FILE"
+    printf '    <paste the key, then press Ctrl-D>\n'
+    printf '    sudo chmod 600 %s\n\n' "$KEY_FILE"
+    exit 0
+fi
+
+read -r -p "ssh username for the peers [${SUDO_USER:-root}]: " SSH_USER
+SSH_USER="${SSH_USER:-${SUDO_USER:-root}}"
+
+_failed=()
+for peer in "${PEERS[@]}"; do
+    printf '\n--- %s ---\n' "$peer"
+    dest="$SSH_USER@$peer"
+
+    # Two hops on purpose. The key goes over stdin (never argv, never a scp
+    # tempfile we cannot chmod in time) into the login user's home under umask
+    # 077; then a second, TTY-attached call moves it into place as root so sudo
+    # can prompt for a password without competing with stdin for the terminal.
+    if ! ssh -o ConnectTimeout=10 "$dest" "umask 077; cat > ~/$REMOTE_TMP" < "$KEY_FILE"; then
+        printf 'FAILED: could not stage the key on %s\n' "$peer"
+        _failed+=("$peer"); continue
+    fi
+
+    # mkdir -p, not `install -d -m 700`: this directory may legitimately be
+    # 0750 root:pihole so the DHCP hook can read notify.conf. Do not re-mode it.
+    if ! ssh -t -o ConnectTimeout=10 "$dest" \
+        "sudo mkdir -p '$CONF_DIR' && sudo install -o root -g root -m 600 ~/$REMOTE_TMP '$KEY_FILE' && rm -f ~/$REMOTE_TMP"; then
+        printf 'FAILED: could not install the key on %s (left ~/%s there)\n' "$peer" "$REMOTE_TMP"
+        _failed+=("$peer"); continue
+    fi
+
+    remote_fp="$(ssh -o ConnectTimeout=10 "$dest" "sudo sha256sum < '$KEY_FILE' 2>/dev/null | cut -c1-12" 2>/dev/null)"
+    if [[ "$remote_fp" == "$KEY_FP" ]]; then
+        printf 'OK: %s now holds the same key (fingerprint %s)\n' "$peer" "$remote_fp"
+    else
+        printf 'WARNING: %s reports fingerprint %s, expected %s — verify by hand.\n' \
+            "$peer" "${remote_fp:-<unreadable>}" "$KEY_FP"
+        _failed+=("$peer")
+    fi
+done
+
+printf '\n'
+if (( ${#_failed[@]} == 0 )); then
+    printf 'All peers keyed. Signature verification takes effect on the next sync cycle;\n'
+    printf 'check it with:  journalctl -u pihole-ha-sync-pull | grep signature\n'
+else
+    printf 'Still need the key: %s\n' "${_failed[*]}"
+    printf 'Until every node holds it, keyed nodes will reject payloads from unkeyed ones.\n'
+    exit 1
+fi

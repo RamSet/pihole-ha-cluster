@@ -36,6 +36,7 @@ COPY pihole-ha-sync /usr/local/bin/pihole-ha-sync
 COPY pihole-ha-sync-pull /usr/local/bin/pihole-ha-sync-pull
 COPY new-dhcp-device /usr/local/bin/new-dhcp-device
 COPY pihole-ha-oui-update /usr/local/bin/pihole-ha-oui-update
+COPY pihole-ha-cluster-key /usr/local/bin/pihole-ha-cluster-key
 RUN chmod 755 /usr/local/bin/pihole-ha* /usr/local/bin/new-dhcp-device /usr/local/lib/pihole-ha/pihole-ha-platform /usr/local/lib/pihole-ha/pihole-ha-cli
 
 

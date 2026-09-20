@@ -205,7 +205,8 @@ if [[ "${1:-}" == "--uninstall" || "${1:-}" == "-u" ]]; then
     rm -f /usr/local/bin/pihole-ha /usr/local/bin/pihole-ha-dash /usr/local/bin/pihole-ha-sync \
            /usr/local/bin/pihole-ha-monitor \
           /usr/local/bin/pihole-ha-sync-pull /usr/local/bin/pihole-ha-inject /usr/local/bin/pihole-ha-debug \
-          /usr/local/bin/new_dhcp_device /usr/local/bin/pihole-ha-oui-update
+          /usr/local/bin/new_dhcp_device /usr/local/bin/pihole-ha-oui-update \
+          /usr/local/bin/pihole-ha-cluster-key
     rm -f /etc/systemd/system/pihole-ha*.service /etc/systemd/system/pihole-ha*.timer /etc/systemd/system/pihole-ha*.path
     rm -rf /var/lib/pihole-ha
     systemctl daemon-reload 2>/dev/null || true
@@ -314,7 +315,7 @@ if [[ "${1:-}" == "--update" ]]; then
         exit 1
     fi
     # scripts
-    for _s in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull pihole-ha-inject pihole-ha-debug; do
+    for _s in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull pihole-ha-inject pihole-ha-debug pihole-ha-cluster-key; do
         [[ -f "$_src/$_s" ]] && { cp "$_src/$_s" "/usr/local/bin/$_s"; chmod 755 "/usr/local/bin/$_s"; }
     done
     [[ -f "$_src/new-dhcp-device" ]] && { cp "$_src/new-dhcp-device" /usr/local/bin/new_dhcp_device; chmod 755 /usr/local/bin/new_dhcp_device; }
@@ -803,7 +804,7 @@ chmod 755 /usr/local/lib/pihole-ha/pihole-ha-cli
 printf "%b  %b Platform abstraction installed\\n" "${OVER}" "${TICK}"
 
 printf "  %b Installing scripts..." "${INFO}"
-for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull pihole-ha-inject pihole-ha-debug; do
+for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull pihole-ha-inject pihole-ha-debug pihole-ha-cluster-key; do
     cp "$SCRIPT_DIR/$script" /usr/local/bin/$script
     chmod 755 /usr/local/bin/$script
 done

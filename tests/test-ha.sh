@@ -1285,9 +1285,60 @@ assert_true  "an unknown local ip does not abort under set -u" no_unbound_error 
 assert_false "an unknown local ip does not serve"              should_i_serve
 
 # ============================================================
+echo
+echo "=== Cluster key helper ==="
+
+KEY_SRC="$SCRIPT_DIR/../pihole-ha-cluster-key"
+eval "$(extract_fn "$KEY_SRC" _peers)"
+
+_keyconf="$(mktemp -d)"
+NODES_CONF="$_keyconf/nodes.conf"
+printf 'HA_NODES=10.33.47.55,10.33.47.3:8081,10.33.47.5\n' > "$NODES_CONF"
+_local_ip() { echo "10.33.47.3"; }
+
+_peerlist="$(_peers | tr '\n' ' ')"
+assert_contains     "peers include the other nodes"   "$_peerlist" "10.33.47.55"
+assert_contains     "peers include the third node"    "$_peerlist" "10.33.47.5"
+assert_not_contains "peers exclude this node"         "$_peerlist" "10.33.47.3 "
+assert_not_contains "the web port is stripped for ssh" "$_peerlist" "8081"
+
+# A node not listed in HA_NODES must still see every peer, not silently none.
+_local_ip() { echo "10.33.47.99"; }
+assert_eq "an unlisted node still lists all peers" "3" "$(_peers | wc -l)"
+
+: > "$NODES_CONF"
+assert_eq "no nodes.conf entries yields no peers" "0" "$(_peers | wc -l)"
+rm -rf "$_keyconf"
+
+# The key must never reach argv — /proc/<pid>/cmdline is world-readable, which is
+# the same mistake install.sh makes with the Pi-hole password.
+_keysrc_body="$(cat "$KEY_SRC")"
+assert_not_contains "the key is not interpolated into an ssh command" \
+    "$_keysrc_body" 'ssh -o ConnectTimeout=10 "$dest" "umask 077; cat > ~/$REMOTE_TMP" "$(cat'
+assert_contains "the key is piped to ssh on stdin instead" \
+    "$_keysrc_body" 'cat > ~/$REMOTE_TMP" < "$KEY_FILE"'
+assert_contains "the key is created under a restrictive umask" \
+    "$_keysrc_body" 'umask 077; openssl rand -hex 32'
+
+# /etc/pihole-ha may legitimately be 0750 root:pihole so the DHCP hook can read
+# notify.conf. The remote step must not clamp it the way install.sh does.
+assert_contains     "the remote step creates the dir without re-moding it" "$_keysrc_body" "sudo mkdir -p '\$CONF_DIR'"
+# Comments are stripped: the script explains in prose why it avoids this, and
+# the prose must not be what satisfies the assertion.
+_keysrc_code="$(grep -vE '^[[:space:]]*#' "$KEY_SRC")"
+assert_not_contains "the remote step does not clamp the config dir"        "$_keysrc_code" "install -d -m 700"
+
+# It has to be installed, or `pihole-ha cluster-key` is a dead subcommand.
+_inst="$(cat "$SCRIPT_DIR/../install.sh")"
+assert_contains "the installer installs it"      "$_inst" "pihole-ha-debug pihole-ha-cluster-key"
+assert_contains "the uninstaller removes it"     "$_inst" "/usr/local/bin/pihole-ha-cluster-key"
+assert_contains "the docker image ships it"      "$(cat "$SCRIPT_DIR/../docker/Dockerfile")" "COPY pihole-ha-cluster-key"
+assert_contains "the CLI exposes it"             "$(cat "$SCRIPT_DIR/../pihole-ha-cli")" "cluster-key|key)"
+
+# ============================================================
 
 all_ok=true
-for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do
+for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh pihole-ha-cluster-key pihole-ha-cli; do
     fpath="$SCRIPT_DIR/../$script"
     if [[ -f "$fpath" ]]; then
         if bash -n "$fpath" 2>&1; then
