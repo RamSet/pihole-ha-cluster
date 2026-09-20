@@ -124,10 +124,27 @@ mkdir -p "$STATUS_DIR"
 
 # Detect and auto-restart pihole-FTL if it crashes
 FTL_LAST_RESTART=0
+
+# Monotonic seconds, for rate limiting. The wall clock is not safe here: a
+# Raspberry Pi has no RTC, boots from a fake-hwclock seed, and the first NTP
+# sync commonly steps the clock BACKWARDS. `now - last` then goes large and
+# negative, the rate limit never expires, and ensure_ftl_running returns 1 on
+# every tick from then on — which parks the main loop on "pihole-FTL down",
+# skipping all DHCP and VIP management while the node keeps the VIP bound.
+# /proc/uptime is monotonic and unaffected by clock steps.
+_mono() {
+    local up _rest
+    if read -r up _rest < /proc/uptime 2>/dev/null && [[ -n "$up" ]]; then
+        printf '%s' "${up%%.*}"
+        return 0
+    fi
+    date +%s
+}
+
 ensure_ftl_running() {
     platform_ftl_is_active && return 0
     local now
-    now="$(date +%s)"
+    now="$(_mono)"
     if (( now - FTL_LAST_RESTART < 30 )); then
         return 1
     fi
@@ -196,9 +213,21 @@ DHCP_MASTER="auto"
 load_master() {
     DHCP_MASTER="auto"
     [[ -f "$MASTER_CONF" ]] || return
-    while IFS='=' read -r key val; do
+    while IFS='=' read -r key val || [[ -n "$key" ]]; do
+        # `|| [[ -n "$key" ]]`: read returns non-zero on a final line with no
+        # trailing newline, so a hand-edited master.conf lost its only line.
+        # load_auth already carries this fix; here it is worse than a dropped
+        # entry, because the reset above means a dropped line reads as
+        # DHCP_MASTER=auto — the pinned node keeps serving (it still reads its
+        # own file correctly) while index 0 also activates, and neither yields.
         [[ "$key" == "DHCP_MASTER" ]] && DHCP_MASTER="$val"
     done < "$MASTER_CONF"
+    # A pin that is not an IP is not a pin. Anything else would be compared
+    # against LOCAL_IP and silently never match.
+    [[ "$DHCP_MASTER" == "auto" ]] || is_valid_ip "$DHCP_MASTER" || {
+        log_warn "event=bad_dhcp_master value=\"$DHCP_MASTER\" action=using_auto"
+        DHCP_MASTER="auto"
+    }
 }
 load_master
 
@@ -242,18 +271,40 @@ reload_vip_conf() {
             if (( _ri < ${#_ROLE_NAMES[@]} )); then ROLES+=("${_ROLE_NAMES[$_ri]}"); else ROLES+=("NODE$((_ri+1))"); fi
         done
         (( NODE_COUNT == 1 )) && ROLES=("STANDALONE")
+        local _found_me=false
         for i in "${!NODES[@]}"; do
-            [[ "${NODES[$i]}" == "$LOCAL_IP" ]] && { MY_IDX=$i; break; }
+            [[ "${NODES[$i]}" == "$LOCAL_IP" ]] && { MY_IDX=$i; _found_me=true; break; }
         done
+        # Removed from the cluster. MY_IDX used to keep its old, now-meaningless
+        # value, and the election then walked NODES past the end of the array —
+        # an unbound variable under `set -u`, which killed the daemon mid-tick
+        # while it was still holding the VIP and serving DHCP. systemd restarted
+        # it, startup failed on the same missing membership, and the node sat in
+        # a restart loop as an unmanaged second DHCP server.
+        if [[ "$_found_me" != "true" ]]; then
+            # -1 is a sentinel the main loop gates on. Setting HA_ENABLED=false
+            # here would not survive: nodes.conf is re-read every tick and would
+            # switch it straight back on, while this block only runs when
+            # HA_NODES changes — so the node would resume electing with a
+            # meaningless MY_IDX.
+            MY_IDX=-1
+            PRIORITY=0
+            ROLE="REMOVED"
+            log_warn "event=removed_from_cluster nodes=\"${NODES[*]}\" local=$LOCAL_IP action=standing_down"
+            return 0
+        fi
         PRIORITY=$((MY_IDX + 1))
         ROLE="${ROLES[$MY_IDX]:-UNKNOWN}"
-        # Recalculate staggered activation delay
+        # Recalculate staggered activation delay. _ACTIVATE_BASE, not a literal:
+        # an operator who raised ACTIVATE_AFTER in nodes.conf to calm a flapping
+        # link silently got the default back the first time HA_NODES changed —
+        # which is exactly when the cluster is least stable.
         if (( MY_IDX == 0 )); then
             ACTIVATE_AFTER=0
         elif (( MY_IDX == NODE_COUNT - 1 && NODE_COUNT > 2 )); then
-            ACTIVATE_AFTER=4
+            ACTIVATE_AFTER=$(( _ACTIVATE_BASE + 2 ))
         else
-            ACTIVATE_AFTER=2
+            ACTIVATE_AFTER=$_ACTIVATE_BASE
         fi
         log_info "event=priority_change nodes=\"${NODES[*]}\" role=$ROLE priority=$PRIORITY"
     fi
@@ -369,7 +420,7 @@ ensure_dns_option() {
     fi
     printf '%s\n' "$full" > "$DNSMASQ_HA"
     # Rate-limit FTL restarts to avoid DHCP disruption
-    local now; now="$(date +%s)"
+    local now; now="$(_mono)"
     if (( now - FTL_LAST_RESTART < 30 )); then
         log_info "event=dns_option_update options=\"$want\" ftl=deferred"
         return
@@ -658,9 +709,33 @@ release_all_sids() {
     for ip in "${!peer_sid[@]}"; do release_sid "$ip"; done
 }
 
-# systemd sends SIGTERM on stop and on restart, so this covers updates and reboots
-# as well as a plain stop. EXIT also catches an unexpected abort under `set -e`.
-trap 'release_all_sids' EXIT INT TERM
+# Everything this node is holding on the cluster's behalf, handed back.
+#
+# The VIP is the important one. It is added out-of-band with `ip addr add`, so
+# nothing else removes it when this process goes away: a `systemctl stop`, a
+# `pihole-ha update`, or an abort left the address bound with no daemon managing
+# it. Another node then quite correctly claimed the same VIP and two hosts
+# answered ARP for it indefinitely — with no process left on this side to notice
+# or yield. Releasing costs at most one poll interval of VIP downtime on a
+# routine restart, which is strictly better than a duplicate address.
+#
+# DHCP is deliberately left alone: dhcp.active lives in pihole.toml and survives
+# this process, so a node that is legitimately the DHCP server must keep serving
+# across a daemon restart rather than dropping the LAN's DHCP for a few seconds.
+_shutdown_release() {
+    release_all_sids
+    if has_vip; then
+        log_info "event=shutdown_release_vip vip=$VIP reason=\"daemon stopping — releasing the VIP so it is never left bound with nothing managing it\""
+        remove_vip
+    fi
+}
+
+# systemd sends SIGTERM on stop and on restart, so this covers updates and
+# reboots as well as a plain stop, plus any abort once the loop is running.
+# It cannot cover the startup checks that exit above this line — the handler
+# calls has_vip/remove_vip, which are not defined yet at that point. A VIP left
+# over from a previous process is instead reconciled by the loop's own election.
+trap '_shutdown_release' EXIT INT TERM
 
 # Does this peer's Pi-hole require a password RIGHT NOW?
 #
@@ -1383,6 +1458,20 @@ while true; do
     # clients pointed at the VIP get real DNS redundancy.
     if [[ "$DHCP_HA" != "true" ]]; then
         dns_only_vip_cycle
+        continue
+    fi
+
+    # Not a member of the cluster any more (removed via the panel, or edited out
+    # of HA_NODES). Hand back anything held on the cluster's behalf and stay put.
+    # Gated on every tick, not once: nodes.conf is re-read continuously, so a
+    # one-shot stand-down inside reload_vip_conf would be undone immediately.
+    if (( MY_IDX < 0 )); then
+        has_vip && remove_vip
+        if [[ "$DHCP_HA" == "true" && "$(get_dhcp)" == "true" ]]; then
+            log_warn "event=removed_standdown reason=\"no longer in HA_NODES — handing DHCP back\""
+            set_dhcp false
+        fi
+        write_status "Removed from cluster - standing by"
         continue
     fi
 

@@ -304,8 +304,14 @@ log_info "event=pull_apply reason=\"payload downloaded\""
 APPLIED_SOMETHING=false
 APPLY_FAILED=false   # set if a component's apply command returns an error
 
-# Apply adlists (always present in payload; merge into gravity.db)
-if [[ -f "$STAGING_DIR/adlists.tsv" ]]; then
+# Apply adlists (merge into gravity.db).
+#
+# Skipped when this payload carries gravity.db, because the wholesale swap below
+# replaces the adlist table anyway: these INSERTs were discarded a moment later.
+# Worse, they dirtied the local database *before* OLD_MD5 was computed, so the
+# comparison against the incoming copy could never match and every single pull
+# did a full database copy plus an FTL restart on unchanged content.
+if [[ -f "$STAGING_DIR/adlists.tsv" && ! ( "$COMP_GRAVITY" == "true" && -f "$STAGING_DIR/gravity.db" ) ]]; then
     _adlists_added=0
     while IFS=$'\t' read -r _enabled _address; do
         [[ -z "$_address" ]] && continue
@@ -394,7 +400,7 @@ apply_array_key() {
 SETTINGS_APPLIED=false
 apply_settings() {
     [[ "$COMP_SETTINGS" == "true" && -f "$STAGING_DIR/settings.json" ]] || return 0
-    local _settings_applied=0 _sjson _skey _sval _rest
+    local _settings_applied=0 _settings_failed=0 _sjson _skey _sval _rest
     _sjson="$(cat "$STAGING_DIR/settings.json")"
     _sjson="${_sjson#\{}"
     _sjson="${_sjson%\}}"
@@ -418,10 +424,22 @@ apply_settings() {
         _sval="${_sval//\\\\/\\}"
         _sval="${_sval//\\\"/\"}"
         if [[ -n "$_skey" ]]; then
-            pihole-FTL --config "$_skey" "$_sval" >/dev/null 2>&1 && (( _settings_applied++ )) || true
+            if pihole-FTL --config "$_skey" "$_sval" >/dev/null 2>&1; then
+                (( _settings_applied++ )) || true
+            else
+                (( _settings_failed++ )) || true
+                log_warn "event=apply component=settings key=$_skey status=failed"
+            fi
         fi
     done
-    log_info "event=apply component=settings status=ok keys=$_settings_applied"
+    # status=ok was unconditional: every key could fail and the run still
+    # reported success and recorded the hash, so it never retried.
+    if (( _settings_failed > 0 )); then
+        log_error "event=apply component=settings status=partial keys=$_settings_applied failed=$_settings_failed"
+        APPLY_FAILED=true
+    else
+        log_info "event=apply component=settings status=ok keys=$_settings_applied"
+    fi
     APPLIED_SOMETHING=true
     SETTINGS_APPLIED=true
 }
@@ -487,16 +505,43 @@ if [[ "$COMP_GRAVITY" == "true" && -f "$STAGING_DIR/gravity.db" ]]; then
     OLD_MD5="$(md5sum /etc/pihole/gravity.db 2>/dev/null | awk '{print $1}')"
     NEW_MD5="$(md5sum "$STAGING_DIR/gravity.db" 2>/dev/null | awk '{print $1}')"
 
-    if [[ "$OLD_MD5" != "$NEW_MD5" ]]; then
+    if [[ -n "$REMOTE_GRAVITY_MD5" && "$NEW_MD5" != "$REMOTE_GRAVITY_MD5" ]]; then
+        # gravity_md5 was parsed out of the manifest and then never used, so the
+        # one content check available on the blocklist was dead code. A download
+        # that truncated but still extracted became this node's blocklist.
+        log_error "event=apply component=gravity status=failed reason=\"staged gravity.db does not match the manifest checksum — refusing to install it\" expected=$REMOTE_GRAVITY_MD5 got=$NEW_MD5"
+        APPLY_FAILED=true
+    elif [[ "$OLD_MD5" != "$NEW_MD5" ]]; then
         # Atomic swap: FTL is still live, so copy into place then rename to avoid
         # a query hitting a half-written gravity.db.
-        cp "$STAGING_DIR/gravity.db" /etc/pihole/gravity.db.tmp
-        chown pihole:pihole /etc/pihole/gravity.db.tmp 2>/dev/null || true
-        mv -f /etc/pihole/gravity.db.tmp /etc/pihole/gravity.db
-        platform_ftl_restart
-        GRAVITY_RESTARTED=true
-        log_info "event=apply component=gravity status=ok ftl=restarted"
-        APPLIED_SOMETHING=true
+        #
+        # cp is checked and the copy is flushed before the rename. Neither used
+        # to be: on a full disk — an SD card holding the tarball *and* the
+        # extracted copy is the normal case here — cp left a partial file and
+        # `mv -f` promoted it over a working blocklist, after which the pull was
+        # recorded as successful and never retried.
+        if ! cp "$STAGING_DIR/gravity.db" /etc/pihole/gravity.db.tmp 2>/dev/null; then
+            log_error "event=apply component=gravity status=failed reason=\"could not stage gravity.db (out of space?) — keeping the existing blocklist\""
+            rm -f /etc/pihole/gravity.db.tmp
+            APPLY_FAILED=true
+        elif [[ "$(md5sum /etc/pihole/gravity.db.tmp 2>/dev/null | awk '{print $1}')" != "$NEW_MD5" ]]; then
+            log_error "event=apply component=gravity status=failed reason=\"staged copy does not match its source — keeping the existing blocklist\""
+            rm -f /etc/pihole/gravity.db.tmp
+            APPLY_FAILED=true
+        else
+            sync /etc/pihole/gravity.db.tmp 2>/dev/null || true
+            chown pihole:pihole /etc/pihole/gravity.db.tmp 2>/dev/null || true
+            if mv -f /etc/pihole/gravity.db.tmp /etc/pihole/gravity.db; then
+                platform_ftl_restart
+                GRAVITY_RESTARTED=true
+                log_info "event=apply component=gravity status=ok ftl=restarted"
+                APPLIED_SOMETHING=true
+            else
+                log_error "event=apply component=gravity status=failed reason=\"could not replace gravity.db\""
+                rm -f /etc/pihole/gravity.db.tmp
+                APPLY_FAILED=true
+            fi
+        fi
     else
         log_info "event=apply component=gravity status=unchanged"
     fi
