@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.16.2 — 2026-09-19
+- Say why our own Pi-hole API check failed, and stop assuming peers are on port 80
+
 ## v3.16.1 — 2026-09-19
 - Stop calling every unrecognised auth reply a wrong password
 - Declare the peer maps in tests the way the daemon does
