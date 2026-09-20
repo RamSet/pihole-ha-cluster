@@ -927,6 +927,14 @@ should_i_serve() {
         fi
         DHCP_MASTER="auto"
     fi
+    # A node that cannot answer DNS itself must never assert DHCP or claim the
+    # VIP. should_i_hold_vip has carried this precondition all along and says
+    # why: without it a primary whose FTL is up but not serving keeps DHCP and
+    # the VIP while a secondary also takes them, and neither side ever yields —
+    # index 0 never yields, and a pinned master never yields. The DHCP path was
+    # missing the same guard. Hysteresis is unchanged: standing down still needs
+    # DEACTIVATE_AFTER consecutive ticks, so one bad probe does not drop DHCP.
+    is_dns_healthy "$LOCAL_IP" || return 1
     if [[ "$DHCP_MASTER" != "auto" ]]; then
         # Manual override mode
         if [[ "$DHCP_MASTER" == "$LOCAL_IP" ]]; then
@@ -998,7 +1006,10 @@ yielded_to() {
 # would let a password-locked peer look "down" and trigger a false takeover.
 is_dns_healthy() {
     local ip="$1"
-    [[ "${peer_ping[$ip]}" == "true" ]] && [[ "${peer_dns[$ip]}" == "true" ]]
+    # `:-` matters: every other accessor in this file has it. Without it an ip
+    # that is not in the peer maps (a node just removed from HA_NODES) is an
+    # unbound variable, which under `set -u` kills the daemon mid-tick.
+    [[ "${peer_ping[$ip]:-}" == "true" ]] && [[ "${peer_dns[$ip]:-}" == "true" ]]
 }
 
 # Priority election for the DNS VIP. Hold it only if this node can itself answer

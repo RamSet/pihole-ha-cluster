@@ -192,6 +192,11 @@ echo "=== Stale DHCP_MASTER falls back to priority order ==="
 # A pin naming a departed node reads as "master is down" to is_serving, which
 # made every remaining node take over DHCP at once.
 eval "$(extract_fn "$HA_SRC" should_i_serve)"
+# should_i_serve gates every activation path on this node's own DNS health, the
+# same precondition should_i_hold_vip uses. Extract it too — an undefined helper
+# returns 127, which reads as "unhealthy" and fails these tests for its own
+# reason rather than the code's.
+eval "$(extract_fn "$HA_SRC" is_dns_healthy)"
 NODES=("10.33.47.55" "10.33.47.3")
 LOCAL_IP="10.33.47.3"; MY_IDX=1
 peer_ping["10.33.47.55"]="true"; peer_dns["10.33.47.55"]="true"
@@ -1356,6 +1361,122 @@ _reg_block="$(cat "$SCRIPT_DIR/../install.sh")"
 _reg_block="${_reg_block##*--- 22. Register this node}"
 assert_eq "both join outcomes print their reasons" "2" \
     "$(grep -c 'for _jw in' <<< "$_reg_block")"
+
+# ============================================================
+echo "=== sync.conf is parsed, never sourced ==="
+
+# sync.conf travels inside the config-sync payload: pihole-ha-sync ships it and
+# pihole-ha-sync-pull writes it verbatim. It was then `.`-sourced in nine places
+# as root, so a peer that published a payload executed shell on every node.
+PLATFORM_SRC="$SCRIPT_DIR/../pihole-ha-platform"
+eval "$(extract_fn "$PLATFORM_SRC" is_valid_ip)"
+eval "$(extract_fn "$PLATFORM_SRC" load_sync_conf)"
+
+assert_eq "no script sources sync.conf any more" "" \
+    "$(grep -rln '\. "\$SYNC_CONF"' "$SCRIPT_DIR/.." --include='pihole-ha*' --include='*.sh' 2>/dev/null)"
+
+_sc="$(mktemp)"
+_PWNED=""
+cat > "$_sc" <<'CONF'
+SYNC_ENABLED=true
+_PWNED=$(id -u)
+SYNC_GRAVITY=false
+CONF
+SYNC_ENABLED=false SYNC_GRAVITY=true
+load_sync_conf "$_sc"
+assert_eq "a command substitution is not executed" "" "$_PWNED"
+assert_eq "whitelisted keys before it still load"  "true"  "$SYNC_ENABLED"
+assert_eq "whitelisted keys after it still load"   "false" "$SYNC_GRAVITY"
+
+# An unknown key must not become a variable at all — that is how HA_ENABLED or
+# SYNC_BLOB_DIR would be smuggled in from a peer's payload.
+printf 'HA_ENABLED=false\nSYNC_BLOB_DIR=/tmp/evil\n' > "$_sc"
+HA_ENABLED=true SYNC_BLOB_DIR=/var/lib/pihole-ha
+load_sync_conf "$_sc"
+assert_eq "an unlisted key is ignored"          "true" "$HA_ENABLED"
+assert_eq "the blob dir cannot arrive by sync"  "/var/lib/pihole-ha" "$SYNC_BLOB_DIR"
+
+# Values are shape-checked, and a rejected value leaves the caller's default.
+printf 'SYNC_PRIMARY=10.33.47.3\nSYNC_INTERVAL=30\n' > "$_sc"
+SYNC_PRIMARY="10.33.47.55" SYNC_INTERVAL=15
+load_sync_conf "$_sc"
+assert_eq "a valid primary is taken"   "10.33.47.3" "$SYNC_PRIMARY"
+assert_eq "a valid interval is taken"  "30"         "$SYNC_INTERVAL"
+
+printf 'SYNC_PRIMARY=10.33.47.3;id\nSYNC_INTERVAL=0\nSYNC_ENABLED=yes\n' > "$_sc"
+SYNC_PRIMARY="10.33.47.55" SYNC_INTERVAL=15 SYNC_ENABLED=true
+load_sync_conf "$_sc"
+assert_eq "a non-IP primary is refused"        "10.33.47.55" "$SYNC_PRIMARY"
+assert_eq "an out-of-range interval is refused" "15"         "$SYNC_INTERVAL"
+assert_eq "a non-boolean toggle is refused"     "true"       "$SYNC_ENABLED"
+
+# An absent key must leave the caller's default alone: every call site sets its
+# own defaults first and relies on that.
+: > "$_sc"
+SYNC_ENABLED=false
+load_sync_conf "$_sc"
+assert_eq "an absent key keeps the caller's default" "false" "$SYNC_ENABLED"
+
+printf 'SYNC_INTERVAL=45' > "$_sc"   # deliberately no trailing newline
+SYNC_INTERVAL=15
+load_sync_conf "$_sc"
+assert_eq "a final line without a newline is not dropped" "45" "$SYNC_INTERVAL"
+rm -f "$_sc"
+
+# ============================================================
+echo
+echo "=== An unreachable Pi-hole must not read as 'no password set' ==="
+
+# _check_auth collapsed "no password" and "could not ask" into one boolean, so a
+# slow or restarting FTL opened every mutating endpoint. sync-pull restarts FTL
+# on every config apply, so the window recurred on a timer.
+eval "$(extract_fn "$DASH_SRC" _check_auth)"
+_AUTH_FAIL_WHY="" _AUTH_CHECKED="" _AUTH_REQUIRED=""
+_validate_sid() { return 0; }
+
+_pihole_has_auth() { return 2; }   # cannot tell
+assert_false "a write is refused when Pi-hole cannot be reached" _check_auth "sid=whatever"
+assert_contains "the refusal says why" "$_AUTH_FAIL_WHY" "refusing the write"
+
+# "cannot tell" must not be cached — the next request has to ask again.
+_AUTH_CHECKED="" _AUTH_REQUIRED=""
+_check_auth "sid=x" >/dev/null 2>&1
+assert_eq "an unknown answer is not cached" "" "$_AUTH_CHECKED"
+
+_AUTH_CHECKED="" _AUTH_REQUIRED=""
+_pihole_has_auth() { return 1; }   # genuinely no password set
+assert_true "a genuinely passwordless node still allows writes" _check_auth ""
+
+_AUTH_CHECKED="" _AUTH_REQUIRED=""
+_pihole_has_auth() { return 0; }   # password set
+assert_true "a password-protected node still validates the sid" _check_auth "sid=good"
+
+# ============================================================
+echo
+echo "=== A node that cannot answer DNS never asserts DHCP ==="
+
+# should_i_hold_vip has always required local DNS health; should_i_serve did
+# not, so a primary whose FTL was up but not serving kept DHCP and the VIP while
+# a secondary took them too, and neither side ever yielded.
+NODES=("10.33.47.55" "10.33.47.3")
+peer_ping["10.33.47.55"]="true"; peer_dns["10.33.47.55"]="true"
+peer_api["10.33.47.55"]="true";  peer_dhcp["10.33.47.55"]="true"
+
+DHCP_MASTER="auto"; LOCAL_IP="10.33.47.55"; MY_IDX=0
+peer_dns["10.33.47.55"]="false"
+assert_false "index 0 stands down when its own DNS is dead" should_i_serve
+
+DHCP_MASTER="10.33.47.55"
+assert_false "a pinned master stands down when its own DNS is dead" should_i_serve
+
+peer_dns["10.33.47.55"]="true"
+DHCP_MASTER="auto"
+assert_true  "index 0 serves again once its DNS recovers" should_i_serve
+
+# The guard must not abort the daemon for a node missing from the peer maps.
+LOCAL_IP="10.33.47.99"; MY_IDX=0
+assert_true  "an unknown local ip does not abort under set -u" no_unbound_error should_i_serve
+assert_false "an unknown local ip does not serve"              should_i_serve
 
 # ============================================================
 

@@ -93,7 +93,7 @@ SYNC_DNS=true
 SYNC_SETTINGS=true
 SYNC_NOTIFY=true
 SYNC_PRIMARY="${NODES[0]}"
-[[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+load_sync_conf "$SYNC_CONF"
 
 # Exit if sync disabled
 if [[ "$SYNC_ENABLED" != "true" ]]; then

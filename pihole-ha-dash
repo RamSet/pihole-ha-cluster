@@ -177,9 +177,18 @@ if [[ "${1:-}" == "--handle" ]]; then
     fi
     _PIHOLE_PORT="${_NODE_PORTS[$_LOCAL_IP]:-80}"
     _PIHOLE_BASE="http://localhost:${_PIHOLE_PORT}"
+    # Three states, not two: 0 = a password is set, 1 = no password is set,
+    # 2 = could not ask. Collapsing 2 into 1 meant any slow or restarting FTL
+    # read as "this node has no password" and opened every mutating endpoint to
+    # unauthenticated callers — and pihole-ha-sync-pull restarts FTL on every
+    # config apply, so the window recurred on a timer. Budget matches
+    # _validate_sid below; the old 2s was the same figure that function was
+    # given 5s to fix.
     _pihole_has_auth() {
-        local resp
-        resp="$(curl -s --max-time 2 "${_PIHOLE_BASE}/api/dns/blocking" 2>/dev/null)" || return 1
+        local resp rc=0
+        resp="$(curl -s --max-time "${SID_VALIDATE_TIMEOUT:-5}" "${_PIHOLE_BASE}/api/dns/blocking" 2>/dev/null)" || rc=$?
+        (( rc != 0 )) && return 2
+        [[ -z "$resp" ]] && return 2
         echo "$resp" | grep -q '"unauthorized"'
     }
     # Validate the caller's Pi-hole session. Sets _AUTH_FAIL_WHY so a refusal can
@@ -210,8 +219,21 @@ if [[ "${1:-}" == "--handle" ]]; then
     _check_auth() {
         local qs="$1"
         if [[ -z "$_AUTH_CHECKED" ]]; then
-            _pihole_has_auth && _AUTH_REQUIRED="true" || _AUTH_REQUIRED="false"
-            _AUTH_CHECKED="1"
+            local _hrc=0
+            _pihole_has_auth || _hrc=$?
+            case "$_hrc" in
+                0) _AUTH_REQUIRED="true" ;;
+                1) _AUTH_REQUIRED="false" ;;
+                *) _AUTH_REQUIRED="unknown" ;;
+            esac
+            # Cache only an answer we actually got. "Could not ask" must be
+            # retried, never pinned for the life of the handler.
+            [[ "$_AUTH_REQUIRED" != "unknown" ]] && _AUTH_CHECKED="1"
+        fi
+        # Fail closed: refuse the write rather than assume there is no password.
+        if [[ "$_AUTH_REQUIRED" == "unknown" ]]; then
+            _AUTH_FAIL_WHY="could not reach this node's own Pi-hole API within ${SID_VALIDATE_TIMEOUT:-5}s to determine whether a password is set — refusing the write rather than assuming there is none"
+            return 1
         fi
         [[ "$_AUTH_REQUIRED" != "true" ]] && return 0
         local sid=""
@@ -372,7 +394,7 @@ if [[ "${1:-}" == "--handle" ]]; then
         /api/sync/config)
             # Read sync config, return as JSON
             SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true SYNC_PRIMARY="${_HA_NODES[0]}" SYNC_INTERVAL=15
-            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            load_sync_conf "$SYNC_CONF"
             send_headers "200 OK" "application/json"
             printf '{"enabled":%s,"gravity":%s,"dhcp":%s,"dns":%s,"settings":%s,"primary":"%s","interval":%s}\n' \
                 "$SYNC_ENABLED" "$SYNC_GRAVITY" "$SYNC_DHCP" "$SYNC_DNS" "$SYNC_SETTINGS" "$SYNC_PRIMARY" "$SYNC_INTERVAL"
@@ -381,7 +403,7 @@ if [[ "${1:-}" == "--handle" ]]; then
             _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
             mkdir -p /etc/pihole-ha
             SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true
-            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            load_sync_conf "$SYNC_CONF"
             if [[ "$SYNC_ENABLED" == "true" ]]; then NEW="false"; else NEW="true"; fi
             if [[ -f "$SYNC_CONF" ]]; then
                 sed -i "s/^SYNC_ENABLED=.*/SYNC_ENABLED=$NEW/" "$SYNC_CONF"
@@ -395,7 +417,7 @@ if [[ "${1:-}" == "--handle" ]]; then
             _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
             mkdir -p /etc/pihole-ha
             SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true
-            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            load_sync_conf "$SYNC_CONF"
             if [[ "$SYNC_GRAVITY" == "true" ]]; then NEW="false"; else NEW="true"; fi
             if [[ -f "$SYNC_CONF" ]]; then
                 sed -i "s/^SYNC_GRAVITY=.*/SYNC_GRAVITY=$NEW/" "$SYNC_CONF"
@@ -409,7 +431,7 @@ if [[ "${1:-}" == "--handle" ]]; then
             _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
             mkdir -p /etc/pihole-ha
             SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true
-            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            load_sync_conf "$SYNC_CONF"
             if [[ "$SYNC_DHCP" == "true" ]]; then NEW="false"; else NEW="true"; fi
             if [[ -f "$SYNC_CONF" ]]; then
                 sed -i "s/^SYNC_DHCP=.*/SYNC_DHCP=$NEW/" "$SYNC_CONF"
@@ -423,7 +445,7 @@ if [[ "${1:-}" == "--handle" ]]; then
             _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
             mkdir -p /etc/pihole-ha
             SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true
-            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            load_sync_conf "$SYNC_CONF"
             if [[ "$SYNC_DNS" == "true" ]]; then NEW="false"; else NEW="true"; fi
             if [[ -f "$SYNC_CONF" ]]; then
                 sed -i "s/^SYNC_DNS=.*/SYNC_DNS=$NEW/" "$SYNC_CONF"
@@ -437,7 +459,7 @@ if [[ "${1:-}" == "--handle" ]]; then
             _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
             mkdir -p /etc/pihole-ha
             SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true
-            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            load_sync_conf "$SYNC_CONF"
             if [[ "$SYNC_SETTINGS" == "true" ]]; then NEW="false"; else NEW="true"; fi
             if [[ -f "$SYNC_CONF" ]]; then
                 if grep -q "^SYNC_SETTINGS=" "$SYNC_CONF"; then
@@ -493,7 +515,7 @@ if [[ "${1:-}" == "--handle" ]]; then
             send_headers "200 OK" "application/json"
             LOCAL_IP="$(platform_get_local_ip)"
             SYNC_PRIMARY="${_HA_NODES[0]}"
-            [[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+            load_sync_conf "$SYNC_CONF"
             if [[ "$LOCAL_IP" == "$SYNC_PRIMARY" ]]; then
                 /usr/local/bin/pihole-ha-sync --force &>/dev/null &
                 echo '{"ok":true,"action":"build"}'
