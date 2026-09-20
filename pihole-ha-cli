@@ -2,7 +2,7 @@
 # pihole-ha-cli — the management CLI behind the global `pihole-ha` command.
 # Invoked by the pihole-ha dispatcher (see the top of `pihole-ha`); it is not
 # meant to be run directly. Subcommands: update, status, version, restart,
-# logs, debug, uninstall, help.
+# logs, debug, cluster-key, uninstall, help.
 set -uo pipefail
 
 REPO_URL="https://github.com/RamSet/pihole-ha-cluster.git"
@@ -112,6 +112,11 @@ cmd_debug() {
     echo "pihole-ha-debug not installed." >&2; exit 1
 }
 
+cmd_cluster_key() {
+    if [[ -x /usr/local/bin/pihole-ha-cluster-key ]]; then exec /usr/local/bin/pihole-ha-cluster-key "$@"; fi
+    echo "pihole-ha-cluster-key not installed." >&2; exit 1
+}
+
 cmd_uninstall() { _run_installer --uninstall; }
 
 cmd_help() {
@@ -126,6 +131,7 @@ Usage: pihole-ha <command>
   restart      Restart the pihole-ha daemon and dashboard
   logs [-f|N]  Show daemon+dashboard logs (last 100, N lines, or -f to follow)
   debug        Run the diagnostics collector (pihole-ha-debug)
+  cluster-key  Create the config-sync signing key and copy it to the other nodes
   uninstall    Remove pihole-ha from this node (keeps Pi-hole)
   help         Show this help
 
@@ -141,6 +147,7 @@ case "$cmd" in
     restart)                cmd_restart "$@" ;;
     logs|log)               cmd_logs "$@" ;;
     debug)                  cmd_debug "$@" ;;
+    cluster-key|key)        cmd_cluster_key "$@" ;;
     uninstall|remove)       cmd_uninstall "$@" ;;
     help|-h|--help)         cmd_help ;;
     *) echo "Unknown command: $cmd" >&2; echo; cmd_help; exit 1 ;;
