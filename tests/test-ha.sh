@@ -898,6 +898,8 @@ _auth_probe() {   # $1 body, $2 http status, $3 curl rc
     # script: a body containing a double quote closed the string and the probe
     # failed for its own reason.
     PROBE_BODY="$1" PROBE_CODE="$2" PROBE_RC="${3:-0}" bash -c '
+        # json_str/json_bool live in the platform library, as the daemon has them
+        source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
         AUTH_TIMEOUT=10; AUTH_RETRY_SEC=60
         declare -A peer_password peer_sid peer_auth_next peer_auth_why NODE_PORTS
         peer_password[10.0.0.9]="stored-pw"
@@ -942,6 +944,7 @@ assert_eq "the quoted reply carries no newline" "0" "$(printf '%s' "$_msg" | wc 
 # neither open nor merely unreachable (Discourse 86667 again).
 _self_probe() {   # $1 body, $2 curl rc
     PROBE_BODY="$1" PROBE_RC="${2:-0}" bash -c '
+        source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
         HEALTH_TIMEOUT=2; LOCAL_IP=10.0.0.1
         '"$(grep -E '^declare -A peer_' "$SCRIPT_DIR/../pihole-ha")"'
         declare -A NODE_PORTS; NODE_PORTS[10.0.0.1]=8080
@@ -985,6 +988,53 @@ assert_not_contains "the dashboard does not assume port 80 for a peer login" \
     "$_dash_src" 'http://$ip/api/auth'
 assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
+
+# ============================================================
+# Pi-hole's API must be parsed by shape, not by whitespace
+# ------------------------------------------------------------
+# With webserver.api.prettyJSON on, Pi-hole prints "sid":<tab>"...". Every
+# compact-only match missed, so a login that HAD succeeded read as a failure and
+# its session was abandoned -- one seat per retry until that Pi-hole refused
+# every login on the cluster. Reproduced against a real instance: three attempts
+# left three orphaned sessions and no sid. (Discourse 86667.)
+_json_probe() {   # $1 body, $2 fn, $3 key
+    PROBE_BODY="$1" bash -c '
+        source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
+        '"$2"' "$PROBE_BODY" '"$3"'
+    '
+}
+_compact='{"session":{"valid":true,"sid":"ABC","validity":1800}}'
+_spaced='{"session": {"valid": true, "sid": "ABC", "validity": 1800}}'
+_tabbed=$'{\n\t"session":\t{\n\t\t"valid":\ttrue,\n\t\t"sid":\t"ABC",\n\t\t"validity":\t1800\n\t}\n}'
+for _fmt in compact spaced tabbed; do
+    eval "_body=\"\$_$_fmt\""
+    assert_eq "$_fmt JSON: the session id is read"  "ABC"  "$(_json_probe "$_body" json_str sid)"
+    assert_eq "$_fmt JSON: the boolean is read"     "true" "$(_json_probe "$_body" json_bool valid)"
+    assert_eq "$_fmt JSON: the number is read"      "1800" "$(_json_probe "$_body" json_num validity)"
+done
+assert_eq "a null value yields no string" "" "$(_json_probe '{"sid":	null}' json_str sid)"
+assert_eq "a missing key yields nothing"  "" "$(_json_probe '{"other":"x"}' json_str sid)"
+assert_eq "false is read as false, not as missing" "false" \
+    "$(_json_probe '{"valid" :  false}' json_bool valid)"
+
+# The whole point is the login path, so exercise it with a pretty-printed reply.
+_pretty_login=$'{\n\t"session":\t{\n\t\t"valid":\ttrue,\n\t\t"sid":\t"PRETTY42",\n\t\t"message":\t"password correct"\n\t}\n}'
+assert_eq "a pretty-printed login is recognised, not abandoned" \
+    "PRETTY42" "$(_auth_probe "$_pretty_login" 200 | cut -d'|' -f1)"
+_pretty_open=$'{\n\t"session":\t{\n\t\t"valid":\ttrue,\n\t\t"sid":\tnull,\n\t\t"message":\t"no password set"\n\t}\n}'
+assert_contains "a pretty-printed passwordless peer is still not a rejection" \
+    "$(_auth_probe "$_pretty_open" 200)" "NO Pi-hole password"
+assert_contains "a pretty-printed protected node is not called passwordless" \
+    "$(_self_probe $'{\n\t"session":\t{\n\t\t"valid":\tfalse\n\t}\n}')" 'auth="self"'
+
+# Class guard: no Pi-hole field may be matched with the colon glued to its
+# value again. Comments quote the wire format on purpose, so strip them.
+for _f in pihole-ha pihole-ha-dash; do
+    _code="$(sed 's/#.*//' "$SCRIPT_DIR/../$_f")"
+    assert_not_contains "$_f does not match \"valid\": with no whitespace allowed" "$_code" '"valid":'
+    assert_not_contains "$_f does not match \"sid\": with no whitespace allowed"   "$_code" '"sid":"'
+    assert_not_contains "$_f does not match \"active\": with no whitespace allowed" "$_code" '"active":'
+done
 
 # ============================================================
 echo

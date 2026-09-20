@@ -457,8 +457,8 @@ ensure_sid() {
         -d "{\"password\":\"${_pw}\"}" 2>/dev/null)" || rc=$?
     local http="${_raw##*$'\n'}"
     resp="${_raw%$'\n'*}"
-    local sid=""
-    [[ "$resp" =~ \"sid\":\"([^\"]*)\" ]] && sid="${BASH_REMATCH[1]}"
+    local sid
+    sid="$(json_str "$resp" sid)"
     if [[ -n "$sid" && "$sid" != "null" ]]; then
         peer_sid[$ip]="$sid"
         unset "peer_auth_next[$ip]" "peer_auth_why[$ip]"
@@ -477,7 +477,7 @@ ensure_sid() {
         peer_auth_why[$ip]="the peer reports API seats exceeded (raise webserver.api.max_sessions there, and check nothing is opening sessions it never closes)"
     elif (( rc != 0 )); then
         peer_auth_why[$ip]="could not reach the peer's API (curl rc=${rc})"
-    elif [[ "$resp" == *'"valid":true'* ]]; then
+    elif [[ "$(json_bool "$resp" valid)" == "true" ]]; then
         # Not a rejection: this peer needs no session at all.
         #
         # Keyed on "valid":true, NOT on the message, because the message lies.
@@ -658,9 +658,9 @@ peer_requires_password() {
     local port="${NODE_PORTS[$ip]:-80}"
     PEER_NEEDS_PASS=""; PEER_PROBE_REPLY=""
     PEER_PROBE_REPLY="$(curl -s --max-time "${HEALTH_TIMEOUT:-2}" "http://${ip}:${port}/api/auth" 2>/dev/null)" || return 1
-    case "$PEER_PROBE_REPLY" in
-        *'"valid":false'*) PEER_NEEDS_PASS="true"  ;;
-        *'"valid":true'*)  PEER_NEEDS_PASS="false" ;;
+    case "$(json_bool "$PEER_PROBE_REPLY" valid)" in
+        false) PEER_NEEDS_PASS="true"  ;;
+        true)  PEER_NEEDS_PASS="false" ;;
         *) return 1 ;;
     esac
 }
@@ -818,13 +818,10 @@ check_peer() {
     local stats
     api_url "$ip" /api/stats/summary
     stats="$(curl -s --max-time 2 "$API_URL" 2>/dev/null)"
-    if [[ "$stats" =~ \"active\":([0-9]*) ]]; then
-        peer_clients[$ip]="${BASH_REMATCH[1]}"
-    else
-        peer_clients[$ip]=""
-    fi
+    peer_clients[$ip]="$(json_num "$stats" active)"
     [[ -z "${peer_clients[$ip]}" ]] && peer_clients[$ip]="null"
-    if [[ "$resp" == *'"active":true'* ]]; then
+    local _dhcp_active; _dhcp_active="$(json_bool "$resp" active)"
+    if [[ "$_dhcp_active" == "true" ]]; then
         peer_dhcp[$ip]="true"
         # Count '"expires"' occurrences without grep|wc: strip them out and
         # divide the length difference by the needle length.
@@ -833,7 +830,7 @@ check_peer() {
         _leases="$(curl -s --max-time 2 "$API_URL" 2>/dev/null)"
         _stripped="${_leases//$_needle/}"
         peer_leases[$ip]=$(( (${#_leases} - ${#_stripped}) / ${#_needle} ))
-    elif [[ "$resp" == *'"active":false'* ]]; then
+    elif [[ "$_dhcp_active" == "false" ]]; then
         peer_dhcp[$ip]="false"; peer_leases[$ip]="null"
     else
         peer_dhcp[$ip]="null"; peer_leases[$ip]="null"

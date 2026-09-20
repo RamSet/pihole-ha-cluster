@@ -247,7 +247,7 @@ if [[ "${1:-}" == "--handle" ]]; then
         resp="$(curl -s --max-time "${AUTH_TIMEOUT:-10}" -X POST "http://$ip:${_pport}/api/auth" \
             -H "Content-Type: application/json" \
             -d "{\"password\":\"$_pass\"}" 2>/dev/null)" || return
-        sid="$(echo "$resp" | grep -o '"sid":"[^"]*"' | cut -d'"' -f4)"
+        sid="$(json_str "$resp" sid)"
         [[ -n "$sid" && "$sid" != "null" ]] && echo "$sid"
     }
     _urlencode() {
