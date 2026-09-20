@@ -133,6 +133,39 @@ platform_repo_info() {
     printf 'REPO_BRANCH=%s\n' "$branch"
 }
 
+# --- config-sync signing -----------------------------------------------------
+#
+# The cluster secret, HMAC-SHA256. Prints the hex digest of stdin, or nothing.
+# Nothing can never equal a real signature, so every caller fails closed.
+#
+# Rejects a short or empty key rather than using it: `openssl rand -hex 32 >
+# cluster.key` leaves a zero-byte file if openssl is missing or the command is
+# interrupted, and both sides would then HMAC under the empty string, agree, and
+# log signature_ok — a signature anyone can forge, reported as verified.
+platform_sync_hmac() {   # $1 = key file
+    local keyfile="$1" key
+    [[ -s "$keyfile" ]] || return 1
+    command -v openssl >/dev/null 2>&1 || return 1
+    key="$(cat "$keyfile" 2>/dev/null)"
+    (( ${#key} >= 16 )) || return 1
+    openssl dgst -sha256 -hmac "$key" 2>/dev/null | awk '{print $NF}'
+}
+
+# The canonical string a manifest signature covers. Field order is fixed and the
+# separator cannot appear in any field, so this is unambiguous.
+#
+# Signing only the tarball left every field a puller actually decides from —
+# config_version, the content hash, the component flags — forgeable while the
+# payload signature stayed valid. That allowed an on-path attacker to replay an
+# old, genuinely signed payload under a huge config_version (a silent config
+# rollback), or to clear one component flag so a standby quietly stopped
+# receiving that part of the config while still recording itself up to date.
+# Including the payload's own HMAC binds the manifest to the tarball it claims
+# to describe.
+platform_sync_manifest_canon() {   # ts hash ver gravity_md5 size payload_sig gravity dhcp dns settings notify syncconf
+    printf 'phasync1|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s' "$@"
+}
+
 # Per-kind mute helper. Returns 0 (muted) when $1 is a non-empty tag that
 # appears in PO_MUTED_TAGS (comma-separated). Untagged calls always pass.
 # Relies on the caller having loaded notify.conf this run; the daemon
