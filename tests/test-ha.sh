@@ -1616,6 +1616,147 @@ assert_contains "setup.sh exports the detected repo"          "$(cat "$SCRIPT_DI
 assert_contains "the dashboard update check follows it too"   "$(cat "$SCRIPT_DIR/../pihole-ha-dash")" "REPO_SLUG=//p"
 
 # ============================================================
+echo
+echo "=== The manifest is signed, not just the payload ==="
+
+PLAT_SRC="$SCRIPT_DIR/../pihole-ha-platform"
+eval "$(extract_fn "$PLAT_SRC" platform_sync_hmac)"
+eval "$(extract_fn "$PLAT_SRC" platform_sync_manifest_canon)"
+
+if command -v openssl >/dev/null 2>&1; then
+    _sd="$(mktemp -d)"
+    openssl rand -hex 32 > "$_sd/key"
+    echo "payload-bytes" > "$_sd/payload"
+    _psig="$(platform_sync_hmac "$_sd/key" < "$_sd/payload")"
+
+    # ts hash ver md5 size payload_sig gravity dhcp dns settings notify syncconf
+    _msig() { platform_sync_manifest_canon "2026-09-20T10:00:00" "abc123" "$1" "md5x" "14" "${3:-$_psig}" \
+                  "$2" true true true true true | platform_sync_hmac "$_sd/key"; }
+    _good="$(_msig 7 true)"
+
+    assert_eq "publisher and puller derive the same manifest signature" "$_good" "$(_msig 7 true)"
+
+    # The rollback / version-wedge attack: replay a validly signed payload under
+    # a forged config_version. This is what the payload-only signature allowed.
+    assert_false "a forged config_version no longer verifies" [ "$_good" = "$(_msig 999999 true)" ]
+    # Silent component suppression: clear one flag and the standby stops getting
+    # that component while still recording itself up to date.
+    assert_false "a flipped component flag no longer verifies" [ "$_good" = "$(_msig 7 false)" ]
+    # The manifest must be bound to the tarball it describes.
+    assert_false "swapping in another payload's signature fails" [ "$_good" = "$(_msig 7 true deadbeef)" ]
+
+    # C6: a truncated or empty key must not silently become a key everyone knows.
+    : > "$_sd/empty"
+    assert_false "an empty cluster.key produces no signature" platform_sync_hmac "$_sd/empty"
+    printf 'short\n' > "$_sd/short"
+    assert_false "a too-short cluster.key is refused"         platform_sync_hmac "$_sd/short"
+    assert_false "a missing cluster.key produces no signature" platform_sync_hmac "$_sd/nope"
+    rm -rf "$_sd"
+else
+    echo "  SKIP  openssl not available"
+fi
+
+_syncsrc="$(cat "$SCRIPT_DIR/../pihole-ha-sync")"
+_pullsrc="$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")"
+# Appended, not substituted: a puller from before this change greps only
+# "signature", so an upgraded publisher must keep working for it.
+assert_contains "the payload signature field is still published" "$_syncsrc" '"signature":"%s"'
+assert_contains "the manifest signature is published alongside"  "$_syncsrc" '"manifest_sig":"%s"'
+# C4: the version-adopt shortcut ran before any verification, so one spoofed
+# manifest could pin sync-version high and freeze the node permanently.
+_verify_at="$(grep -n 'manifest signature invalid' <<< "$_pullsrc" | head -1 | cut -d: -f1)"
+_adopt_at="$(grep -n 'event=version_adopt' <<< "$_pullsrc" | head -1 | cut -d: -f1)"
+assert_true "the manifest is verified before a version is adopted" [ "$_verify_at" -lt "$_adopt_at" ]
+_download_at="$(grep -n 'api/sync/payload' <<< "$_pullsrc" | head -1 | cut -d: -f1)"
+assert_true "and before the payload is downloaded"                 [ "$_verify_at" -lt "$_download_at" ]
+# A missing openssl used to warn and apply anyway -- the one case where the
+# operator had explicitly asked for verification.
+assert_contains "a missing openssl now rejects instead of warning" "$_pullsrc" "refusing to apply a payload this node cannot verify"
+assert_not_contains "the old fail-open warning is gone"            "$_pullsrc" "payload NOT verified"
+
+# ============================================================
+echo
+echo "=== Pushover credentials stay off the unauthenticated payload ==="
+
+# /api/sync/payload is an unauthenticated read endpoint, so everything in the
+# tarball is LAN-readable. notify.conf carried PO_USER/PO_TOKEN in cleartext.
+assert_contains "the publisher strips the credentials"   "$_syncsrc" "grep -vE '^(PO_USER|PO_TOKEN)=' /etc/pihole-ha/notify.conf > \"\$STAGING_DIR/notify.conf\""
+assert_contains "change detection uses the same filter"  "$_syncsrc" "grep -vE '^(PO_USER|PO_TOKEN)=' /etc/pihole-ha/notify.conf 2>/dev/null | md5sum"
+# A plain cp would now wipe every standby's credentials on the first pull.
+assert_contains "the puller merges instead of overwriting" "$_pullsrc" 'notify.conf.merged'
+assert_contains "the puller keeps this node's PO_USER"     "$_pullsrc" "_po_user="
+assert_not_contains "the puller no longer clamps it to 0600" "$_pullsrc" 'chmod 600 /etc/pihole-ha/notify.conf'
+assert_contains "the puller preserves 0640 root:pihole"      "$_pullsrc" 'chmod 640 /etc/pihole-ha/notify.conf'
+
+# The filter itself has to keep the settings and drop only the secrets.
+_nc="$(mktemp)"
+printf 'PO_ENABLED=true\nPO_USER=uSecret\nPO_TOKEN=tSecret\nPO_TITLE=ha\nDHCP_NOTIFY_ENABLED=true\n' > "$_nc"
+_filtered="$(grep -vE '^(PO_USER|PO_TOKEN)=' "$_nc")"
+assert_not_contains "the user is not shipped"      "$_filtered" "uSecret"
+assert_not_contains "the token is not shipped"     "$_filtered" "tSecret"
+assert_contains     "the settings still ship"      "$_filtered" "PO_ENABLED=true"
+assert_contains     "the DHCP toggle still ships"  "$_filtered" "DHCP_NOTIFY_ENABLED=true"
+rm -f "$_nc"
+
+# The dash writes this file too, and did so at the default umask.
+_dashsrc="$(cat "$SCRIPT_DIR/../pihole-ha-dash")"
+assert_eq "every dash write creates notify.conf before filling it" "3" \
+    "$(grep -c 'umask 027; : > "\$_NOTIFY_CONF"' <<< "$_dashsrc")"
+
+# ============================================================
+echo
+echo "=== Failover counters and the HA kill-switch ==="
+
+# ACTIVATE_AFTER is documented as "consecutive failed checks", but activate_count
+# was only cleared after N healthy ticks in a row while any single unhealthy tick
+# incremented it -- so 50% packet loss accumulated into a takeover.
+_simulate() {   # $1 = pattern of u/d ticks, $2 = ACTIVATE_AFTER -> "TAKEOVER" or "held"
+    local pattern="$1" after="$2" a=0 st=0 i c
+    for (( i=0; i<${#pattern}; i++ )); do
+        c="${pattern:$i:1}"
+        if [[ "$c" == "d" ]]; then
+            (( a++ ))
+            (( a >= after )) && { echo "TAKEOVER"; return; }
+        else
+            a=$(( a > 0 ? a - 1 : 0 ))
+            (( st++ ))
+            (( st >= after )) && { a=0; st=0; }
+        fi
+    done
+    echo "held"
+}
+assert_eq "alternating up/down does not take over"   "held"     "$(_simulate "dududududu" 2)"
+assert_eq "two failures in a row still take over"    "TAKEOVER" "$(_simulate "udd" 2)"
+assert_eq "a sustained outage still takes over"      "TAKEOVER" "$(_simulate "uuuddd" 2)"
+assert_eq "one glitch alone never takes over"        "held"     "$(_simulate "uuuduuu" 2)"
+
+_hasrc="$(cat "$SCRIPT_DIR/../pihole-ha")"
+assert_contains "the daemon decays activation progress" "$_hasrc" 'activate_count=$(( activate_count > 0 ? activate_count - 1 : 0 ))'
+# One ICMP packet was a full "node down" verdict.
+assert_contains "peer health sends more than one ping"  "$_hasrc" 'ping -c2'
+
+# The kill-switch froze a node in place -- including while it held DHCP and the
+# VIP, which is how a partially-propagated toggle produced two DHCP servers.
+eval "$(extract_fn "$SCRIPT_DIR/../pihole-ha" am_configured_master)"
+NODES=("10.33.47.55" "10.33.47.3")
+
+DHCP_MASTER="auto"; LOCAL_IP="10.33.47.55"; MY_IDX=0
+assert_true  "index 0 is the configured master in auto mode"  am_configured_master
+DHCP_MASTER="auto"; LOCAL_IP="10.33.47.3";  MY_IDX=1
+assert_false "a standby is not, in auto mode"                 am_configured_master
+DHCP_MASTER="10.33.47.3"
+assert_true  "a pinned node is the configured master"         am_configured_master
+DHCP_MASTER="10.33.47.55"
+assert_false "a node that is not the pin is not"              am_configured_master
+# A pin naming a departed node must fall back to priority, not strand the role.
+DHCP_MASTER="10.33.47.99"; LOCAL_IP="10.33.47.55"; MY_IDX=0
+assert_true  "a stale pin falls back to priority order"       am_configured_master
+
+assert_contains "disabling HA releases the VIP"  "$_hasrc" 'has_vip && remove_vip
+        # DHCP is handed back only on a node that is not the configured master.'
+assert_contains "and stands a serving standby down" "$_hasrc" 'event=ha_disabled_standdown'
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh pihole-ha-cluster-key pihole-ha-cli; do

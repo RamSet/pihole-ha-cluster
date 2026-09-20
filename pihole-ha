@@ -728,7 +728,11 @@ update_needs_pass() {
 
 check_peer() {
     local ip="$1"
-    if ping -c1 -W"$HEALTH_TIMEOUT" "$ip" >/dev/null 2>&1; then
+    # -c2: a single ICMP packet is not evidence of a dead node. One drop on a
+    # congested or wireless-bridged LAN used to be a full "peer down" verdict,
+    # which fed straight into the takeover counter. ping exits 0 if either
+    # probe is answered, so this costs nothing when the peer is healthy.
+    if ping -c2 -i0.3 -W"$HEALTH_TIMEOUT" "$ip" >/dev/null 2>&1; then
         peer_ping[$ip]="true"
     else
         peer_ping[$ip]="false"; peer_dns[$ip]="false"
@@ -914,6 +918,20 @@ is_cluster_member() {
         [[ "$n" == "$ip" ]] && return 0
     done
     return 1
+}
+
+# Is this node the master the configuration designates — the manual pin when one
+# is set and still a member, otherwise priority index 0? Distinct from
+# should_i_serve, which answers "should I serve *right now*, given who is up".
+# This asks "is my DHCP my own job, or a failover artifact I am holding for
+# someone else", which is what decides whether switching HA off should hand it
+# back.
+am_configured_master() {
+    if [[ "$DHCP_MASTER" != "auto" ]] && is_cluster_member "$DHCP_MASTER"; then
+        [[ "$DHCP_MASTER" == "$LOCAL_IP" ]]
+        return
+    fi
+    (( MY_IDX == 0 ))
 }
 
 should_i_serve() {
@@ -1369,7 +1387,21 @@ while true; do
     fi
 
     if [[ "$HA_ENABLED" != "true" ]]; then
-        stand_down "HA disabled"
+        # Freezing must not freeze this node while it is holding resources that
+        # belong to whichever node is active. The VIP is a floating address: a
+        # frozen holder can never yield it, so a node that comes back with HA
+        # still enabled claims it too and two hosts answer ARP for it forever.
+        # The DNS-only branch has always released it here; this one did not.
+        has_vip && remove_vip
+        # DHCP is handed back only on a node that is not the configured master.
+        # A standby serves DHCP only as a failover artifact, and holding it
+        # while frozen is what turned a toggle that reached some nodes and not
+        # others into two DHCP servers. The designated master keeps serving, so
+        # disabling HA never takes DHCP off the LAN by itself.
+        if ! am_configured_master && [[ "$(get_dhcp)" == "true" ]]; then
+            log_warn "event=ha_disabled_standdown reason=\"HA switched off while this standby was serving DHCP — handing it back to the configured master\""
+            set_dhcp false
+        fi
         write_status "HA disabled"
         continue
     fi
@@ -1438,7 +1470,17 @@ while true; do
             write_status "$(build_reason)"
         fi
     else
-        # Anti-flap: only clear activation progress once peers prove stable
+        # "Consecutive" has to mean consecutive. Activation progress was only
+        # cleared after ACTIVATE_AFTER healthy ticks in a row, while a single
+        # unhealthy tick always incremented it — so a peer that alternated
+        # up/down/up/down accumulated its way to a takeover without ever being
+        # down twice running. check_peer sends one ping per tick, so ordinary
+        # packet loss on a busy or wireless-bridged LAN was enough to seize DHCP
+        # and the VIP from a peer that was healthy the whole time.
+        # Decay by one per healthy tick rather than resetting outright: that
+        # still satisfies "N consecutive failures to take over" while keeping
+        # some hysteresis against a peer flapping faster than the poll.
+        activate_count=$(( activate_count > 0 ? activate_count - 1 : 0 ))
         (( stable_count++ )) || true
         if (( stable_count >= ACTIVATE_AFTER )); then
             activate_count=0; stable_count=0

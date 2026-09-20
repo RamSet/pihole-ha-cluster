@@ -309,7 +309,12 @@ sudo sh -c 'umask 077; openssl rand -hex 32 > /etc/pihole-ha/cluster.key'
 sudo systemctl restart pihole-ha-sync.timer pihole-ha-sync-pull.timer   # or just wait for the next cycle
 ```
 
-When the key is present, the primary HMAC-signs each payload and standbys **reject anything without a matching signature** — a rogue source can't forge it without the key. Add it to all nodes together (a keyed standby will reject an unkeyed primary's unsigned payloads). No key = legacy unsigned behavior.
+When the key is present, the primary HMAC-signs **both the payload and the manifest**, and standbys verify the manifest *before acting on anything in it* — then verify the payload against it. Signing only the payload would leave `config_version`, the content hash and the per-component flags forgeable while the payload signature stayed valid, which is enough to roll a cluster back to an old (genuinely signed) config, or to silently switch off one component's sync while the node still reports itself up to date. No key = legacy unsigned behavior.
+
+Two things to know when enabling it:
+
+- **Key every node together, primary first.** A keyed standby rejects an unkeyed primary's unsigned payloads, so keying a standby first stops *that standby's* sync until the primary has the key too. `pihole-ha cluster-key` warns you if you run it on the wrong node.
+- **Update every node before keying a mixed-version cluster.** The manifest signature is a new field. An older standby ignores it and still verifies the payload, so an upgraded primary keeps working for it — but an upgraded, *keyed* standby requires it, and will reject an older primary's manifests with a message saying so. Notification credentials (`PO_USER`/`PO_TOKEN`) are no longer shipped in the payload at all, so each node keeps its own.
 
 ## Web Interface
 

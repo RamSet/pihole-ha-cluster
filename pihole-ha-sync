@@ -184,7 +184,10 @@ current_hash() {
             done
             pihole-FTL --config dns.revServers 2>/dev/null
         fi
-        [[ "$SYNC_NOTIFY" == "true" && -f /etc/pihole-ha/notify.conf ]] && md5sum /etc/pihole-ha/notify.conf 2>/dev/null
+        # Filtered the same way the payload is: a change to PO_USER/PO_TOKEN
+        # alone must not look like a config change, since it is not shipped.
+        [[ "$SYNC_NOTIFY" == "true" && -f /etc/pihole-ha/notify.conf ]] && \
+            grep -vE '^(PO_USER|PO_TOKEN)=' /etc/pihole-ha/notify.conf 2>/dev/null | md5sum
         # sync.conf always tracked so changes (e.g. SYNC_INTERVAL) propagate
         [[ -f /etc/pihole-ha/sync.conf ]] && md5sum /etc/pihole-ha/sync.conf 2>/dev/null
     } | md5sum | awk '{print $1}'
@@ -311,7 +314,14 @@ if [[ "$SYNC_SETTINGS" == "true" ]]; then
 fi
 
 if [[ "$SYNC_NOTIFY" == "true" && -f /etc/pihole-ha/notify.conf ]]; then
-    cp /etc/pihole-ha/notify.conf "$STAGING_DIR/notify.conf"
+    # Ship the notification *settings*, never the credentials. /api/sync/payload
+    # is an unauthenticated read endpoint, so every byte of this tarball is
+    # fetchable by any host on the LAN — and PO_USER/PO_TOKEN were in it. The
+    # dash is careful to expose only has_user/has_token over the API; the
+    # payload was handing out the values those booleans stood in for.
+    # Each node keeps its own Pushover credentials and the puller re-injects
+    # them around the synced settings.
+    grep -vE '^(PO_USER|PO_TOKEN)=' /etc/pihole-ha/notify.conf > "$STAGING_DIR/notify.conf"
     TAR_FILES+=" notify.conf"
 fi
 
@@ -364,15 +374,31 @@ SYNCCONF_PRESENT=false
 # plain-HTTP transfer. HMAC-SHA256 over the exact tarball bytes.
 CLUSTER_KEY_FILE="/etc/pihole-ha/cluster.key"
 SIGNATURE=""
+MANIFEST_SIG=""
 if [[ -f "$CLUSTER_KEY_FILE" ]]; then
-    if command -v openssl >/dev/null 2>&1; then
-        SIGNATURE="$(openssl dgst -sha256 -hmac "$(cat "$CLUSTER_KEY_FILE")" "$PAYLOAD_FILE" 2>/dev/null | awk '{print $NF}')"
-    else
+    if ! command -v openssl >/dev/null 2>&1; then
         log_warn "event=sign_skip reason=\"cluster.key set but openssl missing — payload built UNSIGNED; install openssl\""
+    else
+        SIGNATURE="$(platform_sync_hmac "$CLUSTER_KEY_FILE" < "$PAYLOAD_FILE")" || SIGNATURE=""
+        if [[ -z "$SIGNATURE" ]]; then
+            log_warn "event=sign_skip reason=\"cluster.key is empty or too short to be a key — payload built UNSIGNED; regenerate with 'pihole-ha cluster-key --force'\""
+        else
+            # Sign the manifest too, not just the tarball. Standbys decide what
+            # to apply from the manifest's fields, so those fields have to be
+            # covered or the signature protects the payload while leaving the
+            # instructions for using it forgeable.
+            MANIFEST_SIG="$(platform_sync_manifest_canon \
+                "$TIMESTAMP" "$CURRENT" "$CONFIG_VERSION" "$GRAVITY_MD5" "$PAYLOAD_SIZE" "$SIGNATURE" \
+                "$SYNC_GRAVITY" "$SYNC_DHCP" "$SYNC_DNS" "$SYNC_SETTINGS" "$SYNC_NOTIFY" "$SYNCCONF_PRESENT" \
+                | platform_sync_hmac "$CLUSTER_KEY_FILE")" || MANIFEST_SIG=""
+        fi
     fi
 fi
-printf '{"timestamp":"%s","hash":"%s","config_version":%d,"gravity_md5":"%s","size":%d,"signature":"%s","components":{"gravity":%s,"dhcp":%s,"dns":%s,"settings":%s,"notify":%s,"syncconf":%s,"adlists":true}}\n' \
-    "$TIMESTAMP" "$CURRENT" "$CONFIG_VERSION" "$GRAVITY_MD5" "$PAYLOAD_SIZE" "$SIGNATURE" \
+# manifest_sig is appended, not substituted: a puller from before this change
+# greps only "signature" and ignores the new field, so an upgraded publisher
+# keeps working for standbys that have not been updated yet.
+printf '{"timestamp":"%s","hash":"%s","config_version":%d,"gravity_md5":"%s","size":%d,"signature":"%s","manifest_sig":"%s","components":{"gravity":%s,"dhcp":%s,"dns":%s,"settings":%s,"notify":%s,"syncconf":%s,"adlists":true}}\n' \
+    "$TIMESTAMP" "$CURRENT" "$CONFIG_VERSION" "$GRAVITY_MD5" "$PAYLOAD_SIZE" "$SIGNATURE" "$MANIFEST_SIG" \
     "$SYNC_GRAVITY" "$SYNC_DHCP" "$SYNC_DNS" "$SYNC_SETTINGS" "$SYNC_NOTIFY" "$SYNCCONF_PRESENT" > "$MANIFEST_FILE.tmp"
 mv "$MANIFEST_FILE.tmp" "$MANIFEST_FILE"
 

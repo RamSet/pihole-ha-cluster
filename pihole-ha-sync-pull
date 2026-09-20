@@ -154,6 +154,40 @@ if [[ -z "$REMOTE_HASH" ]]; then
     exit 0
 fi
 
+REMOTE_SIZE="$(echo "$MANIFEST" | grep -o '"size":[0-9]*' | cut -d: -f2)"
+REMOTE_PAYLOAD_SIG="$(echo "$MANIFEST" | grep -o '"signature":"[^"]*"' | cut -d'"' -f4)"
+REMOTE_MANIFEST_SIG="$(echo "$MANIFEST" | grep -o '"manifest_sig":"[^"]*"' | cut -d'"' -f4)"
+
+# Authenticate the manifest BEFORE acting on anything in it. Every decision
+# below is made from these fields — whether to adopt a config version, whether
+# this payload is newer than what we hold, which components to apply — so
+# verification has to come first. It needs no download: the manifest signature
+# covers the payload's HMAC rather than the payload bytes.
+CLUSTER_KEY_FILE="/etc/pihole-ha/cluster.key"
+if [[ -f "$CLUSTER_KEY_FILE" ]]; then
+    if ! command -v openssl >/dev/null 2>&1; then
+        log_error "event=pull_reject reason=\"cluster.key is set but openssl is missing — refusing to apply a payload this node cannot verify; install openssl\" from=$_PULL_FROM"
+        exit 1
+    fi
+    _want_msig="$(platform_sync_manifest_canon \
+        "$REMOTE_TS" "$REMOTE_HASH" "$REMOTE_VER" "$REMOTE_GRAVITY_MD5" "$REMOTE_SIZE" "$REMOTE_PAYLOAD_SIG" \
+        "$COMP_GRAVITY" "$COMP_DHCP" "$COMP_DNS" "$COMP_SETTINGS" "$COMP_NOTIFY" "$COMP_SYNCCONF" \
+        | platform_sync_hmac "$CLUSTER_KEY_FILE")" || _want_msig=""
+    if [[ -z "$_want_msig" ]]; then
+        log_error "event=pull_reject reason=\"cluster.key is empty or too short to be a key — refusing to apply; regenerate it with 'sudo pihole-ha cluster-key --force'\" from=$_PULL_FROM"
+        exit 1
+    fi
+    if [[ -z "$REMOTE_MANIFEST_SIG" ]]; then
+        log_error "event=pull_reject reason=\"peer published a manifest with no signature — update pihole-ha on $_PULL_FROM, or give it the same cluster.key with 'sudo pihole-ha cluster-key'\" from=$_PULL_FROM"
+        exit 1
+    fi
+    if [[ "$REMOTE_MANIFEST_SIG" != "$_want_msig" ]]; then
+        log_error "event=pull_reject reason=\"manifest signature invalid — it was altered in transit, or this node and $_PULL_FROM hold different cluster keys\" from=$_PULL_FROM"
+        exit 1
+    fi
+    log_info "event=manifest_signature_ok from=$_PULL_FROM version=$REMOTE_VER"
+fi
+
 # Check if we already have this version
 LOCAL_HASH="$(cat "$LAST_HASH_FILE" 2>/dev/null || echo "")"
 
@@ -215,40 +249,37 @@ curl -sf --max-time 120 "$PRIMARY_URL/api/sync/payload" -o "$STAGING_DIR/payload
 # could be a poisoned config (e.g. malicious DNS upstreams) from a rogue peer or
 # a MITM on the plain-HTTP transfer. No key on this node = unsigned mode (legacy
 # behavior); add /etc/pihole-ha/cluster.key to every node to enforce it.
-CLUSTER_KEY_FILE="/etc/pihole-ha/cluster.key"
 if [[ -f "$CLUSTER_KEY_FILE" ]]; then
-    if ! command -v openssl >/dev/null 2>&1; then
-        log_warn "event=signature_skip reason=\"cluster.key set but openssl missing — payload NOT verified; install openssl to enforce\""
-    else
-        _want_sig="$(echo "$MANIFEST" | grep -o '"signature":"[^"]*"' | cut -d'"' -f4)"
-        _have_sig="$(openssl dgst -sha256 -hmac "$(cat "$CLUSTER_KEY_FILE")" "$STAGING_DIR/payload.tar.gz" 2>/dev/null | awk '{print $NF}')"
-        if [[ -z "$_want_sig" ]]; then
-            # Not a mismatch at all: the publisher shipped an unsigned payload
-            # while we hold a key. Say so, because the fix is specific and the
-            # generic "tampering" wording sends people hunting for an attacker.
-            log_error "event=pull_reject reason=\"peer published an UNSIGNED payload but this node holds cluster.key — copy the same /etc/pihole-ha/cluster.key to $_PULL_FROM\" from=$_PULL_FROM"
-            rm -rf "$STAGING_DIR"
-            exit 1
-        fi
-        if [[ "$_want_sig" != "$_have_sig" ]]; then
-            # Before calling this an attack: the publisher may simply have
-            # rebuilt the payload between our manifest read and our download, so
-            # the bytes we hold no longer match the signature we were handed.
-            # That is a benign race, not tampering, and it resolves itself. Only
-            # a signature that is STILL the one we checked against is evidence
-            # of a real problem.
-            _now_sig="$(curl -sf --max-time 5 "$PRIMARY_URL/api/sync/manifest" 2>/dev/null | grep -o '"signature":"[^"]*"' | cut -d'"' -f4)"
-            if [[ -n "$_now_sig" && "$_now_sig" != "$_want_sig" ]]; then
-                log_warn "event=pull_retry reason=\"publisher rebuilt the payload mid-download — retrying next cycle\" from=$_PULL_FROM"
-                rm -rf "$STAGING_DIR"
-                exit 0
-            fi
-            log_error "event=pull_reject reason=\"payload signature invalid — rejecting (tampering, MITM, a mismatched cluster.key, or a publisher restarting mid-transfer)\" from=$_PULL_FROM"
-            rm -rf "$STAGING_DIR"
-            exit 1
-        fi
-        log_info "event=signature_ok from=$_PULL_FROM"
+    # No openssl branch here: an absent openssl already failed the manifest
+    # check above, so reaching this point means the key is usable.
+    _want_sig="$REMOTE_PAYLOAD_SIG"
+    _have_sig="$(platform_sync_hmac "$CLUSTER_KEY_FILE" < "$STAGING_DIR/payload.tar.gz")" || _have_sig=""
+    if [[ -z "$_want_sig" ]]; then
+        # Not a mismatch at all: the publisher shipped an unsigned payload
+        # while we hold a key. Say so, because the fix is specific and the
+        # generic "tampering" wording sends people hunting for an attacker.
+        log_error "event=pull_reject reason=\"peer published an UNSIGNED payload but this node holds cluster.key — copy the same /etc/pihole-ha/cluster.key to $_PULL_FROM\" from=$_PULL_FROM"
+        rm -rf "$STAGING_DIR"
+        exit 1
     fi
+    if [[ "$_want_sig" != "$_have_sig" ]]; then
+        # Before calling this an attack: the publisher may simply have
+        # rebuilt the payload between our manifest read and our download, so
+        # the bytes we hold no longer match the signature we were handed.
+        # That is a benign race, not tampering, and it resolves itself. Only
+        # a signature that is STILL the one we checked against is evidence
+        # of a real problem.
+        _now_sig="$(curl -sf --max-time 5 "$PRIMARY_URL/api/sync/manifest" 2>/dev/null | grep -o '"signature":"[^"]*"' | cut -d'"' -f4)"
+        if [[ -n "$_now_sig" && "$_now_sig" != "$_want_sig" ]]; then
+            log_warn "event=pull_retry reason=\"publisher rebuilt the payload mid-download — retrying next cycle\" from=$_PULL_FROM"
+            rm -rf "$STAGING_DIR"
+            exit 0
+        fi
+        log_error "event=pull_reject reason=\"payload signature invalid — rejecting (tampering, MITM, a mismatched cluster.key, or a publisher restarting mid-transfer)\" from=$_PULL_FROM"
+        rm -rf "$STAGING_DIR"
+        exit 1
+    fi
+    log_info "event=signature_ok from=$_PULL_FROM"
 fi
 
 # Extract payload
@@ -398,14 +429,33 @@ apply_settings() {
 # Apply notify.conf (ignored MACs, Pushover keys, etc.)
 if [[ "$COMP_NOTIFY" == "true" && -f "$STAGING_DIR/notify.conf" ]]; then
     mkdir -p /etc/pihole-ha
-    if ! cmp -s "$STAGING_DIR/notify.conf" /etc/pihole-ha/notify.conf 2>/dev/null; then
-        cp "$STAGING_DIR/notify.conf" /etc/pihole-ha/notify.conf
-        chmod 600 /etc/pihole-ha/notify.conf 2>/dev/null || true
+    # The payload carries settings only — the publisher strips PO_USER/PO_TOKEN
+    # because /api/sync/payload is unauthenticated. So merge rather than
+    # overwrite: keep this node's own Pushover credentials and take the synced
+    # settings around them. A plain cp here would wipe the credentials on every
+    # standby on the first pull.
+    _po_user="$(sed -n 's/^PO_USER=//p'  /etc/pihole-ha/notify.conf 2>/dev/null | tail -1)"
+    _po_token="$(sed -n 's/^PO_TOKEN=//p' /etc/pihole-ha/notify.conf 2>/dev/null | tail -1)"
+    _merged="$STAGING_DIR/notify.conf.merged"
+    ( umask 077
+      grep -vE '^(PO_USER|PO_TOKEN)=' "$STAGING_DIR/notify.conf" > "$_merged"
+      printf 'PO_USER=%s\n'  "$_po_user"  >> "$_merged"
+      printf 'PO_TOKEN=%s\n' "$_po_token" >> "$_merged"
+    )
+    if ! cmp -s "$_merged" /etc/pihole-ha/notify.conf 2>/dev/null; then
+        cp "$_merged" /etc/pihole-ha/notify.conf
+        # 640 root:pihole, not 600. dnsmasq runs the dhcp-script as pihole-FTL's
+        # user, so a root-only notify.conf silently disables new-device
+        # notifications — install.sh sets 640 for exactly that reason, and this
+        # apply path was clamping it back to 600 on every sync.
+        chown root:pihole /etc/pihole-ha/notify.conf 2>/dev/null || true
+        chmod 640 /etc/pihole-ha/notify.conf 2>/dev/null || true
         log_info "event=apply component=notify status=ok"
         APPLIED_SOMETHING=true
     else
         log_info "event=apply component=notify status=unchanged"
     fi
+    rm -f "$_merged"
 fi
 
 # Apply sync.conf (SYNC_INTERVAL + component toggles). When the interval

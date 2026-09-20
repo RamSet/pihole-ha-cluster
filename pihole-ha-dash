@@ -941,6 +941,13 @@ if [[ "${1:-}" == "--handle" ]]; then
                     printf 'MUTED_TAGS=%s\n' "$_cleaned" >> "$_NOTIFY_CONF"
                 fi
             else
+                # notify.conf holds PO_TOKEN. Truncation via `>` keeps an existing
+                # file's mode, so create it at 0640 root:pihole first — otherwise the
+                # token lands world-readable at the default umask. 0640 not 0600: the
+                # DHCP hook runs as the pihole user and must still read it.
+                [[ -f "$_NOTIFY_CONF" ]] || ( umask 027; : > "$_NOTIFY_CONF" )
+                chown root:pihole "$_NOTIFY_CONF" 2>/dev/null || true
+                chmod 640 "$_NOTIFY_CONF" 2>/dev/null || true
                 cat > "$_NOTIFY_CONF" <<NEOF
 # Pushover notifications
 PO_ENABLED=false
@@ -1008,6 +1015,13 @@ NEOF
                 [[ -z "$_ns_token" ]] && _ns_token="$_ex_token"
             fi
             mkdir -p /etc/pihole-ha
+            # notify.conf holds PO_TOKEN. Truncation via `>` keeps an existing
+            # file's mode, so create it at 0640 root:pihole first — otherwise the
+            # token lands world-readable at the default umask. 0640 not 0600: the
+            # DHCP hook runs as the pihole user and must still read it.
+            [[ -f "$_NOTIFY_CONF" ]] || ( umask 027; : > "$_NOTIFY_CONF" )
+            chown root:pihole "$_NOTIFY_CONF" 2>/dev/null || true
+            chmod 640 "$_NOTIFY_CONF" 2>/dev/null || true
             cat > "$_NOTIFY_CONF" <<NEOF
 # Pushover notifications
 PO_ENABLED=$_ns_enabled
@@ -1048,6 +1062,13 @@ NEOF
                 sed -i "s/^PO_ENABLED=.*/PO_ENABLED=$_NEW_EN/" "$_NOTIFY_CONF"
             else
                 mkdir -p /etc/pihole-ha
+                # notify.conf holds PO_TOKEN. Truncation via `>` keeps an existing
+                # file's mode, so create it at 0640 root:pihole first — otherwise the
+                # token lands world-readable at the default umask. 0640 not 0600: the
+                # DHCP hook runs as the pihole user and must still read it.
+                [[ -f "$_NOTIFY_CONF" ]] || ( umask 027; : > "$_NOTIFY_CONF" )
+                chown root:pihole "$_NOTIFY_CONF" 2>/dev/null || true
+                chmod 640 "$_NOTIFY_CONF" 2>/dev/null || true
                 cat > "$_NOTIFY_CONF" <<NEOF
 # Pushover notifications
 PO_ENABLED=$_NEW_EN
