@@ -1554,6 +1554,87 @@ assert_contains "disabling HA releases the VIP"  "$_hasrc" 'has_vip && remove_vi
 assert_contains "and stands a serving standby down" "$_hasrc" 'event=ha_disabled_standdown'
 
 # ============================================================
+echo
+echo "=== Homelab reliability: shutdown, node removal, clock, disk ==="
+
+_hasrc2="$(cat "$SCRIPT_DIR/../pihole-ha")"
+_pullsrc2="$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")"
+
+# The VIP is added with `ip addr add`, so nothing removes it when the daemon
+# goes away. A stop, a `pihole-ha update` or a crash left it bound with no
+# process managing it, and another node then claimed the same address.
+assert_contains "shutdown releases the VIP"        "$_hasrc2" "event=shutdown_release_vip"
+assert_contains "the trap runs the full release"   "$_hasrc2" "trap '_shutdown_release' EXIT INT TERM"
+# DHCP must NOT be dropped on shutdown: dhcp.active outlives this process, and a
+# node that is legitimately the DHCP server should survive a daemon restart.
+assert_not_contains "shutdown does not disable DHCP" "$_hasrc2" '_shutdown_release() {
+    release_all_sids
+    if has_vip; then
+        log_info'"'"'
+        set_dhcp false'
+
+# Removed from HA_NODES: the election walked NODES past the end of the array,
+# which under set -u killed the daemon while it held the VIP, and systemd then
+# restart-looped it as an unmanaged second DHCP server.
+assert_contains "removal is detected"              "$_hasrc2" "event=removed_from_cluster"
+assert_contains "and sets a sentinel index"        "$_hasrc2" "MY_IDX=-1"
+assert_contains "the main loop gates on it"        "$_hasrc2" 'if (( MY_IDX < 0 )); then'
+assert_contains "and hands DHCP back"              "$_hasrc2" "event=removed_standdown"
+
+# A tuned ACTIVATE_AFTER was reset to the built-in default the first time
+# HA_NODES changed -- exactly when the cluster is least stable.
+assert_not_contains "the reload path has no hardcoded delay" "$_hasrc2" '            ACTIVATE_AFTER=4'
+assert_eq "both paths use the configured base" "2" \
+    "$(grep -c 'ACTIVATE_AFTER=\$(( _ACTIVATE_BASE + 2 ))' <<< "$_hasrc2")"
+
+# Wall-clock rate limiting wedges on a Pi with no RTC: the first NTP sync steps
+# the clock backwards, `now - last` goes negative, and the limit never expires.
+assert_contains     "FTL restart limiting is monotonic" "$_hasrc2" '_mono() {'
+assert_contains     "it reads /proc/uptime"             "$_hasrc2" "< /proc/uptime"
+assert_not_contains "no wall clock in the rate limit"   "$_hasrc2" 'now="$(date +%s)"'
+
+# master.conf resets to "auto" before parsing, so a dropped final line does not
+# mean "no update" -- it means the pin is lost, and then index 0 activates while
+# the pinned node also keeps serving.
+eval "$(extract_fn "$SCRIPT_DIR/../pihole-ha" load_master)"
+eval "$(extract_fn "$SCRIPT_DIR/../pihole-ha-platform" is_valid_ip)"
+log_warn() { :; }
+_mc="$(mktemp)"; MASTER_CONF="$_mc"
+printf 'DHCP_MASTER=10.33.47.3'      > "$_mc"   # no trailing newline
+load_master
+assert_eq "a pin without a trailing newline survives" "10.33.47.3" "$DHCP_MASTER"
+printf 'DHCP_MASTER=10.33.47.3\n'    > "$_mc"
+load_master
+assert_eq "a normal pin still parses"                 "10.33.47.3" "$DHCP_MASTER"
+printf 'DHCP_MASTER=auto\n'          > "$_mc"
+load_master
+assert_eq "auto is preserved"                         "auto"       "$DHCP_MASTER"
+printf 'DHCP_MASTER=not-an-ip\n'     > "$_mc"
+load_master
+assert_eq "a non-IP pin falls back to auto"           "auto"       "$DHCP_MASTER"
+rm -f "$_mc"
+
+# gravity.db: an unchecked cp plus `mv -f` promoted a partial file over a
+# working blocklist on a full SD card, and recorded the pull as successful.
+assert_contains "the staged copy is checksummed against the manifest" "$_pullsrc2" "does not match the manifest checksum"
+assert_contains "a failed copy keeps the old blocklist"               "$_pullsrc2" "could not stage gravity.db"
+assert_contains "the copy is flushed before the rename"               "$_pullsrc2" "sync /etc/pihole/gravity.db.tmp"
+assert_contains "a failed rename is caught"                           "$_pullsrc2" "could not replace gravity.db"
+assert_contains "and any of those failures mark the run failed"       "$_pullsrc2" "APPLY_FAILED=true"
+
+# Adlist INSERTs ran before the wholesale gravity swap: discarded, and they
+# dirtied the DB before OLD_MD5, forcing a full copy + FTL restart every cycle.
+assert_contains "adlists are skipped when gravity is being replaced" "$_pullsrc2" \
+    'if [[ -f "$STAGING_DIR/adlists.tsv" && ! ( "$COMP_GRAVITY" == "true" && -f "$STAGING_DIR/gravity.db" ) ]]; then'
+
+# Settings reported status=ok even when every key failed, and recorded the hash,
+# so the failure never retried.
+assert_contains "a failed settings key is reported"    "$_pullsrc2" "component=settings status=partial"
+assert_contains "and marks the run failed"             "$_pullsrc2" 'log_warn "event=apply component=settings key=$_skey status=failed"'
+# `(( x++ ))` on an unset variable aborts under set -u -- the counter must exist.
+assert_contains "the failure counter is initialised"   "$_pullsrc2" "_settings_failed=0"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh pihole-ha-cluster-key pihole-ha-cli; do
