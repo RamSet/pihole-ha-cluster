@@ -115,7 +115,7 @@ if [[ "${1:-}" == "--handle" ]]; then
         sid="$(_get_peer_sid "$ip")"
         if [[ -n "$sid" ]]; then
             resp="$(curl -sf --max-time 5 "http://$ip:8887/api/config?sid=$sid" 2>/dev/null)" || return 1
-            curl -s --max-time 3 -X DELETE "http://$ip/api/auth?sid=$sid" &>/dev/null
+            curl -s --max-time 3 -X DELETE "http://$ip:${_NODE_PORTS[$ip]:-80}/api/auth?sid=$sid" &>/dev/null
         else
             resp="$(curl -sf --max-time 5 "http://$ip:8887/api/config" 2>/dev/null)" || return 1
         fi
@@ -131,7 +131,7 @@ if [[ "${1:-}" == "--handle" ]]; then
         sid="$(_get_peer_sid "$ip")"
         if [[ -n "$sid" ]]; then
             resp="$(curl -sf --max-time 20 "http://$ip:8887/api/nodes/join?node=$who&sid=$sid" 2>/dev/null)"
-            curl -s --max-time 3 -X DELETE "http://$ip/api/auth?sid=$sid" &>/dev/null
+            curl -s --max-time 3 -X DELETE "http://$ip:${_NODE_PORTS[$ip]:-80}/api/auth?sid=$sid" &>/dev/null
         else
             resp="$(curl -sf --max-time 20 "http://$ip:8887/api/nodes/join?node=$who" 2>/dev/null)"
         fi
@@ -243,7 +243,8 @@ if [[ "${1:-}" == "--handle" ]]; then
         fi
         [[ -z "$_pass" ]] && return
         local resp sid
-        resp="$(curl -s --max-time "${AUTH_TIMEOUT:-10}" -X POST "http://$ip/api/auth" \
+        local _pport="${_NODE_PORTS[$ip]:-80}"
+        resp="$(curl -s --max-time "${AUTH_TIMEOUT:-10}" -X POST "http://$ip:${_pport}/api/auth" \
             -H "Content-Type: application/json" \
             -d "{\"password\":\"$_pass\"}" 2>/dev/null)" || return
         sid="$(echo "$resp" | grep -o '"sid":"[^"]*"' | cut -d'"' -f4)"
@@ -264,7 +265,7 @@ if [[ "${1:-}" == "--handle" ]]; then
         if [[ -n "$sid" ]]; then
             curl -sf --max-time 5 "http://$ip:8887${path}&sid=$sid" &>/dev/null
             # Best-effort logout of the session we just created.
-            curl -s --max-time 3 -X DELETE "http://$ip/api/auth?sid=$sid" &>/dev/null
+            curl -s --max-time 3 -X DELETE "http://$ip:${_NODE_PORTS[$ip]:-80}/api/auth?sid=$sid" &>/dev/null
         else
             curl -sf --max-time 5 "http://$ip:8887${path}" &>/dev/null
         fi

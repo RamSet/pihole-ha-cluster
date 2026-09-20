@@ -397,9 +397,14 @@ $(function () {
             } else {
                 aColor = "#aaa"; aIcon = "fa-minus-circle"; aLabel = "N/A";
             }
+            // A failing API row with no reason is what sent a reporter chasing his
+            // password while his Pi-hole was simply out of API seats.
+            var apiWhy = (peer.api === false && peer.auth_why)
+                ? '<br><span style="color:#888;font-size:11px">' + escapeHtml(peer.auth_why) + '</span>'
+                : '';
             html += '<tr><td>Pi-hole API</td>' +
                 '<td><i class="fa ' + aIcon + '" style="color:' + aColor + '"></i> ' +
-                '<span style="color:' + aColor + '">' + aLabel + '</span></td></tr>';
+                '<span style="color:' + aColor + '">' + aLabel + '</span>' + apiWhy + '</td></tr>';
 
             // DHCP row: false = intentionally off (standby), not a failure
             var dIcon, dLabel, dColor;
@@ -417,7 +422,15 @@ $(function () {
 
             // Auth row: reflect the real state — no password (open), authenticated,
             // or password required / auth failed.
-            if (peer.auth === "none") {
+            if (peer.auth === "self") {
+                // This node's own row. It needs no session from itself, but its
+                // Pi-hole does have a password, and saying "no password" here read
+                // as a fault to at least one operator.
+                delete authPending[node.ip];
+                delete saveError[node.ip];
+                html += '<tr><td><i class="fa fa-lock" style="color:#00a65a"></i> Auth</td>' +
+                    '<td><span style="color:#888">Password set (no login needed from itself)</span></td></tr>';
+            } else if (peer.auth === "none") {
                 delete authPending[node.ip];
                 delete saveError[node.ip];
                 html += '<tr><td><i class="fa fa-unlock-alt" style="color:#888"></i> Auth</td>' +

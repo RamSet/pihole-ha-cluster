@@ -644,16 +644,23 @@ trap 'release_all_sids' EXIT INT TERM
 # live cluster used to look like a rejected password.
 #
 # Echoes "true", "false", or nothing when it cannot be determined.
+# Sets PEER_NEEDS_PASS ("true"/"false") and PEER_PROBE_REPLY (what came back),
+# and returns non-zero when the answer was not a session state at all. MUST be
+# called directly, never inside $(...): a subshell discards both globals, and
+# the reply is the only thing that can explain a failure -- a Pi-hole with no
+# API seats left refuses even this credential-free check, which used to surface
+# as a bare "API FAIL" next to "No password (open)".
 peer_requires_password() {
     # Split deliberately: `local ip="$1" port="${NODE_PORTS[$ip]...}"` reads $ip
     # before the same statement has finished assigning it, so the subscript comes
     # out empty and bash errors with "bad array subscript".
     local ip="$1"
-    local port="${NODE_PORTS[$ip]:-80}" resp
-    resp="$(curl -s --max-time "${HEALTH_TIMEOUT:-2}" "http://${ip}:${port}/api/auth" 2>/dev/null)" || return 1
-    case "$resp" in
-        *'"valid":false'*) printf 'true'  ;;
-        *'"valid":true'*)  printf 'false' ;;
+    local port="${NODE_PORTS[$ip]:-80}"
+    PEER_NEEDS_PASS=""; PEER_PROBE_REPLY=""
+    PEER_PROBE_REPLY="$(curl -s --max-time "${HEALTH_TIMEOUT:-2}" "http://${ip}:${port}/api/auth" 2>/dev/null)" || return 1
+    case "$PEER_PROBE_REPLY" in
+        *'"valid":false'*) PEER_NEEDS_PASS="true"  ;;
+        *'"valid":true'*)  PEER_NEEDS_PASS="false" ;;
         *) return 1 ;;
     esac
 }
@@ -664,7 +671,8 @@ peer_requires_password() {
 # indefinitely and only notice at the next restart.
 update_needs_pass() {
     local ip="$1" now_v prev_v
-    now_v="$(peer_requires_password "$ip")" || return 0   # unknown: leave everything alone
+    peer_requires_password "$ip" || return 0   # unknown: leave everything alone
+    now_v="$PEER_NEEDS_PASS"
     prev_v="${peer_needs_pass[$ip]:-}"
     if [[ -n "$prev_v" && "$prev_v" != "$now_v" ]]; then
         log_info "event=peer_auth_mode_changed peer=$ip requires_password=$now_v reason=\"password state changed on that peer; dropping any cached session and re-evaluating\""
@@ -705,17 +713,35 @@ check_peer() {
     # for a node whose Pi-hole is password-protected but which has no password
     # stored for itself, which is the default after any install.
     if [[ "$ip" == "$LOCAL_IP" ]]; then
+        # update_needs_pass runs the probe and leaves its result in the globals
+        # below, so this costs no extra request.
         update_needs_pass "$ip"
-        if [[ -n "$(peer_requires_password "$ip")" ]]; then
-            peer_api[$ip]="true"
-        else
-            peer_api[$ip]="false"
-        fi
         peer_dhcp[$ip]="$(get_dhcp)"
         [[ "${peer_dhcp[$ip]}" == "true" || "${peer_dhcp[$ip]}" == "false" ]] || peer_dhcp[$ip]="null"
         peer_leases[$ip]="null"; peer_clients[$ip]="null"
-        peer_auth[$ip]="\"none\""
-        unset "peer_auth_why[$ip]"
+        if [[ -n "$PEER_NEEDS_PASS" ]]; then
+            peer_api[$ip]="true"
+            # "none" means open. A protected node needs no session from itself
+            # either, but saying "no password" about a node that plainly has one
+            # is how this row got read as a fault.
+            if [[ "$PEER_NEEDS_PASS" == "true" ]]; then
+                peer_auth[$ip]="\"self\""
+            else
+                peer_auth[$ip]="\"none\""
+            fi
+            unset "peer_auth_why[$ip]"
+        else
+            peer_api[$ip]="false"
+            peer_auth[$ip]="null"
+            local _selfport="${NODE_PORTS[$ip]:-80}"
+            if [[ "$PEER_PROBE_REPLY" == *"seats exceeded"* || "$PEER_PROBE_REPLY" == *"api_seats_exceeded"* ]]; then
+                peer_auth_why[$ip]="this node's own Pi-hole is out of API seats, so it refuses every login including ours (raise webserver.api.max_sessions here, and restart pihole-FTL to release the ones held now)"
+            elif [[ -n "$PEER_PROBE_REPLY" ]]; then
+                peer_auth_why[$ip]="unexpected reply from this node's own Pi-hole API on port ${_selfport}: $(_api_snippet "$PEER_PROBE_REPLY")"
+            else
+                peer_auth_why[$ip]="this node's own Pi-hole API on port ${_selfport} did not answer"
+            fi
+        fi
         return
     fi
     local resp url

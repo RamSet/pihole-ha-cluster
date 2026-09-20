@@ -936,6 +936,56 @@ _msg="$(_auth_probe '<html>
 assert_not_contains "the quoted reply carries no double quote" "$_msg" '"'
 assert_eq "the quoted reply carries no newline" "0" "$(printf '%s' "$_msg" | wc -l | tr -d ' ')"
 
+# A node checking its OWN Pi-hole must say what it got back. With no API seats
+# left, Pi-hole refuses even the credential-free check, and the panel showed a
+# bare "API FAIL" beside "No password (open)" -- describing a node that was
+# neither open nor merely unreachable (Discourse 86667 again).
+_self_probe() {   # $1 body, $2 curl rc
+    PROBE_BODY="$1" PROBE_RC="${2:-0}" bash -c '
+        HEALTH_TIMEOUT=2; LOCAL_IP=10.0.0.1
+        '"$(grep -E '^declare -A peer_' "$SCRIPT_DIR/../pihole-ha")"'
+        declare -A NODE_PORTS; NODE_PORTS[10.0.0.1]=8080
+        log_info() { :; }; release_sid() { :; }; get_dhcp() { echo false; }
+        curl() { printf "%s" "$PROBE_BODY"; return "$PROBE_RC"; }
+        '"$(sed -n "/^_api_snippet()/,/^}/p" "$SCRIPT_DIR/../pihole-ha")"'
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" peer_requires_password)"'
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" update_needs_pass)"'
+        self_check() {
+            local ip="$1"
+            '"$(sed -n "/^    if \[\[ \"\$ip\" == \"\$LOCAL_IP\" \]\]; then$/,/^        return$/p" "$SCRIPT_DIR/../pihole-ha" | sed "1d;\$d")"'
+        }
+        self_check 10.0.0.1
+        printf "api=%s auth=%s why=%s" "${peer_api[10.0.0.1]}" "${peer_auth[10.0.0.1]}" "${peer_auth_why[10.0.0.1]:-none}"
+    '
+}
+assert_contains "an open local Pi-hole still reads as open" \
+    "$(_self_probe '{"session":{"valid":true,"sid":null}}')" 'api=true auth="none"'
+assert_contains "a password-protected node does not call itself passwordless" \
+    "$(_self_probe '{"session":{"valid":false,"sid":null}}')" 'auth="self"'
+assert_contains "exhausted API seats are named, not reported as FAIL alone" \
+    "$(_self_probe '{"error":{"key":"api_seats_exceeded","message":"API seats exceeded"}}')" "out of API seats"
+assert_contains "another service on the local port is named" \
+    "$(_self_probe '<html>nginx</html>')" "unexpected reply"
+assert_contains "the unexpected local reply names the port" \
+    "$(_self_probe '<html>nginx</html>')" "port 8080"
+assert_contains "a silent local API is not confused with a bad answer" \
+    "$(_self_probe '' 7)" "did not answer"
+# The panel has to show that reason, or the daemon is explaining itself to a log
+# nobody reads while the row still says only FAIL.
+assert_contains "the panel prints the reason under a failing API row" \
+    "$(cat "$SCRIPT_DIR/../ha.js")" "peer.api === false && peer.auth_why"
+assert_contains "the panel renders the self auth state" \
+    "$(cat "$SCRIPT_DIR/../ha.js")" 'peer.auth === "self"'
+
+# Every call to a peer's Pi-hole must use that peer's port. The dashboard hard-
+# coded 80, so on a cluster where Pi-hole is not on 80 -- ours runs behind nginx
+# with FTL on 8080 -- panel propagation could never authenticate.
+_dash_src="$(cat "$SCRIPT_DIR/../pihole-ha-dash")"
+assert_not_contains "the dashboard does not assume port 80 for a peer login" \
+    "$_dash_src" 'http://$ip/api/auth'
+assert_contains "the dashboard uses the peer's recorded port" \
+    "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
+
 # ============================================================
 echo
 echo "=== Bulk sync artifacts must not live on tmpfs ==="
