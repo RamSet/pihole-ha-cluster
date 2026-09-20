@@ -5,10 +5,25 @@
 PORT=8887
 STATUS_FILE="/run/pihole-ha/status.json"
 VERSION_FILE="/usr/local/share/pihole-ha/VERSION"
-# Raw URL of the upstream VERSION file used for the "update available" check.
-# Public build points at the public repo; empty disables the online check
-# (the panel then just shows the installed version, no phone-home).
-UPDATE_CHECK_URL="https://raw.githubusercontent.com/RamSet/pihole-ha-cluster/main/VERSION"
+# Raw URL of the VERSION file used for the "update available" check. Empty
+# disables the online check (the panel then just shows the installed version, no
+# phone-home). Follows the repo this node was installed from, recorded by the
+# installer in repo.conf, so a fork does not report itself out of date against
+# upstream; falls back to the public repo when that file is absent.
+_REPO_CONF="/usr/local/share/pihole-ha/repo.conf"
+_REPO_HOST="$(sed -n 's/^REPO_HOST=//p'   "$_REPO_CONF" 2>/dev/null | tail -1)"
+_REPO_SLUG="$(sed -n 's/^REPO_SLUG=//p'   "$_REPO_CONF" 2>/dev/null | tail -1)"
+_REPO_BRANCH="$(sed -n 's/^REPO_BRANCH=//p' "$_REPO_CONF" 2>/dev/null | tail -1)"
+if [[ -n "$_REPO_SLUG" ]]; then
+    # Only GitHub serves raw files this way; anything else disables the check.
+    if [[ "$_REPO_HOST" == "github.com" ]]; then
+        UPDATE_CHECK_URL="https://raw.githubusercontent.com/$_REPO_SLUG/${_REPO_BRANCH:-main}/VERSION"
+    else
+        UPDATE_CHECK_URL=""
+    fi
+else
+    UPDATE_CHECK_URL="https://raw.githubusercontent.com/RamSet/pihole-ha-cluster/main/VERSION"
+fi
 
 if [[ "${1:-}" == "--handle" ]]; then
     # Load platform abstraction (systemd vs Docker)
