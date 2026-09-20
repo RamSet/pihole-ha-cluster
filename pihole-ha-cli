@@ -5,9 +5,35 @@
 # logs, debug, cluster-key, uninstall, help.
 set -uo pipefail
 
-REPO_URL="https://github.com/RamSet/pihole-ha-cluster.git"
-REPO_TARBALL="https://github.com/RamSet/pihole-ha-cluster/archive/refs/heads/main.tar.gz"
-RAW_VERSION_URL="https://raw.githubusercontent.com/RamSet/pihole-ha-cluster/main/VERSION"
+# Where updates come from. The installer records the repo this node was actually
+# installed from in repo.conf, so a fork keeps following itself instead of
+# silently updating to the upstream project and overwriting local changes.
+# No repo.conf (or an unparseable remote at install time) = upstream.
+REPO_CONF="${PIHOLE_HA_REPO_CONF:-/usr/local/share/pihole-ha/repo.conf}"
+_repo_get() { sed -n "s/^$1=//p" "$REPO_CONF" 2>/dev/null | tail -1; }
+
+REPO_URL="$(_repo_get REPO_URL)"
+REPO_HOST="$(_repo_get REPO_HOST)"
+REPO_SLUG="$(_repo_get REPO_SLUG)"
+REPO_BRANCH="$(_repo_get REPO_BRANCH)"
+REPO_BRANCH="${REPO_BRANCH:-main}"
+
+if [[ -n "$REPO_SLUG" && -n "$REPO_HOST" ]]; then
+    REPO_TARBALL="https://$REPO_HOST/$REPO_SLUG/archive/refs/heads/$REPO_BRANCH.tar.gz"
+    # Only GitHub serves plain files from raw.githubusercontent.com. On any
+    # other host leave this empty, which disables the "update available" check
+    # rather than polling a URL that cannot exist.
+    if [[ "$REPO_HOST" == "github.com" ]]; then
+        RAW_VERSION_URL="https://raw.githubusercontent.com/$REPO_SLUG/$REPO_BRANCH/VERSION"
+    else
+        RAW_VERSION_URL=""
+    fi
+else
+    REPO_URL="https://github.com/RamSet/pihole-ha-cluster.git"
+    REPO_SLUG="RamSet/pihole-ha-cluster"
+    REPO_TARBALL="https://github.com/RamSet/pihole-ha-cluster/archive/refs/heads/main.tar.gz"
+    RAW_VERSION_URL="https://raw.githubusercontent.com/RamSet/pihole-ha-cluster/main/VERSION"
+fi
 VERSION_FILE="/usr/local/share/pihole-ha/VERSION"
 DASH="http://127.0.0.1:8887"
 
@@ -35,9 +61,12 @@ _run_installer() {   # $1 = --update | --uninstall
     _need_root
     rm -rf /tmp/.pihole-ha-src.* 2>/dev/null || true
     local dir; dir="$(mktemp -d /tmp/.pihole-ha-src.XXXXXX)" || { echo "mktemp failed" >&2; exit 1; }
-    printf 'Fetching latest pihole-ha (current: %s) ...\n' "$(_local_version)"
+    printf 'Fetching latest pihole-ha (current: %s) from %s [%s] ...\n' \
+        "$(_local_version)" "$REPO_SLUG" "$REPO_BRANCH"
     if _c git; then
-        git clone --depth 1 -q "$REPO_URL" "$dir" 2>/dev/null || { echo "Fetch failed — git + network needed." >&2; rm -rf "$dir"; exit 1; }
+        git clone --depth 1 -q -b "$REPO_BRANCH" "$REPO_URL" "$dir" 2>/dev/null \
+            || git clone --depth 1 -q "$REPO_URL" "$dir" 2>/dev/null \
+            || { echo "Fetch failed — git + network needed." >&2; rm -rf "$dir"; exit 1; }
     elif _c curl && _c tar; then
         curl -fsSL --max-time 30 "$REPO_TARBALL" 2>/dev/null | tar -xz -C "$dir" --strip-components=1 2>/dev/null \
             || { echo "Fetch failed — curl/tar + network needed." >&2; rm -rf "$dir"; exit 1; }
@@ -53,6 +82,7 @@ cmd_update() { _run_installer --update; }
 cmd_version() {
     local cur latest; cur="$(_local_version)"; latest="$(_latest_version)"
     printf 'pihole-ha %s\n' "$cur"
+    printf 'updates follow: %s [%s]\n' "$REPO_SLUG" "$REPO_BRANCH"
     if [[ -n "$latest" ]]; then
         if [[ "$latest" != "$cur" ]]; then
             printf 'update available: %s  (run: sudo pihole-ha update)\n' "$latest"

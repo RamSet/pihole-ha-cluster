@@ -93,6 +93,46 @@ load_sync_conf() {
     done < "$conf"
 }
 
+# Describe the git checkout in $1 as KEY=VALUE lines, for the installer to
+# record. This is what makes `pihole-ha update` follow the fork it was installed
+# from instead of the upstream repo baked into pihole-ha-cli.
+#
+# Prints nothing and returns 1 when $1 is not a git checkout with an origin, or
+# when the remote is a shape we cannot turn into a fetch URL — the caller then
+# keeps its upstream default.
+platform_repo_info() {
+    local dir="${1:-.}" url branch host slug rest
+    command -v git >/dev/null 2>&1 || return 1
+    # `git config --get`, not `git remote get-url`: the latter needs git 2.7+.
+    url="$(git -C "$dir" config --get remote.origin.url 2>/dev/null)" || return 1
+    [[ -n "$url" ]] || return 1
+    branch="$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    # A detached checkout (installing from a tag) has no branch to follow.
+    [[ -n "$branch" && "$branch" != "HEAD" ]] || branch="main"
+
+    # The three shapes a git remote comes in. An ssh remote is rewritten to
+    # https on purpose: `pihole-ha update` clones as root, and root has no
+    # reason to hold the operator's deploy key.
+    case "$url" in
+        git@*:*)            host="${url#git@}"; host="${host%%:*}"; slug="${url#*:}" ;;
+        ssh://git@*)        rest="${url#ssh://git@}"; host="${rest%%/*}"; slug="${rest#*/}" ;;
+        https://*|http://*) rest="${url#*://}"; rest="${rest#*@}"; host="${rest%%/*}"; slug="${rest#*/}" ;;
+        *) return 1 ;;
+    esac
+    slug="${slug%.git}"; slug="${slug%/}"
+
+    # These end up interpolated into curl URLs, so constrain them rather than
+    # trusting whatever a remote happens to be called.
+    [[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+    [[ "$slug" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || return 1
+    [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || return 1
+
+    printf 'REPO_URL=https://%s/%s.git\n' "$host" "$slug"
+    printf 'REPO_HOST=%s\n' "$host"
+    printf 'REPO_SLUG=%s\n' "$slug"
+    printf 'REPO_BRANCH=%s\n' "$branch"
+}
+
 # Per-kind mute helper. Returns 0 (muted) when $1 is a non-empty tag that
 # appears in PO_MUTED_TAGS (comma-separated). Untagged calls always pass.
 # Relies on the caller having loaded notify.conf this run; the daemon

@@ -1336,6 +1336,83 @@ assert_contains "the docker image ships it"      "$(cat "$SCRIPT_DIR/../docker/D
 assert_contains "the CLI exposes it"             "$(cat "$SCRIPT_DIR/../pihole-ha-cli")" "cluster-key|key)"
 
 # ============================================================
+echo
+echo "=== Updates follow the repo that was installed ==="
+
+# pihole-ha-cli used to hardcode the upstream repo, so `pihole-ha update` on a
+# fork fetched upstream and overwrote the fork's own changes.
+eval "$(extract_fn "$SCRIPT_DIR/../pihole-ha-platform" platform_repo_info)"
+
+_rt="$(mktemp -d)"
+_mkrepo() {   # $1 = remote url, $2 = branch
+    rm -rf "$_rt/r"; git init -q "$_rt/r" 2>/dev/null
+    git -C "$_rt/r" config remote.origin.url "$1"
+    git -C "$_rt/r" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x 2>/dev/null
+    git -C "$_rt/r" branch -M "${2:-main}" 2>/dev/null
+}
+_field() { sed -n "s/^$1=//p" <<< "$2"; }
+
+if command -v git >/dev/null 2>&1; then
+    _mkrepo "git@github.com:Eriobis/pihole-ha-cluster.git" main
+    _info="$(platform_repo_info "$_rt/r")"
+    assert_eq "an ssh remote is rewritten to https" \
+        "https://github.com/Eriobis/pihole-ha-cluster.git" "$(_field REPO_URL "$_info")"
+    assert_eq "the fork's slug is recorded" "Eriobis/pihole-ha-cluster" "$(_field REPO_SLUG "$_info")"
+
+    _mkrepo "https://github.com/Eriobis/pihole-ha-cluster.git" feature-x
+    _info="$(platform_repo_info "$_rt/r")"
+    assert_eq "the installed branch is recorded, not assumed main" \
+        "feature-x" "$(_field REPO_BRANCH "$_info")"
+
+    _mkrepo "ssh://git@gitlab.com/team/ha.git" main
+    assert_eq "a non-github host still resolves" "gitlab.com" \
+        "$(_field REPO_HOST "$(platform_repo_info "$_rt/r")")"
+
+    # Anything we cannot turn into a fetch URL must yield nothing, so the caller
+    # keeps its upstream default rather than writing a broken repo.conf.
+    _mkrepo "/srv/local/bare.git" main
+    assert_eq "a local path yields nothing" "" "$(platform_repo_info "$_rt/r" 2>/dev/null)"
+    _mkrepo 'https://github.com/evil$(id)/repo.git' main
+    assert_eq "a remote with shell metacharacters is refused" "" "$(platform_repo_info "$_rt/r" 2>/dev/null)"
+else
+    echo "  SKIP  git not available"
+fi
+
+# The CLI must derive its fetch URLs from repo.conf, and degrade sanely.
+CLI_SRC="$SCRIPT_DIR/../pihole-ha-cli"
+_cliurls() {   # $1 = repo.conf path -> "TARBALL|RAW|SLUG|BRANCH"
+    PIHOLE_HA_REPO_CONF="$1" bash -c '
+        PIHOLE_HA_REPO_CONF="'"$1"'"
+        source "'"$CLI_SRC"'" help >/dev/null 2>&1
+        printf "%s|%s|%s|%s" "$REPO_TARBALL" "$RAW_VERSION_URL" "$REPO_SLUG" "$REPO_BRANCH"' 2>/dev/null
+}
+
+printf 'REPO_URL=https://github.com/Eriobis/pihole-ha-cluster.git\nREPO_HOST=github.com\nREPO_SLUG=Eriobis/pihole-ha-cluster\nREPO_BRANCH=feature-x\n' > "$_rt/gh.conf"
+_u="$(_cliurls "$_rt/gh.conf")"
+assert_contains "the tarball points at the fork"        "$_u" "github.com/Eriobis/pihole-ha-cluster/archive"
+assert_contains "the tarball uses the installed branch" "$_u" "feature-x.tar.gz"
+assert_contains "the version check follows the fork"    "$_u" "raw.githubusercontent.com/Eriobis/pihole-ha-cluster/feature-x/VERSION"
+assert_not_contains "upstream is not consulted"         "$_u" "RamSet"
+
+printf 'REPO_URL=https://gitlab.com/team/ha.git\nREPO_HOST=gitlab.com\nREPO_SLUG=team/ha\nREPO_BRANCH=main\n' > "$_rt/gl.conf"
+_u="$(_cliurls "$_rt/gl.conf")"
+assert_contains "a non-github host still gets a tarball url" "$_u" "gitlab.com/team/ha/archive"
+assert_contains "the github-only version check is disabled"  "$_u" "|main"
+assert_not_contains "no raw.githubusercontent url is invented" "$_u" "raw.githubusercontent"
+
+_u="$(_cliurls "$_rt/absent.conf")"
+assert_contains "without repo.conf it falls back to upstream" "$_u" "RamSet/pihole-ha-cluster"
+rm -rf "$_rt"
+
+# All three writers/readers have to agree, or the fork is followed only by half
+# the tooling.
+_inst="$(cat "$SCRIPT_DIR/../install.sh")"
+assert_contains "the installer records it on a fresh install" "$_inst" '_write_repo_conf "$SCRIPT_DIR"'
+assert_contains "the installer records it on update"          "$_inst" '_write_repo_conf "$_src"'
+assert_contains "setup.sh exports the detected repo"          "$(cat "$SCRIPT_DIR/../setup.sh")" "PIHOLE_HA_REPO_SLUG"
+assert_contains "the dashboard update check follows it too"   "$(cat "$SCRIPT_DIR/../pihole-ha-dash")" "REPO_SLUG=//p"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh pihole-ha-cluster-key pihole-ha-cli; do

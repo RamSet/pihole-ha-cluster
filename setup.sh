@@ -12,6 +12,23 @@ INFO="[i]"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Record which repo this copy came from, so `pihole-ha update` later follows the
+# fork it was installed from rather than the upstream URL baked into
+# pihole-ha-cli. Exported for the installer we exec below; it re-detects from its
+# own directory if we could not work it out here (it is also run directly, by
+# `pihole-ha update`, which never goes through this script).
+if [[ -f "$SCRIPT_DIR/pihole-ha-platform" ]]; then
+    # Subshell: source the library for one function without letting it define
+    # anything in this script's namespace.
+    _repo_info="$( . "$SCRIPT_DIR/pihole-ha-platform" >/dev/null 2>&1; platform_repo_info "$SCRIPT_DIR" )" || _repo_info=""
+    if [[ -n "$_repo_info" ]]; then
+        export PIHOLE_HA_REPO_URL="$(sed -n 's/^REPO_URL=//p'    <<< "$_repo_info")"
+        export PIHOLE_HA_REPO_HOST="$(sed -n 's/^REPO_HOST=//p'  <<< "$_repo_info")"
+        export PIHOLE_HA_REPO_SLUG="$(sed -n 's/^REPO_SLUG=//p'  <<< "$_repo_info")"
+        export PIHOLE_HA_REPO_BRANCH="$(sed -n 's/^REPO_BRANCH=//p' <<< "$_repo_info")"
+    fi
+fi
+
 printf "\\n"
 printf "  ${COL_GREEN}╔═══════════════════════════════════════╗${COL_NC}\\n"
 printf "  ${COL_GREEN}║${COL_NC}  ${COL_BOLD}Pi-hole HA Setup${COL_NC}                     ${COL_GREEN}║${COL_NC}\\n"
