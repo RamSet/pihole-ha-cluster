@@ -61,6 +61,38 @@ load_notify_conf() {
     done < "$conf"
 }
 
+# Read /etc/pihole-ha/sync.conf into the SYNC_* globals.
+#
+# NOT sourced, deliberately. This file arrives over the network: pihole-ha-sync
+# ships it inside the config payload and pihole-ha-sync-pull writes it verbatim,
+# so sourcing it ran whatever a peer put in it, as root, on the next timer tick.
+# Parse a fixed key whitelist instead and drop any value that is not the shape
+# that key is allowed to have.
+#
+# Unlike load_notify_conf this does NOT reset to defaults first: every caller
+# sets its own defaults and relies on an absent key leaving them untouched.
+load_sync_conf() {
+    local conf="${1:-/etc/pihole-ha/sync.conf}"
+    [[ -f "$conf" ]] || return 0
+    local key val
+    # `|| [[ -n "$key" ]]`: read returns non-zero on a final line with no
+    # trailing newline, which would silently drop the last entry.
+    while IFS='=' read -r key val || [[ -n "$key" ]]; do
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        val="${val%$'\r'}"
+        case "$key" in
+            SYNC_ENABLED|SYNC_GRAVITY|SYNC_DHCP|SYNC_DNS|SYNC_SETTINGS|SYNC_NOTIFY)
+                # printf -v is safe here: $key can only be one of the literals above.
+                [[ "$val" == "true" || "$val" == "false" ]] && printf -v "$key" '%s' "$val" ;;
+            SYNC_INTERVAL)
+                # 10# or a zero-padded value like 08 is read as invalid octal.
+                [[ "$val" =~ ^[0-9]+$ ]] && (( 10#$val >= 1 && 10#$val <= 1440 )) && SYNC_INTERVAL="$val" ;;
+            SYNC_PRIMARY)
+                is_valid_ip "$val" && SYNC_PRIMARY="$val" ;;
+        esac
+    done < "$conf"
+}
+
 # Per-kind mute helper. Returns 0 (muted) when $1 is a non-empty tag that
 # appears in PO_MUTED_TAGS (comma-separated). Untagged calls always pass.
 # Relies on the caller having loaded notify.conf this run; the daemon

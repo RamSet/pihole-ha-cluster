@@ -184,8 +184,14 @@ NODES=()
 for _rn in "${_RAW_NODES[@]}"; do NODES+=("${_rn%%:*}"); done
 SYNC_PRIMARY="${PIHOLE_HA_SYNC_PRIMARY:-${NODES[0]}}"
 SYNC_PRIMARY="${SYNC_PRIMARY%%:*}"
-# Also read from sync.conf if it exists
-[[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+# Also read from sync.conf if it exists. Read the one key we need rather than
+# sourcing it: sync.conf arrives over the network inside the config payload, so
+# sourcing ran whatever a peer put in it, as root. Same idiom as
+# read_sync_interval below.
+if [[ -f "$SYNC_CONF" ]]; then
+    _sp="$(grep -E '^SYNC_PRIMARY=' "$SYNC_CONF" | head -1 | cut -d= -f2 | tr -dc '0-9.')"
+    [[ "$_sp" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && SYNC_PRIMARY="$_sp"
+fi
 
 if [[ "$LOCAL_IP" == "$SYNC_PRIMARY" ]]; then
     touch /run/pihole-ha/sync-enabled

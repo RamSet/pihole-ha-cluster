@@ -87,7 +87,7 @@ SYNC_DHCP=true
 SYNC_DNS=true
 SYNC_SETTINGS=true
 SYNC_PRIMARY="${NODES[0]}"
-[[ -f "$SYNC_CONF" ]] && . "$SYNC_CONF"
+load_sync_conf "$SYNC_CONF"
 
 _fetch_manifest() {
     curl -sf --max-time 10 "http://$1:8887/api/sync/manifest" 2>/dev/null
