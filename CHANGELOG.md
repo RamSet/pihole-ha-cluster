@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.16.7 — 2026-09-24
+- Make the VIP the default in a DHCP-HA install, not the thing you opt into
+
 ## v3.16.6 — 2026-09-24
 - The kill switch must not take DNS off the network either
 - Follow the master-aware stand-down in the tests that assumed the helper
