@@ -231,6 +231,28 @@ assert_contains "HA_ENABLED=false releases the VIP"  "$(calls)" "addr del $VIPAD
 assert_contains "HA_ENABLED=false releases DHCP"     "$(calls)" "dhcp.active false"
 assert_eq       "HA_ENABLED=false ends up holding no VIP" "" "$(cat "$W/state/vip")"
 
+# ...but the configured master keeps serving DHCP. Switching HA off is a brake on
+# failover, not an instruction to take DHCP off the LAN: a standby serves it only
+# as a failover artifact and hands it back, while the master carries on. The VIP
+# still goes, because nothing would yield it while frozen. Here this node is
+# listed first, so it IS the configured master.
+echo "$VIPADDR" > "$W/state/vip"; echo true > "$W/state/dhcp"
+run_loop "CONFIG_VERSION=1
+GATEWAY=$GW
+VIP=$VIPADDR
+VIP_ENABLED=true
+HA_NODES=$P2,$P1
+PIN_DNS=false
+CHECK_INTERVAL=1
+ACTIVATE_AFTER=1
+DEACTIVATE_AFTER=1
+HA_ENABLED=false
+DHCP_HA=true" 2
+assert_contains "the configured master still releases the VIP when HA is off" \
+    "$(calls)" "addr del $VIPADDR/32 dev eth0"
+assert_not_contains "the configured master keeps serving DHCP when HA is off" \
+    "$(calls)" "dhcp.active false"
+
 # The second shipped bug: the release was nested inside "if DHCP is on", so a
 # node holding only the VIP kept it for good.
 echo "$VIPADDR" > "$W/state/vip"; echo false > "$W/state/dhcp"

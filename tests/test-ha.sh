@@ -1220,7 +1220,16 @@ assert_contains "a failed release is logged"    "$_sd_log" "stand_down_failed"
 # Structural, because these live in the main loop and cannot be run here — but
 # the bug was precisely that some of them returned on their own.
 _ha_loop="$(cat "$HA_SRC")"; _ha_loop="${_ha_loop##*--- Main Loop ---}"
-assert_contains "HA_ENABLED=false stands down" "$_ha_loop" 'stand_down "HA disabled"'
+# The DHCP branch releases inline rather than through stand_down, because it
+# draws a distinction stand_down deliberately does not: the configured master
+# keeps serving DHCP when HA is switched off, so the kill switch never takes
+# DHCP off the LAN by itself. The VIP is always released — it is a floating
+# address, and a frozen holder can never yield it.
+_ha_off="${_ha_loop#*if [[ \"\$HA_ENABLED\" != \"true\" \]]; then}"
+_ha_off="${_ha_off%%write_status \"HA disabled\"*}"
+assert_contains "HA_ENABLED=false releases the VIP"            "$_ha_off" 'remove_vip'
+assert_contains "HA_ENABLED=false hands DHCP back"             "$_ha_off" 'set_dhcp false'
+assert_contains "but only on a node that is not the master"    "$_ha_off" 'am_configured_master'
 assert_contains "STANDBY_ONLY stands down"     "$_ha_loop" 'stand_down "STANDBY_ONLY"'
 assert_contains "DNS-only stands down when HA is off" \
     "$(extract_fn "$HA_SRC" dns_only_vip_cycle)" 'stand_down "HA disabled"'
