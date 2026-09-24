@@ -482,13 +482,16 @@ docker compose restart
 
 ## Tests
 
-Run integration tests (no root needed):
+Run the tests (no root needed, nothing outside a tmpdir is touched):
 
 ```bash
-bash tests/test-ha.sh
+bash tests/test-ha.sh      # unit + structural
+bash tests/test-loop.sh    # the failover loop, end to end
 ```
 
-Tests cover IP validation, config version parsing, role detection, node reorder logic, structured log format, auth check logic, and syntax checking of all scripts.
+`test-ha.sh` covers IP validation, config version parsing, role detection, node reorder logic, structured log format, auth check logic, and syntax checking of all scripts.
+
+`test-loop.sh` runs the real daemon loop against fake `ip`, `ping`, `nc`, `curl` and `pihole-FTL` binaries, describes a cluster in files, and asserts which addresses and DHCP calls the daemon actually made — takeover, yielding back, standing down, and DNS-only mode. It exists because unit tests cannot reach decisions made in the main loop, which is where two failover bugs hid while 300+ tests passed.
 
 ## Adding a Node
 

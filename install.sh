@@ -1207,13 +1207,47 @@ systemctl restart pihole-ha-sync-pull.timer >/dev/null 2>&1
 printf "%b  %b Sync timers enabled (role resolved at runtime)\\n" "${OVER}" "${TICK}"
 
 # --- 22. Register this node with existing cluster nodes ---
+# One join request, keeping what is needed to say why it failed. `curl -sf`
+# throws exactly that away: it suppresses the body on an HTTP error and collapses
+# a refused connection, a timeout and a 500 into one non-zero exit. So a node
+# that could not join was told only "Could not register with any existing nodes",
+# with no way to tell a firewall from a wrong password — reported by a user who
+# hit it twice and had nothing to go on either time.
+# Both results come back in globals, never on stdout: a caller that captured the
+# body with a command substitution would run this in a subshell, so the status
+# code would never reach _join_reason and every failure would be described by the
+# default case. Written that way round first, and caught in review.
+_JOIN_CODE="" _JOIN_BODY=""
+_join_call() {
+    local url="$1" out
+    _JOIN_CODE=""; _JOIN_BODY=""
+    out="$(curl -s --max-time 5 -w '\n%{http_code}' "$url" 2>/dev/null)" || true
+    _JOIN_CODE="${out##*$'\n'}"
+    _JOIN_BODY="${out%$'\n'*}"
+    [[ "$_JOIN_CODE" == "200" ]]
+}
+# Why the last _join_call did not amount to a join. The body is included for the
+# cases where the peer had something to say, trimmed to one line so a stray HTML
+# error page cannot bury the rest of the installer output.
+_join_reason() {
+    local body="${1-$_JOIN_BODY}"
+    body="${body//$'\n'/ }"; body="${body:0:120}"
+    case "$_JOIN_CODE" in
+        000) printf 'no answer on port 8887: pihole-ha is not running there, or a firewall or VLAN is in the way' ;;
+        401|403) printf 'refused the join (HTTP %s) even after authenticating' "$_JOIN_CODE" ;;
+        200) printf 'answered without confirming the join: %s' "${body:-(empty reply)}" ;;
+        *) printf 'answered HTTP %s: %s' "${_JOIN_CODE:-?}" "${body:-(no body)}" ;;
+    esac
+}
 if [[ ${#discovered_nodes[@]} -gt 0 ]]; then
     _local_entry="$(_node_entry "$local_ip")"
     printf "  %b Registering this node with cluster..." "${INFO}"
     _join_ok=0 _join_fail=0
+    _join_why=()
     for _ji in "${!discovered_nodes[@]}"; do
         _peer="${discovered_nodes[$_ji]}"
-        _join_resp="$(curl -sf --max-time 5 "http://$_peer:8887/api/nodes/join?node=$_local_entry" 2>/dev/null)" || true
+        _join_call "http://$_peer:8887/api/nodes/join?node=$_local_entry" || true
+        _join_resp="$_JOIN_BODY"
         if echo "$_join_resp" | grep -q '"ok":true'; then
             _join_ok=$(( _join_ok + 1 ))
         elif echo "$_join_resp" | grep -q '"auth_required"'; then
@@ -1229,17 +1263,21 @@ if [[ ${#discovered_nodes[@]} -gt 0 ]]; then
                 # It worked, so keep it. The daemon needs this every cycle, not
                 # just once during registration.
                 _save_peer_pass "$_peer" "$_join_pass"
-                _join_resp="$(curl -sf --max-time 5 "http://$_peer:8887/api/nodes/join?node=$_local_entry&sid=$_join_sid" 2>/dev/null)" || true
+                _join_call "http://$_peer:8887/api/nodes/join?node=$_local_entry&sid=$_join_sid" || true
+                _join_resp="$_JOIN_BODY"
                 if echo "$_join_resp" | grep -q '"ok":true'; then
                     _join_ok=$(( _join_ok + 1 ))
                 else
                     _join_fail=$(( _join_fail + 1 ))
+                    _join_why+=("$_peer — $(_join_reason)")
                 fi
             else
                 _join_fail=$(( _join_fail + 1 ))
+                _join_why+=("$_peer — the login was not accepted: wrong Pi-hole password, or the reply took longer than AUTH_TIMEOUT=${AUTH_TIMEOUT:-10}s (Pi-hole hashes the password deliberately slowly, so raise AUTH_TIMEOUT on a slow node)")
             fi
         else
             _join_fail=$(( _join_fail + 1 ))
+            _join_why+=("$_peer — $(_join_reason)")
         fi
     done
     # This node's OWN password, which nothing else can supply. If join already
@@ -1265,8 +1303,14 @@ if [[ ${#discovered_nodes[@]} -gt 0 ]]; then
         printf "%b  %b Registered with %d node(s)\\n" "${OVER}" "${TICK}" "$_join_ok"
     elif [[ $_join_ok -gt 0 ]]; then
         printf "%b  %b Registered with %d node(s), %d failed\\n" "${OVER}" "${INFO}" "$_join_ok" "$_join_fail"
+        for _jw in ${_join_why[@]+"${_join_why[@]}"}; do
+            printf "      %b%s%b\\n" "${COL_YELLOW}" "$_jw" "${COL_NC}"
+        done
     elif [[ $_join_fail -gt 0 ]]; then
         printf "%b  %b %bCould not register with any existing nodes%b\\n" "${OVER}" "${CROSS}" "${COL_RED}" "${COL_NC}"
+        for _jw in ${_join_why[@]+"${_join_why[@]}"}; do
+            printf "      %b%s%b\\n" "${COL_YELLOW}" "$_jw" "${COL_NC}"
+        done
         # A node the cluster does not know about must not come up armed. Its own
         # nodes.conf lists the full cluster, so it will health-check peers it
         # cannot reach or log in to, read them as down, and take DHCP and the VIP

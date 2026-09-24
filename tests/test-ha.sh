@@ -1287,6 +1287,77 @@ assert_contains "the skipped address is named as the VIP, not as the node" \
     "$_inst_src" "VIP held by %s, skipped"
 
 # ============================================================
+echo
+echo "=== A failed join says why, per peer ==="
+
+# "Could not register with any existing nodes" was the entire report, because
+# curl -sf hides the body on an HTTP error and collapses a refused connection, a
+# timeout and a 500 into one non-zero exit.
+eval "$(extract_fn "$SCRIPT_DIR/../install.sh" _join_call)"
+eval "$(extract_fn "$SCRIPT_DIR/../install.sh" _join_reason)"
+
+# A stub curl standing in for the real one: prints a body, then the status code
+# on its own line, exactly as -w '\n%{http_code}' does.
+_fake_code="200" _fake_body='{"ok":true}'
+curl() { printf '%s\n%s' "$_fake_body" "$_fake_code"; }
+
+_fake_code="200" _fake_body='{"ok":true}'
+assert_true "a 200 is a successful call"      _join_call "http://peer:8887/api/nodes/join"
+_join_call http://x
+assert_eq   "the body lands in a variable, without the code" '{"ok":true}' "$_JOIN_BODY"
+_fake_code="500" _fake_body='oops'
+assert_false "a 500 is not a successful call"  _join_call "http://peer:8887/api/nodes/join"
+_join_call http://x
+assert_eq   "the status code is kept for the reason" "500" "$_JOIN_CODE"
+
+# The results must come back in variables, not on stdout. Written the other way
+# first: the installer captured the body with $(...), so the code was set in a
+# subshell, never reached _join_reason, and every failure came out as the default
+# case. Nothing above catches that — only the call site does.
+_inst_join="$(cat "$SCRIPT_DIR/../install.sh")"
+assert_not_contains "the installer does not call _join_call in a subshell" \
+    "$_inst_join" '$(_join_call'
+assert_contains "the installer reads the body from the variable" \
+    "$_inst_join" '_join_resp="$_JOIN_BODY"'
+
+# curl that cannot connect: no body, code 000.
+_fake_code="000" _fake_body=""
+_join_call http://x
+assert_contains "an unreachable peer is named as unreachable, not as a bad password" \
+    "$(_join_reason)" "port 8887"
+assert_contains "and points at what actually blocks it" \
+    "$(_join_reason)" "firewall"
+
+_JOIN_CODE="500"
+assert_contains "an HTTP error reports its code" "$(_join_reason 'Internal Error')" "HTTP 500"
+assert_contains "an HTTP error reports what the peer said" \
+    "$(_join_reason 'Internal Error')" "Internal Error"
+
+_JOIN_CODE="401"
+assert_contains "a refusal after login is named as one" "$(_join_reason '')" "refused the join"
+
+_JOIN_CODE="200"
+assert_contains "a 200 that is not a join is distinguished from one that is" \
+    "$(_join_reason '{"ok":false,"error":"unknown node"}')" "without confirming"
+assert_contains "and quotes the reply" \
+    "$(_join_reason '{"ok":false,"error":"unknown node"}')" "unknown node"
+assert_contains "an empty 200 still says something" "$(_join_reason '')" "empty reply"
+
+# A peer that answers with an HTML error page must not bury the installer output.
+_JOIN_CODE="502"
+_long_reason="$(_join_reason "$(printf '<html>\n<body>\n%s\n</body>' "$(printf 'x%.0s' {1..400})")")"
+assert_not_contains "a multi-line body is flattened to one line" "$_long_reason" $'\n'
+assert_true "a long body is trimmed" [ "${#_long_reason}" -lt 200 ]
+unset -f curl
+
+# The reasons have to reach the operator, in both the total and partial failure
+# branches — collecting them and printing nothing is the bug over again.
+_reg_block="$(cat "$SCRIPT_DIR/../install.sh")"
+_reg_block="${_reg_block##*--- 22. Register this node}"
+assert_eq "both join outcomes print their reasons" "2" \
+    "$(grep -c 'for _jw in' <<< "$_reg_block")"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do
