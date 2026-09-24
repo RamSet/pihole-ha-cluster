@@ -1761,8 +1761,14 @@ assert_false "a node that is not the pin is not"              am_configured_mast
 DHCP_MASTER="10.33.47.99"; LOCAL_IP="10.33.47.55"; MY_IDX=0
 assert_true  "a stale pin falls back to priority order"       am_configured_master
 
-assert_contains "disabling HA releases the VIP"  "$_hasrc" 'has_vip && remove_vip
-        # DHCP is handed back only on a node that is not the configured master.'
+# The VIP follows the same rule as DHCP: the configured master keeps what it is
+# serving, everyone else hands it back. Releasing it on every node would take DNS
+# off the network, because dhcp-option=6 is the VIP alone whenever one is set.
+# The exception is a master that cannot answer DNS itself — the one case where a
+# live peer rightly claims the same address and a frozen holder cannot yield.
+assert_contains "disabling HA releases the VIP off the master" \
+    "$_hasrc" 'if ! am_configured_master || ! is_dns_healthy "$LOCAL_IP"; then
+            has_vip && remove_vip'
 assert_contains "and stands a serving standby down" "$_hasrc" 'event=ha_disabled_standdown'
 
 # ============================================================

@@ -1481,7 +1481,23 @@ while true; do
         # frozen holder can never yield it, so a node that comes back with HA
         # still enabled claims it too and two hosts answer ARP for it forever.
         # The DNS-only branch has always released it here; this one did not.
-        has_vip && remove_vip
+        #
+        # The VIP follows the same rule as DHCP below, for the same reason: the
+        # configured master keeps what it is serving, everyone else hands it
+        # back. Releasing it on every node takes DNS off the network entirely —
+        # with a VIP configured, dhcp-option=6 is the VIP ALONE, and
+        # ensure_dns_option keeps telling clients so no matter what this flag
+        # says. An operator reaching for the kill switch to calm a fight would
+        # get a cluster-wide DNS outage for it.
+        #
+        # Unless the master cannot answer DNS itself. That is the one case where
+        # a live peer rightly reads it as down and claims the same address, and a
+        # frozen holder can never yield — the ARP fight this branch exists to
+        # prevent. A master that cannot serve gets out of the way; one that can
+        # keeps answering for the clients that have nowhere else to ask.
+        if ! am_configured_master || ! is_dns_healthy "$LOCAL_IP"; then
+            has_vip && remove_vip
+        fi
         # DHCP is handed back only on a node that is not the configured master.
         # A standby serves DHCP only as a failover artifact, and holding it
         # while frozen is what turned a toggle that reached some nodes and not

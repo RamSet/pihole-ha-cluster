@@ -176,6 +176,19 @@ run_loop() {
 
 calls() { cat "$W/calls.log" 2>/dev/null; }
 
+# The daemon's own log, truncated at the point it began shutting down.
+#
+# The shutdown handler releases the VIP by design — a stopping daemon must never
+# leave a floating address bound with nothing managing it — and this harness runs
+# the loop to completion, so that release lands in every scenario. Asserting on
+# `ip addr del` alone would therefore pass for scenarios where the loop itself
+# did nothing at all. VIP assertions read this instead: an in-loop release logs
+# event=vip_remove before the shutdown marker.
+loop_log() {
+    local l; l="$(cat "$W/out.log" 2>/dev/null)"
+    printf '%s' "${l%%event=shutdown_release_vip*}"
+}
+
 W="$(mktemp -d)"
 mkdir -p "$W/etc/pihole-ha" "$W/state" "$W/var"
 write_stubs
@@ -227,7 +240,7 @@ echo "$VIPADDR" > "$W/state/vip"; echo true > "$W/state/dhcp"
 run_loop "$_BASE_CONF
 HA_ENABLED=false
 DHCP_HA=true" 2
-assert_contains "HA_ENABLED=false releases the VIP"  "$(calls)" "addr del $VIPADDR/32 dev eth0"
+assert_contains "HA_ENABLED=false releases the VIP"  "$(loop_log)" "event=vip_remove"
 assert_contains "HA_ENABLED=false releases DHCP"     "$(calls)" "dhcp.active false"
 assert_eq       "HA_ENABLED=false ends up holding no VIP" "" "$(cat "$W/state/vip")"
 
@@ -248,10 +261,30 @@ ACTIVATE_AFTER=1
 DEACTIVATE_AFTER=1
 HA_ENABLED=false
 DHCP_HA=true" 2
-assert_contains "the configured master still releases the VIP when HA is off" \
-    "$(calls)" "addr del $VIPADDR/32 dev eth0"
-assert_not_contains "the configured master keeps serving DHCP when HA is off" \
+assert_not_contains "a healthy master keeps the VIP when HA is off" \
+    "$(loop_log)" "event=vip_remove"
+assert_not_contains "a healthy master keeps serving DHCP when HA is off" \
     "$(calls)" "dhcp.active false"
+
+# ...but a master that cannot answer DNS itself hands the VIP back. It is the one
+# case where a live peer rightly reads the master as down and claims the same
+# address, and a frozen node can never yield it.
+set_peer "$P2" true false false        # master, DNS dead
+echo "$VIPADDR" > "$W/state/vip"; echo true > "$W/state/dhcp"
+run_loop "CONFIG_VERSION=1
+GATEWAY=$GW
+VIP=$VIPADDR
+VIP_ENABLED=true
+HA_NODES=$P2,$P1
+PIN_DNS=false
+CHECK_INTERVAL=1
+ACTIVATE_AFTER=1
+DEACTIVATE_AFTER=1
+HA_ENABLED=false
+DHCP_HA=true" 2
+assert_contains "a master that cannot resolve gives the VIP back" \
+    "$(loop_log)" "event=vip_remove"
+set_peer "$P2" true true false
 
 # The second shipped bug: the release was nested inside "if DHCP is on", so a
 # node holding only the VIP kept it for good.
@@ -261,7 +294,7 @@ HA_ENABLED=true
 DHCP_HA=true
 STANDBY_ONLY=true" 2
 assert_contains "STANDBY_ONLY releases a VIP held with DHCP already off" \
-    "$(calls)" "addr del $VIPADDR/32 dev eth0"
+    "$(loop_log)" "event=vip_remove"
 assert_not_contains "STANDBY_ONLY does not then re-claim it" "$(calls)" "addr add"
 
 # Both held, STANDBY_ONLY set: both go back.
@@ -271,7 +304,7 @@ HA_ENABLED=true
 DHCP_HA=true
 STANDBY_ONLY=true" 2
 assert_contains "STANDBY_ONLY releases DHCP"        "$(calls)" "dhcp.active false"
-assert_contains "STANDBY_ONLY releases the VIP too" "$(calls)" "addr del $VIPADDR/32 dev eth0"
+assert_contains "STANDBY_ONLY releases the VIP too" "$(loop_log)" "event=vip_remove"
 
 # STANDBY_ONLY has to win against the state that would otherwise make this node
 # take over: it is the brake an operator reaches for while a cluster is fighting.
@@ -303,7 +336,7 @@ HA_ENABLED=true
 DHCP_HA=false
 STANDBY_ONLY=true" 3
 assert_contains "DNS-only STANDBY_ONLY releases the VIP it would otherwise keep" \
-    "$(calls)" "addr del $VIPADDR/32 dev eth0"
+    "$(loop_log)" "event=vip_remove"
 assert_not_contains "DNS-only STANDBY_ONLY does not re-claim it" "$(calls)" "addr add"
 assert_not_contains "DNS-only never writes DHCP state"   "$(calls)" "dhcp.active true"
 assert_not_contains "DNS-only never writes DHCP state (off either)" \
@@ -314,7 +347,7 @@ echo "$VIPADDR" > "$W/state/vip"
 run_loop "$_BASE_CONF
 HA_ENABLED=false
 DHCP_HA=false" 2
-assert_contains "DNS-only HA_ENABLED=false releases the VIP" "$(calls)" "addr del $VIPADDR/32 dev eth0"
+assert_contains "DNS-only HA_ENABLED=false releases the VIP" "$(loop_log)" "event=vip_remove"
 
 # Control for this mode: a DNS-only node with the primary's DNS down does claim.
 set_peer "$P1" true false false
@@ -353,7 +386,7 @@ run_loop "$_BASE_CONF
 HA_ENABLED=true
 DHCP_HA=true" 4
 assert_contains "a node with dead DNS yields DHCP" "$(calls)" "dhcp.active false"
-assert_contains "a node with dead DNS yields the VIP" "$(calls)" "addr del $VIPADDR/32 dev eth0"
+assert_contains "a node with dead DNS yields the VIP" "$(loop_log)" "event=vip_remove"
 
 # Control: the same node, DNS restored, does serve when it is the only one left.
 set_peer "$P1" false false false
