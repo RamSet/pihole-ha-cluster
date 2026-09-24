@@ -103,7 +103,7 @@ sudo ./setup.sh
 1. **Scans the subnet** in parallel for existing pihole-ha nodes on port 8887
 2. **Auto-detects role** — if an existing cluster is found, this node joins as the next standby. If none are found (e.g. the other node is on a different subnet), it offers to **join by IP**: enter an existing node's address and it verifies + joins that node. Otherwise this node becomes PRIMARY.
 3. **Preserves cluster priority** — discovered nodes keep their existing order, the new node is appended last
-4. **Detects deployment mode** (DHCP-HA vs DNS-only) and **asks about a VIP** (optional in both modes) — requires typing "yes" explicitly to enable. It never enables Pi-hole DHCP on a DNS-only network.
+4. **Detects deployment mode** (DHCP-HA vs DNS-only) and **asks about a VIP**. In **DHCP-HA** it defaults to enabled — without a VIP, failover is only as fast as each client's own resolver timeout (seconds, and some clients never switch), and per-client metrics split across nodes; press enter to accept, or answer `no` to opt out. In **DNS-only** it stays opt-in and requires typing "yes", since a VIP only helps once you point your own DHCP server at it. It never enables Pi-hole DHCP on a DNS-only network.
 5. **Asks whether to pin system DNS to `127.0.0.1`** (recommended, so the node always resolves independent of the VIP) — decline if your resolver lives elsewhere and you don't want `/etc/resolv.conf` touched. Recorded as `PIN_DNS` and preserved across updates.
 6. **Registers with the cluster** — calls `/api/nodes/join` on each existing node so they immediately learn about the new node
 7. **Installs and starts services** — scripts, systemd units (bare metal) or Docker compose stack

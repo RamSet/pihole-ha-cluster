@@ -1853,6 +1853,54 @@ assert_contains "and marks the run failed"             "$_pullsrc2" 'log_warn "e
 assert_contains "the failure counter is initialised"   "$_pullsrc2" "_settings_failed=0"
 
 # ============================================================
+echo
+echo "=== The VIP prompt defaults to the better setup in DHCP-HA ==="
+
+# Without a VIP, DHCP-HA failover is only as good as each client's resolver, and
+# metrics split across nodes. Requiring the operator to type "yes" made the
+# recommended setup the one people skip. DNS-only stays opt-in: a VIP there is
+# useless until the operator repoints their own DHCP server at it.
+_ins="$(cat "$SCRIPT_DIR/../install.sh")"
+# awk, not ${var%%pattern}: the block ends at an `if [[ ... ]]` line, and those
+# brackets are a glob bracket expression in a parameter-expansion pattern, which
+# silently cut the slice down to nothing and left every assertion below comparing
+# two empty strings.
+_vip_block="$(awk '/_vip_defaulted="false"$/{f=1} /if \[\[ "\$vip_choice" == "y" \]\]/{f=0} f{print}' "$SCRIPT_DIR/../install.sh")"
+[[ -n "$_vip_block" ]] || { echo "  FAIL  could not extract the VIP prompt block"; (( _FAIL++ )); (( _TOTAL++ )); }
+
+# Drive the real block with a stubbed `read`: a function of that name takes
+# precedence over the builtin, so this exercises the shipped prompt logic rather
+# than a copy of it.
+read() { local _n="${!#}"; printf -v "$_n" '%s' "$_FAKE_IN"; }
+
+_ask() {  # $1 = mode, $2 = what the operator typed
+    _dhcp_mode="$1" _FAKE_IN="$2" vip_choice="" _vip_defaulted="false"
+    eval "$_vip_block" >/dev/null 2>&1
+    printf '%s/%s' "$vip_choice" "$_vip_defaulted"
+}
+
+assert_eq "DHCP-HA: pressing enter takes the VIP"      "y/true"  "$(_ask dhcp '')"
+assert_eq "DHCP-HA: 'no' opts out"                     "n/false" "$(_ask dhcp 'no')"
+assert_eq "DHCP-HA: 'n' opts out"                      "n/false" "$(_ask dhcp 'n')"
+assert_eq "DHCP-HA: 'yes' is still yes"                "y/false" "$(_ask dhcp 'yes')"
+assert_eq "DNS-only: pressing enter declines"          "n/false" "$(_ask dns '')"
+assert_eq "DNS-only: 'yes' is required, and accepted"  "y/false" "$(_ask dns 'yes')"
+assert_eq "DNS-only: a bare 'y' is not enough"         "n/false" "$(_ask dns 'y')"
+unset -f read
+
+assert_contains "the DHCP-HA prompt shows the new default" "$_ins" 'Enable VIP? [YES/no]'
+assert_contains "the DNS-only prompt is unchanged" "$_ins" "Enable VIP? (must type 'yes')"
+
+# Pressing enter through a prompt that defaulted to yes, then naming no address,
+# is not the same mistake as asking for a VIP and leaving it blank. Only the
+# second stops the install.
+_vip_addr="${_ins#*Virtual IP (VIP) address (an unused address on this LAN)}"
+_vip_addr="${_vip_addr%%--- 11. Summary*}"
+assert_contains "a defaulted yes with no address carries on" \
+    "$_vip_addr" 'continuing without a VIP'
+assert_contains "an explicit yes with no address still stops" "$_vip_addr" 'exit 1'
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh pihole-ha-cluster-key pihole-ha-cli; do

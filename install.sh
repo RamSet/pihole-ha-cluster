@@ -773,28 +773,61 @@ if [[ -n "$cluster_vip" ]]; then
 else
     printf "\\n"
     printf "  %b ${COL_BOLD}Virtual IP (VIP)${COL_NC}\\n" "${INFO}"
+    # The default differs by mode, deliberately.
+    #
+    # DHCP-HA is a failover deployment by definition, and without a VIP its
+    # failover is only as good as each client's resolver: clients are handed
+    # every node's IP and fall back on their own timeouts — seconds, and some
+    # clients never fail over at all — with per-client metrics split across
+    # nodes. A VIP makes the switch invisible and keeps every query on one node.
+    # Making the operator type "yes" for that made the better setup the one
+    # people skip, so here it is the default and "no" is the opt-out.
+    #
+    # DNS-only stays opt-in: DHCP belongs to another server there, so a VIP is
+    # only useful once the operator repoints that server at it — a step they may
+    # not be able to take, and one this installer cannot do for them.
+    _vip_defaulted="false"
     if [[ "$_dhcp_mode" == "dns" ]]; then
         printf "      A VIP is a floating IP that moves to whichever node is answering DNS.\\n"
         printf "      Point your clients' DNS at it (via your DHCP server) and lookups keep\\n"
         printf "      working when a node goes down — better than listing both Pi-holes.\\n"
+        printf "\\n"
+        read -erp "  Enable VIP? (must type 'yes') [yes/NO]: " vip_choice
+        [[ "$vip_choice" == "yes" ]] && vip_choice="y" || vip_choice="n"
     else
         printf "      A VIP is a floating IP that moves to whichever node is serving DHCP.\\n"
-        printf "      It can be used as a DNS address that survives failover.\\n"
+        printf "      Clients get it as their DNS server, so failover is invisible to them and\\n"
+        printf "      every query is counted on one node.\\n"
+        printf "      Without it clients get all node IPs and fall back on their own resolver\\n"
+        printf "      timeouts — seconds, and some never fail over — with metrics split.\\n"
+        printf "\\n"
+        read -erp "  Enable VIP? [YES/no]: " vip_choice
+        if [[ -z "$vip_choice" ]]; then
+            vip_choice="y"; _vip_defaulted="true"
+        elif [[ "$vip_choice" =~ ^[Nn] ]]; then
+            vip_choice="n"
+        else
+            vip_choice="y"
+        fi
     fi
-    printf "\\n"
-    read -erp "  Enable VIP? (must type 'yes') [yes/NO]: " vip_choice
-    if [[ "$vip_choice" == "yes" ]]; then
+    if [[ "$vip_choice" == "y" ]]; then
         vip_enabled="true"
-        read -erp "  Virtual IP (VIP) address: " vip
-        if [[ -z "$vip" ]]; then
+        read -erp "  Virtual IP (VIP) address (an unused address on this LAN): " vip
+        # Pressing enter through a prompt that defaulted to yes is not the same
+        # as asking for a VIP and then not naming one. Only the second is a
+        # mistake worth stopping the install for.
+        if [[ -z "$vip" && "$_vip_defaulted" == "true" ]]; then
+            vip_enabled="false"; vip=""
+            printf "  %b No address given — continuing without a VIP\\n" "${INFO}"
+        elif [[ -z "$vip" ]]; then
             printf "  %b %bVIP address is required when VIP is enabled%b\\n" "${CROSS}" "${COL_RED}" "${COL_NC}"
             exit 1
-        fi
-        if ! is_valid_ip "$vip"; then
+        elif ! is_valid_ip "$vip"; then
             printf "  %b %bInvalid VIP: %s%b\\n" "${CROSS}" "${COL_RED}" "$vip" "${COL_NC}"
             exit 1
+        else
+            printf "  %b VIP: %s\\n" "${TICK}" "$vip"
         fi
-        printf "  %b VIP: %s\\n" "${TICK}" "$vip"
     else
         vip_enabled="false"
         vip=""
