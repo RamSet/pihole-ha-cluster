@@ -1249,6 +1249,44 @@ assert_contains "an existing STANDBY_ONLY line is overwritten, not duplicated" \
 assert_contains "the operator is told how to lift it" "$_join_fail" "STANDBY_ONLY=false"
 
 # ============================================================
+echo
+echo "=== A scanned node is identified by its own address, not by its VIP ==="
+
+# A node answers on its own address and on the VIP it holds, reporting the same
+# "ip" both times, so whichever address the scan reads first names the other one.
+# Numeric order let .200 win and .201 was announced as the VIP of itself.
+_inst_src="$(cat "$SCRIPT_DIR/../install.sh")"
+if [[ "$_inst_src" != *$'\n_scan_order=()'* ]]; then
+    # Slicing below would otherwise eval the whole installer. Fail loudly instead.
+    assert_eq "install.sh still builds a scan order" "present" "missing"
+else
+    _order_code="_scan_order=()${_inst_src#*$'\n'_scan_order=()}"
+    _order_code="${_order_code%%for _i in *}"
+    # .200 is the VIP, held by .201, which also answers for itself. .205 is a
+    # plain node. The two that identify themselves must be taken first.
+    _scan_probe=("192.168.111.200" "192.168.111.201" "192.168.111.205")
+    _scan_real=("192.168.111.201" "192.168.111.201" "192.168.111.205")
+    eval "$_order_code"
+    assert_eq "addresses that identify themselves are read first" \
+        "1 2 0" "${_scan_order[*]}"
+
+    # No VIP in play: order is untouched, so a normal scan reads in numeric order.
+    _scan_probe=("192.168.111.3" "192.168.111.5")
+    _scan_real=("192.168.111.3" "192.168.111.5")
+    eval "$_order_code"
+    assert_eq "a scan without a VIP keeps numeric order" "0 1" "${_scan_order[*]}"
+
+    # An unreachable node whose VIP still answers: the alias is all there is, and
+    # it must still be reported rather than dropped.
+    _scan_probe=("192.168.111.200")
+    _scan_real=("192.168.111.201")
+    eval "$_order_code"
+    assert_eq "a lone alias is still scanned" "0" "${_scan_order[*]}"
+fi
+assert_contains "the skipped address is named as the VIP, not as the node" \
+    "$_inst_src" "VIP held by %s, skipped"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do

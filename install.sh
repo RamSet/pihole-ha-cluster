@@ -418,15 +418,37 @@ done
 printf "%b      Probing... done\\n" "${OVER}"
 
 # Collect results (sort numerically so .3 is processed before .123)
+_scan_probe=() _scan_real=() _scan_json=()
 for f in $(ls "$_scan_dir"/ 2>/dev/null | sort -n); do
     [[ -f "$_scan_dir/$f" ]] || continue
-    octet="$f"
-    probe_ip="$subnet.$octet"
-    probe_json="$(cat "$_scan_dir/$f")"
-    real_ip="$(echo "$probe_json" | sed -n 's/.*"node":{[^}]*"ip":"\([^"]*\)".*/\1/p' | head -1)"
-    real_ip="${real_ip:-$probe_ip}"
+    _pj="$(cat "$_scan_dir/$f")"
+    _pi="$subnet.$f"
+    _ri="$(echo "$_pj" | sed -n 's/.*"node":{[^}]*"ip":"\([^"]*\)".*/\1/p' | head -1)"
+    _scan_probe+=("$_pi"); _scan_real+=("${_ri:-$_pi}"); _scan_json+=("$_pj")
+done
+
+# A node answers on its own address and on the VIP it is currently holding, and
+# reports the same "ip" either way — so whichever address is read first decides
+# what the scan calls the other one. Numeric order alone let the VIP win: .200
+# was read first, claimed .201's identity, and .201 was then announced as
+# "192.168.111.201 — VIP (same node as 192.168.111.201)", naming the node's own
+# address as the VIP. It also meant the port probe went through an address that
+# only exists while failover says it does. Reported by a user. Take the addresses
+# that identify themselves first, so an alias is always the one left over.
+_scan_order=()
+for (( _i=0; _i<${#_scan_probe[@]}; _i++ )); do
+    [[ "${_scan_probe[$_i]}" == "${_scan_real[$_i]}" ]] && _scan_order+=("$_i")
+done
+for (( _i=0; _i<${#_scan_probe[@]}; _i++ )); do
+    [[ "${_scan_probe[$_i]}" != "${_scan_real[$_i]}" ]] && _scan_order+=("$_i")
+done
+
+for _i in ${_scan_order[@]+"${_scan_order[@]}"}; do
+    probe_ip="${_scan_probe[$_i]}"
+    real_ip="${_scan_real[$_i]}"
+    probe_json="${_scan_json[$_i]}"
     if [[ -n "${_seen_real_ips[$real_ip]:-}" ]]; then
-        printf "      %b%s%b — VIP (same node as %s), skipped\\n" "${COL_YELLOW}" "$probe_ip" "${COL_NC}" "$real_ip"
+        printf "      %b%s%b — VIP held by %s, skipped\\n" "${COL_YELLOW}" "$probe_ip" "${COL_NC}" "$real_ip"
         continue
     fi
     _seen_real_ips["$real_ip"]=1
