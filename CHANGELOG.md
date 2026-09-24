@@ -2,6 +2,14 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.16.6 — 2026-09-24
+- The kill switch must not take DNS off the network either
+- Follow the master-aware stand-down in the tests that assumed the helper
+- Fix the failure modes a homelab actually hits
+- Sign what standbys actually decide from, and stop publishing secrets
+- Follow the repo a node was installed from, not upstream
+- Add a tool to create the config-sync key and push it to peers
+
 ## v3.16.5 — 2026-09-24
 - Cover the DNS-health precondition in the loop harness, and normalise the interval
 - Stop a peer, or the LAN, from taking over a node
