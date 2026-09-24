@@ -306,5 +306,44 @@ assert_not_contains "DNS-only claim still does not touch DHCP" "$(calls)" "dhcp.
 
 # ============================================================
 echo
+echo "=== A node that cannot answer DNS itself must not serve DHCP or hold the VIP ==="
+
+# should_i_hold_vip has carried this precondition all along; the DHCP path did
+# not. A node whose own FTL is up but not answering on :53 would keep DHCP and
+# the VIP while a healthy peer also took them, and neither side yielded.
+set_peer "$GW" true true false
+set_peer "$P1" false false false      # nobody else to serve
+set_peer "$P2" true false false       # this node: pingable, DNS dead
+: > "$W/state/vip"; echo false > "$W/state/dhcp"
+run_loop "$_BASE_CONF
+HA_ENABLED=true
+DHCP_HA=true" 6
+assert_not_contains "a node with dead DNS does not claim the VIP, even alone" \
+    "$(calls)" "addr add"
+assert_not_contains "a node with dead DNS does not start DHCP, even alone" \
+    "$(calls)" "dhcp.active true"
+
+# And it gives back what it is already holding, rather than serving a network it
+# cannot resolve for.
+set_peer "$P1" true true true          # a healthy peer is serving
+echo "$VIPADDR" > "$W/state/vip"; echo true > "$W/state/dhcp"
+run_loop "$_BASE_CONF
+HA_ENABLED=true
+DHCP_HA=true" 4
+assert_contains "a node with dead DNS yields DHCP" "$(calls)" "dhcp.active false"
+assert_contains "a node with dead DNS yields the VIP" "$(calls)" "addr del $VIPADDR/32 dev eth0"
+
+# Control: the same node, DNS restored, does serve when it is the only one left.
+set_peer "$P1" false false false
+set_peer "$P2" true true false
+: > "$W/state/vip"; echo false > "$W/state/dhcp"
+run_loop "$_BASE_CONF
+HA_ENABLED=true
+DHCP_HA=true" 6
+assert_contains "the same node serves once its own DNS answers again" \
+    "$(calls)" "addr add $VIPADDR/32 dev eth0"
+
+# ============================================================
+echo
 test_summary
 exit $?

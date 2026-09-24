@@ -1410,6 +1410,15 @@ assert_eq "a non-IP primary is refused"        "10.33.47.55" "$SYNC_PRIMARY"
 assert_eq "an out-of-range interval is refused" "15"         "$SYNC_INTERVAL"
 assert_eq "a non-boolean toggle is refused"     "true"       "$SYNC_ENABLED"
 
+# An accepted interval is stored base-10. "08" is in range, so it is kept — and
+# would then abort the first plain (( x * 60 )) downstream as invalid octal,
+# which is exactly how the sync timer gets its interval.
+printf 'SYNC_INTERVAL=08\n' > "$_sc"
+SYNC_INTERVAL=15
+load_sync_conf "$_sc"
+assert_eq "a zero-padded interval is normalised" "8" "$SYNC_INTERVAL"
+assert_true "and survives arithmetic" [ "$(( SYNC_INTERVAL * 60 ))" -eq 480 ]
+
 # An absent key must leave the caller's default alone: every call site sets its
 # own defaults first and relies on that.
 : > "$_sc"

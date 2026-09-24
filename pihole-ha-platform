@@ -86,7 +86,11 @@ load_sync_conf() {
                 [[ "$val" == "true" || "$val" == "false" ]] && printf -v "$key" '%s' "$val" ;;
             SYNC_INTERVAL)
                 # 10# or a zero-padded value like 08 is read as invalid octal.
-                [[ "$val" =~ ^[0-9]+$ ]] && (( 10#$val >= 1 && 10#$val <= 1440 )) && SYNC_INTERVAL="$val" ;;
+                # Stored base-10, not verbatim: a zero-padded "08" passes the
+                # range check here and then aborts the first plain (( x * 60 ))
+                # downstream as invalid octal, which is how the timer would get
+                # its interval.
+                [[ "$val" =~ ^[0-9]+$ ]] && (( 10#$val >= 1 && 10#$val <= 1440 )) && SYNC_INTERVAL="$((10#$val))" ;;
             SYNC_PRIMARY)
                 is_valid_ip "$val" && SYNC_PRIMARY="$val" ;;
         esac
