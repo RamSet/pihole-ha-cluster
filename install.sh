@@ -1245,6 +1245,23 @@ if [[ ${#discovered_nodes[@]} -gt 0 ]]; then
         printf "%b  %b Registered with %d node(s), %d failed\\n" "${OVER}" "${INFO}" "$_join_ok" "$_join_fail"
     elif [[ $_join_fail -gt 0 ]]; then
         printf "%b  %b %bCould not register with any existing nodes%b\\n" "${OVER}" "${CROSS}" "${COL_RED}" "${COL_NC}"
+        # A node the cluster does not know about must not come up armed. Its own
+        # nodes.conf lists the full cluster, so it will health-check peers it
+        # cannot reach or log in to, read them as down, and take DHCP and the VIP
+        # from a primary that is perfectly healthy — a duplicate address and a
+        # second DHCP server on one LAN. Whatever blocked the join (unreachable
+        # peer, wrong password, an API too slow to answer on old hardware) is
+        # exactly the condition that makes its health checks lie, so the safe
+        # default is passive. Reported by a user whose third node did this.
+        if grep -q '^STANDBY_ONLY=' /etc/pihole-ha/nodes.conf 2>/dev/null; then
+            sed -i 's/^STANDBY_ONLY=.*/STANDBY_ONLY=true/' /etc/pihole-ha/nodes.conf
+        else
+            printf 'STANDBY_ONLY=true\n' >> /etc/pihole-ha/nodes.conf
+        fi
+        printf "  %b Starting this node in %bSTANDBY_ONLY%b mode: it monitors and syncs, but will\\n" "${INFO}" "${COL_YELLOW}" "${COL_NC}"
+        printf "      never take over DHCP or the VIP from the cluster it could not join.\\n"
+        printf "      Fix the join, then set %bSTANDBY_ONLY=false%b in /etc/pihole-ha/nodes.conf\\n" "${COL_YELLOW}" "${COL_NC}"
+        printf "      (picked up within one check cycle — no restart needed).\\n"
     fi
 fi
 

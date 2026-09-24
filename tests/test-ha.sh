@@ -1163,6 +1163,92 @@ assert_contains "the bump is logged where it is persisted" \
     "$_after_manifest" "event=version_bump"
 
 # ============================================================
+echo
+echo "=== Standing down gives back what the node holds ==="
+
+# Reported by a user: a node sat at "HA disabled" with vip_held:true while a
+# healthy primary held the same address. Declining to take over and letting go
+# are different things, and the branches that meant "not participating" only did
+# the first.
+eval "$(extract_fn "$HA_SRC" stand_down)"
+
+_sd_dhcp="" _sd_vip="" _sd_log=""
+get_dhcp()   { echo "$_sd_dhcp"; }
+set_dhcp()   { _sd_dhcp="$1"; }
+has_vip()    { [[ "$_sd_vip" == "held" ]]; }
+remove_vip() { _sd_vip="released"; }
+log_warn()   { _sd_log+="$* "; }
+log_error()  { _sd_log+="$* "; }
+
+DHCP_HA=true; _sd_dhcp="true"; _sd_vip="held"; _sd_log=""
+stand_down "HA disabled"
+assert_eq "stand down releases DHCP"    "false"    "$_sd_dhcp"
+assert_eq "stand down releases the VIP" "released" "$_sd_vip"
+assert_contains "the release is logged with its reason" "$_sd_log" "released=dhcp,vip"
+
+# The regression: the VIP release used to sit inside the "DHCP is on" branch, so
+# a node holding the VIP with DHCP already off kept it for good.
+DHCP_HA=true; _sd_dhcp="false"; _sd_vip="held"; _sd_log=""
+stand_down "STANDBY_ONLY"
+assert_eq "VIP released even when DHCP is already off" "released" "$_sd_vip"
+assert_contains "the VIP-only release is logged" "$_sd_log" "released=vip"
+
+# DNS-only: another server owns DHCP, so standing down must not touch it.
+DHCP_HA=false; _sd_dhcp="true"; _sd_vip="held"; _sd_log=""
+stand_down "HA disabled"
+assert_eq "DNS-only stand down leaves DHCP alone"      "true"     "$_sd_dhcp"
+assert_eq "DNS-only stand down still releases the VIP" "released" "$_sd_vip"
+
+# Steady state: holding nothing is silent, so this cannot fill the log every cycle.
+DHCP_HA=true; _sd_dhcp="false"; _sd_vip="none"; _sd_log=""
+stand_down "STANDBY_ONLY"
+assert_eq "holding nothing releases nothing, quietly" "" "$_sd_log"
+
+# A node that cannot release must keep reporting rather than die mid-loop.
+remove_vip() { return 1; }
+DHCP_HA=true; _sd_dhcp="false"; _sd_vip="held"; _sd_log=""
+assert_true     "a failed release is not fatal" stand_down "STANDBY_ONLY"
+assert_contains "a failed release is logged"    "$_sd_log" "stand_down_failed"
+
+# ------------------------------------------------------------
+# Every branch that means "not participating" must stand down, not merely return.
+# Structural, because these live in the main loop and cannot be run here — but
+# the bug was precisely that some of them returned on their own.
+_ha_loop="$(cat "$HA_SRC")"; _ha_loop="${_ha_loop##*--- Main Loop ---}"
+assert_contains "HA_ENABLED=false stands down" "$_ha_loop" 'stand_down "HA disabled"'
+assert_contains "STANDBY_ONLY stands down"     "$_ha_loop" 'stand_down "STANDBY_ONLY"'
+assert_contains "DNS-only stands down when HA is off" \
+    "$(extract_fn "$HA_SRC" dns_only_vip_cycle)" 'stand_down "HA disabled"'
+
+# STANDBY_ONLY is the operator's brake, so it has to be read before any branch
+# that returns early: while it sat below them, a DNS-only node never reached it
+# at all, and a standalone or FTL-down node kept whatever it was holding.
+_before_dns_only="${_ha_loop%%if [[ \"\$DHCP_HA\" != \"true\" ]]*}"
+assert_contains "STANDBY_ONLY is checked before the DNS-only branch" \
+    "$_before_dns_only" 'stand_down "STANDBY_ONLY"'
+# Split on the standalone branch's own status line: `NODE_COUNT == 1` also appears
+# in the startup notification above the loop, which would cut in the wrong place.
+_before_standalone="${_ha_loop%%write_status \"Standalone*}"
+assert_contains "STANDBY_ONLY is checked before the standalone branch" \
+    "$_before_standalone" 'stand_down "STANDBY_ONLY"'
+
+# ============================================================
+echo
+echo "=== A node that could not register comes up passive ==="
+
+# The installer printed the failure and then enabled the daemon anyway, with a
+# full HA_NODES list the cluster knew nothing about. Whatever blocked the join is
+# the same condition that makes this node's health checks read its peers as down,
+# so it promoted itself and fought a healthy primary for the VIP.
+_join_fail="$(cat "$SCRIPT_DIR/../install.sh")"
+_join_fail="${_join_fail##*Could not register with any existing nodes}"
+_join_fail="${_join_fail%%--- 24. Inject HA page*}"
+assert_contains "a failed join sets STANDBY_ONLY=true" "$_join_fail" "STANDBY_ONLY=true"
+assert_contains "an existing STANDBY_ONLY line is overwritten, not duplicated" \
+    "$_join_fail" 's/^STANDBY_ONLY=.*/STANDBY_ONLY=true/'
+assert_contains "the operator is told how to lift it" "$_join_fail" "STANDBY_ONLY=false"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh; do

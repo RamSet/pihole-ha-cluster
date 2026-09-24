@@ -595,6 +595,42 @@ set_dhcp() {
     [[ "$have" == "$want" ]]
 }
 
+# Stand down: give back whatever this node is holding.
+#
+# Not taking over and letting go are two different things, and every branch that
+# means "this node is not participating" needs the second one. Three of them used
+# to do only the first: HA_ENABLED=false wrote "HA disabled" and returned with
+# DHCP and the VIP still held; STANDBY_ONLY released the VIP only if DHCP
+# happened to be on, so a node holding the VIP with DHCP already off kept it
+# forever; and DNS-only mode never consulted STANDBY_ONLY at all. A reporter's
+# third node sat at "HA disabled" with vip_held:true while a healthy primary held
+# the same address — a duplicate IP and, in the DHCP case, a second DHCP server
+# on one LAN.
+#
+# Idempotent: the steady state is "holding nothing", where this does nothing and
+# logs nothing. Releasing is unconditional on VIP_ENABLED — a VIP this node holds
+# must be given back even if the config that justified it has since been turned
+# off. Never fatal: a node that cannot release must still keep reporting.
+stand_down() {
+    local reason="$1" released=""
+    if [[ "$DHCP_HA" == "true" ]] && [[ "$(get_dhcp)" == "true" ]]; then
+        if set_dhcp "false"; then
+            released="dhcp"
+        else
+            log_error "event=stand_down_failed component=dhcp reason=\"$reason\""
+        fi
+    fi
+    if has_vip; then
+        if remove_vip; then
+            released="${released:+$released,}vip"
+        else
+            log_error "event=stand_down_failed component=vip reason=\"$reason\""
+        fi
+    fi
+    [[ -n "$released" ]] && log_warn "event=stand_down released=$released reason=\"$reason\""
+    return 0
+}
+
 # Hand a Pi-hole session back instead of abandoning it.
 #
 # Pi-hole allows a fixed number of concurrent API sessions (webserver.api.
@@ -1055,7 +1091,7 @@ dns_only_vip_cycle() {
         return
     fi
     if [[ "$HA_ENABLED" != "true" ]]; then
-        has_vip && remove_vip
+        stand_down "HA disabled"
         write_status "DNS-only - HA disabled"
         return
     fi
@@ -1295,6 +1331,24 @@ while true; do
     # Reconcile the config-sync publisher role (auto-promote / catch-up / yield)
     manage_sync_role
 
+    # STANDBY_ONLY: never take over, whatever the peers look like, in any mode.
+    # Asked for after a cluster where a node that could not authenticate promoted
+    # itself, seized DHCP and the VIP, and fought the healthy primary — leaving no
+    # safe way to bring a node up and look at it. Re-read every loop from
+    # nodes.conf, so it can be lifted without a restart.
+    #
+    # It sits above every other branch deliberately. As the operator's brake it has
+    # to outrank the DNS-only, standalone, FTL-down and LAN-outage paths: each of
+    # those returns early, and while the check lived below them the flag was simply
+    # never reached — a DNS-only node ignored it outright. Health checks and config
+    # sync run above this point, so a standing-down node stays visible on the
+    # dashboard instead of going dark.
+    if [[ "${STANDBY_ONLY:-false}" == "true" ]]; then
+        stand_down "STANDBY_ONLY"
+        write_status "STANDBY_ONLY set - this node will never take over"
+        continue
+    fi
+
     # DNS-only deployment: another server handles DHCP. Never manage dhcp.active;
     # run config sync and (if a VIP is configured) health-based VIP failover so
     # clients pointed at the VIP get real DNS redundancy.
@@ -1304,6 +1358,7 @@ while true; do
     fi
 
     if [[ "$HA_ENABLED" != "true" ]]; then
+        stand_down "HA disabled"
         write_status "HA disabled"
         continue
     fi
@@ -1330,21 +1385,6 @@ while true; do
     fi
 
     current="$(get_dhcp)"
-
-    # STANDBY_ONLY: never take over, whatever the peers look like. Asked for after
-    # a cluster where a node that could not authenticate promoted itself, seized
-    # DHCP and the VIP, and fought the healthy primary — leaving no safe way to
-    # bring a node up and look at it. Re-read every loop from nodes.conf, so it can
-    # be lifted without a restart.
-    if [[ "${STANDBY_ONLY:-false}" == "true" ]]; then
-        if [[ "$(get_dhcp)" == "true" ]]; then
-            log_warn "event=standby_only_release reason=\"STANDBY_ONLY is set but this node holds DHCP — releasing it\""
-            set_dhcp "false" || true
-            has_vip && remove_vip || true
-        fi
-        write_status "STANDBY_ONLY set - this node will never take over"
-        continue
-    fi
 
     if should_i_serve; then
         deactivate_count=0; stable_count=0
