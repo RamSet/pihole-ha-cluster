@@ -2,6 +2,11 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.16.5 — 2026-09-24
+- Cover the DNS-health precondition in the loop harness, and normalise the interval
+- Stop a peer, or the LAN, from taking over a node
+- Say why a join failed, and test the loop that decides who holds the VIP
+
 ## v3.16.4 — 2026-09-24
 - Identify a scanned node by its own address, not by the VIP it is holding
 - Standing down must give back the VIP and DHCP, not just stop taking over
