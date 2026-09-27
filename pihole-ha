@@ -29,6 +29,11 @@ GATEWAY="" VIP="" VIP_ENABLED="" HA_ENABLED="" HA_NODES="" DHCP_HA=""
 [[ -f "$NODES_CONF" ]] && . "$NODES_CONF"
 EXPECTED_CONFIG_VERSION=1
 CONFIG_VERSION="${CONFIG_VERSION:-0}"
+# Generation of the priority order, raised by every accepted change. It is what
+# tells a newer order from the one we hold, and so what makes a missed
+# announcement recoverable.
+NODES_GEN="${NODES_GEN:-0}"
+[[ "$NODES_GEN" =~ ^[0-9]+$ ]] || NODES_GEN=0
 if [[ -z "$GATEWAY" || -z "$HA_NODES" ]]; then
     echo "ERROR: /etc/pihole-ha/nodes.conf missing or incomplete (need GATEWAY and HA_NODES)" >&2
     exit 1
@@ -245,6 +250,7 @@ reload_vip_conf() {
             HA_ENABLED)  HA_ENABLED="$val" ;;
             DHCP_HA)     DHCP_HA="$val" ;;
             HA_NODES)    HA_NODES="$val" ;;
+            NODES_GEN)   [[ "$val" =~ ^[0-9]+$ ]] && NODES_GEN="$val" ;;
         esac
     done < "$NODES_CONF"
     # Rebuild node array if order changed
@@ -1395,6 +1401,84 @@ manage_sync_role() {
     fi
 }
 
+# Adopt a newer priority order from a peer.
+#
+# Changing the order announces it once, in the background, to each peer. A node
+# that was busy for those few seconds -- a Pi 1 under load, in the report this
+# came from -- simply missed it, and nothing carried it afterwards: config sync
+# moves gravity, DNS, DHCP and settings, never HA_NODES. The cluster then ran
+# split, one node ordering itself differently from the other two, and no amount
+# of syncing fixed it because sync was never in that path. Edge-triggered
+# announcement, same trap as the sync timers had.
+#
+# So: every cycle, ask each peer what order it holds and at which generation,
+# and take any order that is strictly newer than ours. Highest generation wins,
+# which converges from any starting point and cannot ping-pong -- adopting does
+# not raise our generation above the one we adopted.
+reconcile_node_order() {
+    (( NODE_COUNT > 1 )) || return 0
+    local ip resp peer_gen peer_nodes
+    for ip in "${NODES[@]}"; do
+        [[ "$ip" == "$LOCAL_IP" ]] && continue
+        resp="$(curl -sf --max-time "${HEALTH_TIMEOUT:-2}" "http://${ip}:8887/api/priority/config" 2>/dev/null)" || continue
+        peer_gen="$(json_num "$resp" gen)"
+        peer_nodes="$(json_str "$resp" nodes)"
+        [[ "$peer_gen" =~ ^[0-9]+$ && -n "$peer_nodes" ]] || continue
+        (( peer_gen > NODES_GEN )) || continue
+        adopt_node_order "$ip" "$peer_gen" "$peer_nodes" && return 0
+    done
+    return 0
+}
+
+# Take the peer's ORDER, keep our own entries. An entry may carry the node's web
+# port (IP:PORT), and that is local knowledge: overwriting our list wholesale
+# with the peer's text could drop a port we need to reach a node at all. So
+# reorder what we already have, and only when the membership is identical -- a
+# node mid-join advertises a list we must not adopt.
+adopt_node_order() {
+    local from="$1" gen="$2" want="$3"
+    local -a want_ips=() new_entries=() our_entries=()
+    IFS=',' read -ra want_ips <<< "$want"
+    IFS=',' read -ra our_entries <<< "$HA_NODES"
+    (( ${#want_ips[@]} == ${#our_entries[@]} )) || return 1
+    local w e found
+    for w in "${want_ips[@]}"; do
+        w="${w%%:*}"
+        found=""
+        for e in "${our_entries[@]}"; do
+            [[ "${e%%:*}" == "$w" ]] && { found="$e"; break; }
+        done
+        [[ -n "$found" ]] || return 1          # membership differs: not ours to adopt
+        new_entries+=("$found")
+    done
+    local new_list; new_list="$(IFS=,; echo "${new_entries[*]}")"
+    if [[ "$new_list" == "$HA_NODES" ]]; then
+        # Same order, newer generation: record the generation so we stop asking.
+        _write_nodes_gen "$gen"
+        NODES_GEN="$gen"
+        return 0
+    fi
+    if grep -q '^HA_NODES=' "$NODES_CONF" 2>/dev/null; then
+        sed -i "s/^HA_NODES=.*/HA_NODES=$new_list/" "$NODES_CONF" || return 1
+    else
+        printf 'HA_NODES=%s\n' "$new_list" >> "$NODES_CONF" || return 1
+    fi
+    _write_nodes_gen "$gen"
+    NODES_GEN="$gen"
+    log_warn "event=node_order_adopted from=$from gen=$gen order=\"$new_list\" previous=\"$HA_NODES\" reason=\"that peer holds a newer priority order; this node had missed the change\""
+    # reload_vip_conf re-reads the file at the top of the next cycle and rebuilds
+    # NODES/ROLES from it, so nothing else here has to know about the new order.
+    return 0
+}
+
+_write_nodes_gen() {
+    if grep -q '^NODES_GEN=' "$NODES_CONF" 2>/dev/null; then
+        sed -i "s/^NODES_GEN=.*/NODES_GEN=$1/" "$NODES_CONF"
+    else
+        printf 'NODES_GEN=%s\n' "$1" >> "$NODES_CONF"
+    fi
+}
+
 # --- Main Loop ---
 log_info "event=startup ip=$LOCAL_IP priority=$PRIORITY interval=${CHECK_INTERVAL}s activate_after=$ACTIVATE_AFTER deactivate_after=$DEACTIVATE_AFTER"
 log_info "event=startup checks=\"ping dns:53 api dhcp\""
@@ -1425,6 +1509,7 @@ while true; do
     # renewal, NetworkManager. Cheap: returns immediately once it is already
     # pinned, which is the steady state.
     enforce_dns_pin
+    reconcile_node_order      # adopt a newer priority order a peer holds
     if reload_vip_conf; then  # only update DNS option when VIP config actually changes
         ensure_dns_option
     fi

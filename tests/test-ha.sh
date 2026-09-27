@@ -995,6 +995,94 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# A priority-order change must reach every node, or heal itself
+# ------------------------------------------------------------
+# The panel announced a new order once, in the background, to each peer, and
+# reported success whatever happened. A node busy for those few seconds missed
+# it and kept the old order forever: config sync carries gravity, DNS, DHCP and
+# settings, never HA_NODES, so nothing else was ever going to correct it. A
+# three-node cluster ran split until its owner hand-edited the file (Discourse
+# 86667 #100). Nodes now converge on the highest generation.
+_order_probe() {   # $1 local HA_NODES, $2 local gen, $3 from, $4 peer gen, $5 peer order
+    local conf; conf="$(mktemp)"
+    printf 'GATEWAY=10.0.0.1\nHA_NODES=%s\nNODES_GEN=%s\nVIP=10.0.0.9\n' "$1" "$2" > "$conf"
+    NODES_CONF="$conf" HA_NODES="$1" NODES_GEN="$2" \
+    P_FROM="$3" P_GEN="$4" P_ORDER="$5" bash -c '
+        log_warn() { :; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" adopt_node_order)"'
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" _write_nodes_gen)"'
+        adopt_node_order "$P_FROM" "$P_GEN" "$P_ORDER" || echo "REFUSED"
+        sed -n "s/^HA_NODES=//p;s/^NODES_GEN=/gen /p" "$NODES_CONF" | tr "\n" " "
+    '
+    rm -f "$conf"
+}
+assert_contains "a newer order from a peer is adopted" \
+    "$(_order_probe "10.0.0.1,10.0.0.2,10.0.0.3" 4 10.0.0.2 7 "10.0.0.3,10.0.0.1,10.0.0.2")" \
+    "10.0.0.3,10.0.0.1,10.0.0.2 gen 7"
+# An entry may carry that node's web port, which is ours to know and not in the
+# peer's gift: adopting its text wholesale could drop the port we reach it on.
+assert_contains "adopting an order keeps our own port annotations" \
+    "$(_order_probe "10.0.0.1:8080,10.0.0.2,10.0.0.3" 1 10.0.0.2 2 "10.0.0.3,10.0.0.1,10.0.0.2")" \
+    "10.0.0.3,10.0.0.1:8080,10.0.0.2"
+assert_contains "an order over a different membership is refused" \
+    "$(_order_probe "10.0.0.1,10.0.0.2,10.0.0.3" 1 10.0.0.2 9 "10.0.0.4,10.0.0.1,10.0.0.2")" "REFUSED"
+assert_contains "a shorter list is refused" \
+    "$(_order_probe "10.0.0.1,10.0.0.2,10.0.0.3" 1 10.0.0.2 9 "10.0.0.2,10.0.0.1")" "REFUSED"
+# Same order at a newer generation: nothing to rewrite, but record the
+# generation or we ask the same peer the same question forever.
+assert_contains "an identical order still advances our generation" \
+    "$(_order_probe "10.0.0.1,10.0.0.2" 3 10.0.0.2 8 "10.0.0.1,10.0.0.2")" "10.0.0.1,10.0.0.2 gen 8"
+
+_reconcile_probe() {   # $1 local gen, $2..: "gen|order" per peer reply
+    P_GEN="$1"; shift
+    P_R1="${1:-}" P_R2="${2:-}" P_LOCALGEN="$P_GEN" bash -c '
+        NODE_COUNT=3; LOCAL_IP=10.0.0.1; NODES=(10.0.0.1 10.0.0.2 10.0.0.3)
+        HA_NODES="10.0.0.1,10.0.0.2,10.0.0.3"; NODES_GEN="$P_LOCALGEN"; HEALTH_TIMEOUT=1
+        source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
+        curl() {
+            local url="${*: -1}"
+            case "$url" in
+                *10.0.0.2*) [[ -n "$P_R1" ]] || return 1
+                            printf "{\"nodes\":\"%s\",\"gen\":%s}" "${P_R1#*|}" "${P_R1%%|*}" ;;
+                *10.0.0.3*) [[ -n "$P_R2" ]] || return 1
+                            printf "{\"nodes\":\"%s\",\"gen\":%s}" "${P_R2#*|}" "${P_R2%%|*}" ;;
+            esac
+        }
+        adopt_node_order() { echo "ADOPT from=$1 gen=$2 order=$3"; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" reconcile_node_order)"'
+        reconcile_node_order
+    '
+}
+assert_contains "a peer holding a newer order is adopted from" \
+    "$(_reconcile_probe 2 "5|10.0.0.2,10.0.0.1,10.0.0.3")" "ADOPT from=10.0.0.2 gen=5"
+assert_eq "an equal generation is left alone" "" "$(_reconcile_probe 5 "5|10.0.0.2,10.0.0.1,10.0.0.3")"
+assert_eq "an older generation is left alone"  "" "$(_reconcile_probe 9 "5|10.0.0.2,10.0.0.1,10.0.0.3")"
+assert_eq "a peer that does not answer is skipped" "" "$(_reconcile_probe 1)"
+assert_contains "a silent peer does not stop us reading the next one" \
+    "$(_reconcile_probe 1 "" "4|10.0.0.3,10.0.0.1,10.0.0.2")" "ADOPT from=10.0.0.3 gen=4"
+# An old node answers this endpoint without a generation. Treat that as nothing
+# to learn, never as generation zero.
+assert_eq "a peer with no generation is ignored" "" \
+    "$(P_LOCALGEN=0 bash -c '
+        NODE_COUNT=2; LOCAL_IP=10.0.0.1; NODES=(10.0.0.1 10.0.0.2)
+        HA_NODES="10.0.0.1,10.0.0.2"; NODES_GEN=0; HEALTH_TIMEOUT=1
+        source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
+        curl() { printf "{\"nodes\":\"10.0.0.2,10.0.0.1\"}"; }
+        adopt_node_order() { echo "ADOPT"; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" reconcile_node_order)"'
+        reconcile_node_order')"
+assert_contains "the daemon reconciles the order every cycle" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha")" "reconcile_node_order      # adopt"
+
+_dash_prio="$(cat "$SCRIPT_DIR/../pihole-ha-dash")"
+assert_contains "the order endpoint advertises its generation" "$_dash_prio" '"nodes":"%s","gen":%s'
+assert_contains "an announcement that is not newer is ignored"  "$_dash_prio" '"ignored":"not newer"'
+assert_contains "a new order outranks every generation in the cluster" "$_dash_prio" '_prio_gen=$(( _prio_gen + 1 ))'
+assert_contains "the announcement carries the generation" "$_dash_prio" 'gen=$_prio_gen&propagated=1'
+assert_contains "diagnostics compare the order across nodes" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-debug")" "DIFFERENT ORDER"
+
+# ============================================================
 # Pi-hole's API must be parsed by shape, not by whitespace
 # ------------------------------------------------------------
 # With webserver.api.prettyJSON on, Pi-hole prints "sid":<tab>"...". Every

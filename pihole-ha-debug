@@ -113,6 +113,30 @@ for n in $NODES; do
     printf '%-18s /api/status -> %s\n' "$ip" "${code:-no-response}"
 done
 
+_hr "PRIORITY ORDER (who thinks the order is what)"
+# A missed order change used to be invisible and permanent: config sync does not
+# carry HA_NODES, so a node that missed the announcement kept its old order with
+# nothing to say so. Nodes now converge on the highest generation, and this table
+# is where a cluster that has not converged yet shows itself.
+_local_order="$(sed -n 's/^HA_NODES=//p' "$CONF_DIR/nodes.conf" 2>/dev/null | head -1)"
+_local_gen="$(sed -n 's/^NODES_GEN=//p' "$CONF_DIR/nodes.conf" 2>/dev/null | head -1)"
+printf 'this node:  gen %-6s %s\n' "${_local_gen:-0}" "$_local_order"
+for n in $(sed -n 's/^HA_NODES=//p' "$CONF_DIR/nodes.conf" 2>/dev/null | tr ',' ' '); do
+    ip="${n%%:*}"
+    _pc="$(curl -sf --max-time 4 "http://$ip:8887/api/priority/config" 2>/dev/null)"
+    if [[ -z "$_pc" ]]; then
+        printf '%-11s %s\n' "$ip" "(no answer on :8887)"
+        continue
+    fi
+    _pg="$(printf '%s' "$_pc" | sed -n 's/.*"gen"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')"
+    _pn="$(printf '%s' "$_pc" | sed -n 's/.*"nodes"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    if [[ "$_pn" == "$_local_order" ]]; then
+        printf '%-11s gen %-6s %s\n' "$ip" "${_pg:-?}" "$_pn"
+    else
+        printf '%-11s gen %-6s %s   *** DIFFERENT ORDER ***\n' "$ip" "${_pg:-?}" "$_pn"
+    fi
+done
+
 _hr "CONFIG SYNC STATE"
 # Sync problems are the one class where the failing node is usually NOT the one
 # the bundle was collected on: the primary builds fine and the standby quietly

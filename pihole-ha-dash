@@ -33,13 +33,18 @@ if [[ "${1:-}" == "--handle" ]]; then
 
     # Load node config (with backwards-compatible defaults)
     _NODES_CONF="/etc/pihole-ha/nodes.conf"
-    _GATEWAY="" _VIP="" _VIP_ENABLED="" _HA_NODES=""
+    _GATEWAY="" _VIP="" _VIP_ENABLED="" _HA_NODES="" _NODES_GEN=""
     [[ -f "$_NODES_CONF" ]] && . "$_NODES_CONF"
     # nodes.conf sets GATEWAY/VIP/HA_NODES (no prefix) — map to prefixed vars
     _GATEWAY="${_GATEWAY:-${GATEWAY:-}}"
     _VIP="${_VIP:-${VIP:-}}"
     _VIP_ENABLED="${_VIP_ENABLED:-${VIP_ENABLED:-}}"
     _HA_NODES="${_HA_NODES:-${HA_NODES:-}}"
+    # Generation of the priority order. Every accepted change raises it, so a node
+    # can tell a newer order from the one it already has -- the only thing that
+    # made a missed announcement recoverable (see the daemon's reconcile).
+    _NODES_GEN="${_NODES_GEN:-${NODES_GEN:-0}}"
+    [[ "$_NODES_GEN" =~ ^[0-9]+$ ]] || _NODES_GEN=0
     _DHCP_HA="${DHCP_HA:-true}"
     if [[ -z "$_GATEWAY" || -z "$_HA_NODES" ]]; then
         # Auto-detect defaults so dash stays alive for /api/nodes/join
@@ -709,19 +714,24 @@ if [[ "${1:-}" == "--handle" ]]; then
             ;;
         /api/priority/config)
             send_headers "200 OK" "application/json"
-            printf '{"nodes":"%s"}\n' "$(IFS=,; echo "${_HA_NODES[*]}")"
+            # Deliberately unauthenticated, like the rest of this read-only
+            # endpoint: peers poll it every cycle to spot a newer order, and
+            # making them log in first would cost a password hash per cycle.
+            printf '{"nodes":"%s","gen":%s}\n' "$(IFS=,; echo "${_HA_NODES[*]}")" "$_NODES_GEN"
             ;;
         /api/priority/set*)
             _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
             send_headers "200 OK" "application/json"
-            _prio_nodes="" _prio_propagated=""
+            _prio_nodes="" _prio_propagated="" _prio_in_gen=""
             IFS='&' read -ra _pparams <<< "$_qs"
             for _pp in "${_pparams[@]}"; do
                 case "$_pp" in
                     nodes=*) _prio_nodes="${_pp#nodes=}" ;;
                     propagated=*) _prio_propagated="${_pp#propagated=}" ;;
+                    gen=*) _prio_in_gen="${_pp#gen=}" ;;
                 esac
             done
+            [[ "$_prio_in_gen" =~ ^[0-9]+$ ]] || _prio_in_gen=""
             # Validate: parse CSV, check all IPs are known and count matches
             IFS=',' read -ra _new_order <<< "$_prio_nodes"
             _prio_valid="true"
@@ -734,24 +744,53 @@ if [[ "${1:-}" == "--handle" ]]; then
             fi
             if [[ "$_prio_valid" != "true" ]]; then
                 echo '{"error":"invalid node list"}'
+            elif [[ "$_prio_propagated" == "1" && -n "$_prio_in_gen" ]] && (( _prio_in_gen <= _NODES_GEN )); then
+                # An announcement no newer than what we hold. Ignoring it is what
+                # lets a node that already adopted a newer order keep it instead
+                # of being walked backwards by a slow or replayed push.
+                printf '{"ok":true,"ignored":"not newer","gen":%s}\n' "$_NODES_GEN"
             else
-                # Update HA_NODES in nodes.conf
+                LOCAL_IP="$(platform_get_local_ip)"
+                if [[ "$_prio_propagated" == "1" ]]; then
+                    _prio_gen="${_prio_in_gen:-$(( _NODES_GEN + 1 ))}"
+                else
+                    # Outrank every order in the cluster, not just ours: a node we
+                    # failed to reach last time may hold a higher generation, and
+                    # a change that ties with it would never converge.
+                    _prio_gen="$_NODES_GEN"
+                    for _node in "${_HA_NODES[@]}"; do
+                        [[ "$_node" == "$LOCAL_IP" ]] && continue
+                        _peer_gen="$(curl -sf --max-time 2 "http://$_node:8887/api/priority/config" 2>/dev/null)"
+                        _peer_gen="$(json_num "$_peer_gen" gen)"
+                        [[ "$_peer_gen" =~ ^[0-9]+$ ]] && (( _peer_gen > _prio_gen )) && _prio_gen="$_peer_gen"
+                    done
+                    _prio_gen=$(( _prio_gen + 1 ))
+                fi
+                # Update HA_NODES + its generation in nodes.conf
                 if [[ -f "$_NODES_CONF" ]] && grep -q "^HA_NODES=" "$_NODES_CONF"; then
                     sed -i "s/^HA_NODES=.*/HA_NODES=$_prio_nodes/" "$_NODES_CONF"
                 else
                     echo "HA_NODES=$_prio_nodes" >> "$_NODES_CONF"
                 fi
+                if [[ -f "$_NODES_CONF" ]] && grep -q "^NODES_GEN=" "$_NODES_CONF"; then
+                    sed -i "s/^NODES_GEN=.*/NODES_GEN=$_prio_gen/" "$_NODES_CONF"
+                else
+                    echo "NODES_GEN=$_prio_gen" >> "$_NODES_CONF"
+                fi
+                _NODES_GEN="$_prio_gen"
                 # Reload local array
                 IFS=',' read -ra _HA_NODES <<< "$_prio_nodes"
-                # Propagate to other nodes
+                # Announce it. Still fire-and-forget, because waiting on a busy
+                # peer would outlast the panel's own timeout -- but a peer that
+                # misses this now catches up from its own reconcile instead of
+                # holding the old order forever.
                 if [[ "$_prio_propagated" != "1" ]]; then
-                    LOCAL_IP="$(platform_get_local_ip)"
                     for _node in "${_HA_NODES[@]}"; do
                         [[ "$_node" == "$LOCAL_IP" ]] && continue
-                        _propagate "$_node" "/api/priority/set?nodes=$_prio_nodes&propagated=1" &
+                        _propagate "$_node" "/api/priority/set?nodes=$_prio_nodes&gen=$_prio_gen&propagated=1" &
                     done
                 fi
-                printf '{"ok":true,"nodes":"%s"}\n' "$_prio_nodes"
+                printf '{"ok":true,"nodes":"%s","gen":%s}\n' "$_prio_nodes" "$_prio_gen"
             fi
             ;;
         /api/role/demote*)
