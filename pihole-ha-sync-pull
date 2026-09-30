@@ -505,7 +505,14 @@ if [[ "$COMP_GRAVITY" == "true" && -f "$STAGING_DIR/gravity.db" ]]; then
     OLD_MD5="$(md5sum /etc/pihole/gravity.db 2>/dev/null | awk '{print $1}')"
     NEW_MD5="$(md5sum "$STAGING_DIR/gravity.db" 2>/dev/null | awk '{print $1}')"
 
-    if [[ -n "$REMOTE_GRAVITY_MD5" && "$NEW_MD5" != "$REMOTE_GRAVITY_MD5" ]]; then
+    _gsane="$(gravity_is_sane "$STAGING_DIR/gravity.db")" || _gsane_failed=true
+    if [[ "${_gsane_failed:-false}" == "true" ]]; then
+        # The publisher should have refused to send this, but a node running an
+        # older version would not have, and a standby that installs it loses the
+        # only good copy left in the cluster.
+        log_error "event=apply component=gravity status=failed reason=\"refusing to install this blocklist: ${_gsane} — keeping the one this node already has\" from=$_PULL_FROM"
+        APPLY_FAILED=true
+    elif [[ -n "$REMOTE_GRAVITY_MD5" && "$NEW_MD5" != "$REMOTE_GRAVITY_MD5" ]]; then
         # gravity_md5 was parsed out of the manifest and then never used, so the
         # one content check available on the blocklist was dead code. A download
         # that truncated but still extracted became this node's blocklist.

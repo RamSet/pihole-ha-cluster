@@ -995,6 +995,111 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# A blocklist that blocks nothing must not spread, and must be noticed
+# ------------------------------------------------------------
+# Every check on a payload asks whether the FILE arrived intact: signature,
+# manifest checksum, config-version direction. A wiped-but-valid gravity.db
+# passes all of them -- right checksum, new hash, therefore a NEWER version --
+# and installs over the last good copy in the cluster. Reported against another
+# sync tool after a double gravity rebuild emptied a primary and a house ran
+# unfiltered for a day (Discourse 86667 #106, lovelaze/nebula-sync#271).
+_sane_probe() {   # $1 gravity rows, $2 enabled adlists ("-" = table unreadable)
+    # A real (non-empty) file: the helper rejects an empty one on sight, which
+    # would make every case below pass for the wrong reason.
+    local db; db="$(mktemp)"; printf 'not-really-sqlite' > "$db"
+    P_DB="$db" P_DOM="$1" P_ADS="$2" bash -c '
+        source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
+        pihole-FTL() {
+            case "$*" in
+                *"FROM gravity"*) [[ "$P_DOM" == "-" ]] || printf "%s" "$P_DOM" ;;
+                *"FROM adlist"*)  [[ "$P_ADS" == "-" ]] || printf "%s" "$P_ADS" ;;
+            esac
+        }
+        out="$(gravity_is_sane "$P_DB")" && echo "SANE" || echo "REFUSE: $out"
+    '
+    rm -f "$db"
+}
+assert_contains "a populated blocklist is accepted"        "$(_sane_probe 120000 14)" "SANE"
+assert_contains "no domains with adlists enabled is refused" "$(_sane_probe 0 14)" "REFUSE"
+assert_contains "the refusal says what is wrong"           "$(_sane_probe 0 14)" "no blocked domains"
+# Someone with no lists enabled has an empty blocklist on purpose.
+assert_contains "no domains and no enabled adlists is fine" "$(_sane_probe 0 0)" "SANE"
+assert_contains "a missing gravity table is refused"        "$(_sane_probe - 14)" "REFUSE"
+assert_contains "a missing adlist table is refused"         "$(_sane_probe 5 -)" "REFUSE"
+# Never turn "cannot check" into "refuse to sync".
+assert_contains "no pihole-FTL means no opinion" \
+    "$(bash -c 'source "'"$SCRIPT_DIR"'/../pihole-ha-platform"; gravity_is_sane /dev/null && echo SANE')" "SANE"
+
+assert_contains "the publisher checks before shipping a blocklist" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-sync")" 'gravity_is_sane /etc/pihole/gravity.db'
+assert_contains "the publisher refuses rather than publishing it" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-sync")" "refusing to publish this blocklist"
+assert_contains "the standby checks the staged copy before installing" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")" 'gravity_is_sane "$STAGING_DIR/gravity.db"'
+assert_contains "the standby keeps its own copy instead" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")" "keeping the one this node already has"
+
+# The canary. ping, :53, the API and DHCP all pass on a Pi-hole that answers
+# everything instead of blocking it.
+_canary_probe() {   # $1 blocking.active, $2 domains (space separated), $3.. answers per domain
+    local active="$1" domains="$2"; shift 2
+    P_ACTIVE="$active" P_DOMAINS="$domains" P_ANSWERS="$*" bash -c '
+        source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
+        pihole-FTL() {
+            case "$*" in
+                *"dns.blocking.active"*) printf "%s" "$P_ACTIVE" ;;
+                *client_by_group*)       : ;;
+                *"FROM gravity"*)        printf "%s\n" $P_DOMAINS ;;
+            esac
+        }
+        ip() { printf "1: lo inet 127.0.0.1/8 scope host lo\n"; }
+        dig() {
+            local want="${*: -2}"; want="${want%% *}"
+            local i=1 d
+            for d in $P_DOMAINS; do
+                if [[ "$d" == "$want" ]]; then
+                    local a; a="$(printf "%s\n" $P_ANSWERS | sed -n "${i}p")"
+                    [[ "$a" == "NONE" ]] || printf "%s\n" "$a"
+                    return 0
+                fi
+                i=$(( i + 1 ))
+            done
+        }
+        blocking_canary /dev/null
+    '
+}
+assert_eq "blocking switched off is not a fault" "paused" \
+    "$(_canary_probe false "a.test b.test c.test" NONE NONE NONE)"
+assert_contains "a blocklist that resolves is reported broken" \
+    "$(_canary_probe true "a.test b.test c.test" 93.184.1.1 104.18.2.2 NONE)" "broken:"
+assert_contains "the reason names a domain and what it resolved to" \
+    "$(_canary_probe true "a.test b.test c.test" 93.184.1.1 104.18.2.2 NONE)" "resolves to"
+assert_eq "null-route answers read as blocking"  "ok" \
+    "$(_canary_probe true "a.test b.test c.test" 0.0.0.0 0.0.0.0 0.0.0.0)"
+# NXDOMAIN mode: a block looks like no answer at all.
+assert_eq "empty answers read as blocking"       "ok" \
+    "$(_canary_probe true "a.test b.test c.test" NONE NONE NONE)"
+# One resolving domain is an allowlist entry as easily as a fault: say nothing.
+assert_eq "a single resolving domain is inconclusive" "unknown" \
+    "$(_canary_probe true "a.test b.test c.test" 93.184.1.1 NONE NONE)"
+assert_eq "IP mode answers with our own address read as blocking" "ok" \
+    "$(_canary_probe true "a.test b.test c.test" 127.0.0.1 127.0.0.1 NONE)"
+assert_eq "no sampled domains means no opinion" "unknown" \
+    "$(_canary_probe true "" )"
+
+assert_contains "the daemon keeps the canary off the per-cycle path" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha")" "BLOCKING_EVERY"
+assert_contains "a node that stops blocking says so" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha")" "event=blocking_broken"
+assert_contains "the state reaches the panel and the bundle" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha")" '"blocking":"%s"'
+# A tag nothing knows about cannot be muted, and the panel rejects the save.
+assert_contains "the new notification tag is registered" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-dash")" 'blocking_broken'
+assert_contains "diagnostics report blocking per node" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-debug")" "NOT BLOCKING"
+
+# ============================================================
 # A priority-order change must reach every node, or heal itself
 # ------------------------------------------------------------
 # The panel announced a new order once, in the background, to each peer, and

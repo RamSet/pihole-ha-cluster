@@ -1213,7 +1213,8 @@ DHCP_NOTIFY_IGNORED_MACS=
 DHCP_NOTIFY_IGNORED_HOSTS=
 # Per-kind mute list (comma-separated tags), managed from the dashboard:
 # dhcp_new_device,dhcp_activated,dhcp_deactivated,dhcp_failover_failed,
-# vip_claim_failed,sync_role_change,daemon_lifecycle,sync_payload_built,sync_payload_pulled
+# vip_claim_failed,sync_role_change,daemon_lifecycle,sync_payload_built,sync_payload_pulled,
+# blocking_broken
 MUTED_TAGS=
 CONF
     printf "  %b Notify config created (Pushover disabled by default)\\n" "${TICK}"

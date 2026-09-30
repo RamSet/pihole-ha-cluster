@@ -9,6 +9,15 @@
 
 CONF_DIR="/etc/pihole-ha"
 RUN_DIR="/run/pihole-ha"
+# gravity_is_sane/blocking_canary come from the platform library, so this tool
+# reports exactly what the daemon and the sync scripts decide from.
+for _p in /usr/local/lib/pihole-ha/pihole-ha-platform ./pihole-ha-platform; do
+    [[ -f "$_p" ]] && { . "$_p"; break; }
+done
+# An older library is present but predates these helpers. Say that, rather than
+# "not found" (it was) or "ok" (nobody checked).
+command -v gravity_is_sane >/dev/null 2>&1 || gravity_is_sane() { printf 'check unavailable — this node runs an older pihole-ha'; return 1; }
+command -v blocking_canary >/dev/null 2>&1 || blocking_canary() { printf 'unknown (older pihole-ha on this node)'; }
 # The payload moved out of /run (tmpfs) onto disk, and is overridable per node.
 # This tool kept looking in the old place and so reported "(none built on this
 # node)" on every node, on a line people read to decide whether the publisher is
@@ -111,6 +120,38 @@ for n in $NODES; do
     ip="${n%%:*}"
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 4 "http://$ip:8887/api/status" 2>/dev/null)"
     printf '%-18s /api/status -> %s\n' "$ip" "${code:-no-response}"
+done
+
+_hr "BLOCKING (does each node actually filter?)"
+# ping, port 53, the API and DHCP all pass on a Pi-hole whose blocklist was
+# emptied -- it answers everything instead of blocking it. That is invisible in
+# every other section here, and it is what one reporter's cluster did for a day.
+_gdom="$(pihole-FTL sqlite3 /etc/pihole/gravity.db 'SELECT count(*) FROM gravity;' 2>/dev/null)"
+_gads="$(pihole-FTL sqlite3 /etc/pihole/gravity.db 'SELECT count(*) FROM adlist WHERE enabled=1;' 2>/dev/null)"
+if _gs="$(gravity_is_sane /etc/pihole/gravity.db 2>/dev/null)"; then
+    if [[ "$_gdom" =~ ^[0-9]+$ ]]; then
+        printf 'this node blocklist:  ok (%s domains, %s adlists enabled)\n' "$_gdom" "${_gads:-?}"
+    else
+        # Saying "ok" when nothing could be counted is how a broken node reads
+        # as a healthy one -- the exact failure this section exists to catch.
+        printf 'this node blocklist:  not checked (pihole-FTL unavailable here)\n'
+    fi
+else
+    printf 'this node blocklist:  *** %s ***\n' "$_gs"
+fi
+printf 'this node blocking:   %s\n' "$(blocking_canary 2>/dev/null)"
+for n in $(sed -n 's/^HA_NODES=//p' "$CONF_DIR/nodes.conf" 2>/dev/null | tr ',' ' '); do
+    ip="${n%%:*}"
+    _st="$(curl -sf --max-time 4 "http://$ip:8887/api/status" 2>/dev/null)"
+    [[ -z "$_st" ]] && { printf '%-18s %s\n' "$ip" "(no answer on :8887)"; continue; }
+    _b="$(printf '%s' "$_st" | sed -n 's/.*"blocking"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    _bw="$(printf '%s' "$_st" | sed -n 's/.*"blocking_why"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+    case "${_b:-}" in
+        ok)     printf '%-18s blocking ok\n' "$ip" ;;
+        paused) printf '%-18s blocking switched off on that node (not a fault)\n' "$ip" ;;
+        broken) printf '%-18s *** NOT BLOCKING: %s ***\n' "$ip" "$_bw" ;;
+        *)      printf '%-18s blocking state not reported (older version?)\n' "$ip" ;;
+    esac
 done
 
 _hr "PRIORITY ORDER (who thinks the order is what)"

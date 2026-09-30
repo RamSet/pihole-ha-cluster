@@ -284,6 +284,15 @@ export_adlists > "$STAGING_DIR/adlists.tsv"
 TAR_FILES+=" adlists.tsv"
 
 if [[ "$SYNC_GRAVITY" == "true" ]]; then
+    # Look inside it first. Every other check on this payload is about the file
+    # arriving intact; none of them can tell a blocklist from an empty one, and
+    # an empty one outranks the standby's good copy the moment it is published
+    # (new hash -> new config version -> every direction guard passes).
+    _gsane="$(gravity_is_sane /etc/pihole/gravity.db)" || {
+        log_error "event=build_fail reason=\"refusing to publish this blocklist: ${_gsane} — the cluster keeps what it already has\""
+        rm -rf "$STAGING_DIR"
+        exit 1
+    }
     cp /etc/pihole/gravity.db "$STAGING_DIR/gravity.db" 2>/dev/null || {
         log_error "event=build_fail reason=\"could not copy gravity.db\""
         exit 1

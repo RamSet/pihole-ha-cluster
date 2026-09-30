@@ -36,6 +36,116 @@ json_str()  { [[ "$1" =~ \"$2\"[[:space:]]*:[[:space:]]*\"([^\"]*)\" ]] && print
 json_num()  { [[ "$1" =~ \"$2\"[[:space:]]*:[[:space:]]*(-?[0-9]+) ]] && printf '%s' "${BASH_REMATCH[1]}"; }
 json_bool() { [[ "$1" =~ \"$2\"[[:space:]]*:[[:space:]]*(true|false) ]] && printf '%s' "${BASH_REMATCH[1]}"; }
 
+# Does this gravity.db actually block anything?
+#
+# Every check the sync path had looks at the FILE: the signature, the manifest
+# checksum, the config-version direction guard. A wiped-but-valid database
+# passes all of them -- correct checksum, new content hash, therefore a NEWER
+# version -- and installs over a healthy standby, which is how one cluster
+# stopped blocking everywhere after a double gravity rebuild emptied the
+# primary (reported against another sync tool, lovelaze/nebula-sync#271).
+# So look inside before shipping or installing one.
+#
+# Silent + returns 0 when the database looks sane, INCLUDING the legitimately
+# empty case: no enabled adlists means no domains are expected. Prints the
+# reason and returns 1 when it does not.
+gravity_is_sane() {
+    local db="${1:-/etc/pihole/gravity.db}"
+    # No way to look: never turn "cannot check" into "refuse to sync".
+    command -v pihole-FTL >/dev/null 2>&1 || return 0
+    [[ -s "$db" ]] || { printf 'gravity.db is missing or empty'; return 1; }
+    local domains adlists
+    domains="$(pihole-FTL sqlite3 "$db" "SELECT count(*) FROM gravity;" 2>/dev/null)"
+    adlists="$(pihole-FTL sqlite3 "$db" "SELECT count(*) FROM adlist WHERE enabled=1;" 2>/dev/null)"
+    # A missing table reads as no answer at all, and that IS the fault here.
+    [[ "$domains" =~ ^[0-9]+$ ]] || { printf 'the gravity table is missing or unreadable'; return 1; }
+    [[ "$adlists" =~ ^[0-9]+$ ]] || { printf 'the adlist table is missing or unreadable'; return 1; }
+    if (( adlists > 0 && domains == 0 )); then
+        printf 'no blocked domains at all, while %s adlists are enabled' "$adlists"
+        return 1
+    fi
+    return 0
+}
+
+# Is this node actually blocking right now?
+#
+# ping, port 53, the API and DHCP all pass on a Pi-hole whose blocklist has been
+# emptied: FTL is up and answering, it just answers everything. So ask the only
+# question that settles it -- take domains this node's own blocklist covers and
+# see whether they come back blocked.
+#
+# Two things make a naive version of this cry wolf, and both were caught on a
+# live cluster before this shipped:
+#
+#   * Group management. A domain in gravity is only blocked for clients in the
+#     groups its adlist belongs to. Sampling the whole table and querying from
+#     localhost reports a correctly-configured parental-filter cluster as
+#     broken. Sample only lists that apply to THIS client's groups.
+#   * ABP-style rows (||example.com^) are not names you can look up, and a
+#     blocklist's first row is often localhost.localdomain, which answers
+#     nothing whether blocking works or not.
+#
+# The verdict counts, it does not short-circuit. An empty answer proves nothing
+# either way -- under NXDOMAIN mode that is what a block looks like, and it is
+# also what a domain nobody hosts any more looks like. A routable answer is the
+# only positive evidence, so:
+#
+#   two or more sampled domains resolve routable -> broken
+#   none do                                      -> ok
+#   exactly one does                             -> unknown (an allowlisted or
+#                                                   stale entry looks like this)
+#
+# Mode-agnostic by construction: under NULL mode a block answers 0.0.0.0, under
+# NXDOMAIN mode it answers nothing, and neither is routable. Exact allowlist
+# entries are excluded from the sample, since those are meant to resolve.
+#
+# Prints "ok", "paused", "unknown", or "broken:<reason>".
+blocking_canary() {
+    local db="${1:-/etc/pihole/gravity.db}"
+    command -v pihole-FTL >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+    command -v dig >/dev/null 2>&1 || { printf 'unknown'; return 0; }
+    # Switching blocking off is a choice, not a fault. A pause reads false here;
+    # a wiped database still reads true, so this cannot mask the real thing.
+    [[ "$(pihole-FTL --config dns.blocking.active 2>/dev/null)" == "false" ]] && { printf 'paused'; return 0; }
+    # Which groups apply to the address we query from. An unassigned client is in
+    # the default group, which is also the answer when these tables are empty.
+    local groups
+    groups="$(pihole-FTL sqlite3 "$db" \
+        "SELECT group_id FROM client_by_group WHERE client_id=(SELECT id FROM client WHERE ip='127.0.0.1');" 2>/dev/null \
+        | paste -sd, -)"
+    [[ -n "$groups" ]] || groups="0"
+    local domains
+    domains="$(pihole-FTL sqlite3 "$db" \
+        "SELECT g.domain FROM gravity g
+           JOIN adlist a ON a.id = g.adlist_id
+           JOIN adlist_by_group ag ON ag.adlist_id = a.id
+          WHERE a.enabled = 1 AND ag.group_id IN ($groups)
+            AND g.domain NOT LIKE '%|%' AND g.domain NOT LIKE '%^%'
+            AND g.domain LIKE '%.%' AND g.domain NOT LIKE 'localhost%'
+            AND g.domain NOT IN (SELECT domain FROM domainlist WHERE type IN (0,2) AND enabled=1)
+          LIMIT 3;" 2>/dev/null)"
+    [[ -n "$domains" ]] || { printf 'unknown'; return 0; }
+    local ours d ans routable=0 last=""
+    ours="$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | paste -sd' ' -)"
+    while read -r d; do
+        [[ -n "$d" ]] || continue
+        # WITH recursion: under +norecurse an unblocked name only answers from
+        # cache, so the check would flip on cache state alone.
+        ans="$(dig +short +time=2 +tries=1 @127.0.0.1 "$d" A 2>/dev/null | tail -1)"
+        [[ -z "$ans" || "$ans" == "0.0.0.0" || "$ans" == "::" ]] && continue
+        [[ " $ours " == *" $ans "* ]] && continue
+        routable=$(( routable + 1 ))
+        last="$d resolves to $ans here"
+    done <<< "$domains"
+    if (( routable >= 2 )); then
+        printf 'broken:%s, and it is on this node own blocklist' "$last"
+        return 1
+    fi
+    (( routable == 0 )) && { printf 'ok'; return 0; }
+    printf 'unknown'
+    return 0
+}
+
 # IPv4 dotted-quad validator. Returns 0 if $1 is valid, 1 otherwise.
 is_valid_ip() {
     [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1

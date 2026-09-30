@@ -1147,6 +1147,7 @@ write_status() {
     {
         printf '{"ha_enabled":%s,"dhcp_master":"%s","node":{"ip":"%s","role":"%s","priority":%d,"dhcp_active":%s,"vip":"%s","vip_enabled":%s,"vip_held":%s},' \
             "$HA_ENABLED" "$DHCP_MASTER" "$LOCAL_IP" "$ROLE" "$PRIORITY" "$dhcp" "$VIP" "$VIP_ENABLED" "$vip_held"
+        printf '"blocking":"%s","blocking_why":"%s",' "$BLOCKING_STATE" "$(printf '%s' "$BLOCKING_WHY" | sed 's/[\\"]/ /g')"
         printf '"gateway":%s,"timestamp":"%s",' "$gw" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         printf '"reason":"%s","peers":{' "$(echo "$reason" | sed 's/"/\\"/g')"
         local sep=""
@@ -1479,6 +1480,37 @@ _write_nodes_gen() {
     fi
 }
 
+# Blocking canary, on its own clock.
+#
+# One DNS query, but it lands in Pi-hole's own query log, so running it every
+# CHECK_INTERVAL (3s on some clusters) would add thousands of entries a day for
+# nothing. A blocklist does not empty itself between minutes.
+BLOCKING_STATE="unknown"
+BLOCKING_WHY=""
+BLOCKING_NEXT=0
+BLOCKING_EVERY=60
+update_blocking_state() {
+    local now="$EPOCHSECONDS"
+    (( now < BLOCKING_NEXT )) && return 0
+    BLOCKING_NEXT=$(( now + BLOCKING_EVERY ))
+    local out prev="$BLOCKING_STATE"
+    out="$(blocking_canary)" || true
+    BLOCKING_WHY=""
+    case "$out" in
+        broken:*) BLOCKING_STATE="broken"; BLOCKING_WHY="${out#broken:}" ;;
+        ok|paused|unknown) BLOCKING_STATE="$out" ;;
+        *) BLOCKING_STATE="unknown" ;;
+    esac
+    [[ "$BLOCKING_STATE" == "$prev" ]] && return 0
+    case "$BLOCKING_STATE" in
+        broken) log_warn "event=blocking_broken reason=\"$BLOCKING_WHY\" note=\"this node answers DNS but is not filtering; ping, port 53 and the API all still pass\""
+                NOTIFY_TAG=blocking_broken notify "<b><font color='#dd4b39'>Not Blocking</font></b> <br> $ROLE ($LOCAL_IP) answers DNS but filters nothing <br> $BLOCKING_WHY" & ;;
+        ok)     [[ "$prev" == "broken" ]] && log_info "event=blocking_recovered" ;;
+        paused) log_info "event=blocking_paused reason=\"blocking is switched off on this node\"" ;;
+    esac
+    return 0
+}
+
 # --- Main Loop ---
 log_info "event=startup ip=$LOCAL_IP priority=$PRIORITY interval=${CHECK_INTERVAL}s activate_after=$ACTIVATE_AFTER deactivate_after=$DEACTIVATE_AFTER"
 log_info "event=startup checks=\"ping dns:53 api dhcp\""
@@ -1509,6 +1541,7 @@ while true; do
     # renewal, NetworkManager. Cheap: returns immediately once it is already
     # pinned, which is the steady state.
     enforce_dns_pin
+    update_blocking_state     # does this node still actually block anything?
     reconcile_node_order      # adopt a newer priority order a peer holds
     if reload_vip_conf; then  # only update DNS option when VIP config actually changes
         ensure_dns_option
