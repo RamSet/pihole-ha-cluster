@@ -1007,12 +1007,13 @@ _sane_probe() {   # $1 gravity rows, $2 enabled adlists ("-" = table unreadable)
     # A real (non-empty) file: the helper rejects an empty one on sight, which
     # would make every case below pass for the wrong reason.
     local db; db="$(mktemp)"; printf 'not-really-sqlite' > "$db"
-    P_DB="$db" P_DOM="$1" P_ADS="$2" bash -c '
+    P_DB="$db" P_DOM="$1" P_ADS="$2" P_MAPS="${3:-32}" bash -c '
         source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
         pihole-FTL() {
             case "$*" in
-                *"FROM gravity"*) [[ "$P_DOM" == "-" ]] || printf "%s" "$P_DOM" ;;
-                *"FROM adlist"*)  [[ "$P_ADS" == "-" ]] || printf "%s" "$P_ADS" ;;
+                *adlist_by_group*) [[ "$P_MAPS" == "-" ]] || printf "%s" "$P_MAPS" ;;
+                *"FROM gravity"*)  [[ "$P_DOM" == "-" ]] || printf "%s" "$P_DOM" ;;
+                *"FROM adlist"*)   [[ "$P_ADS" == "-" ]] || printf "%s" "$P_ADS" ;;
             esac
         }
         out="$(gravity_is_sane "$P_DB")" && echo "SANE" || echo "REFUSE: $out"
@@ -1030,6 +1031,19 @@ assert_contains "a missing adlist table is refused"         "$(_sane_probe 5 -)"
 assert_contains "no pihole-FTL means no opinion" \
     "$(bash -c 'source "'"$SCRIPT_DIR"'/../pihole-ha-platform"; gravity_is_sane /dev/null && echo SANE')" "SANE"
 
+# A blocklist with domains but no group mappings applies to nobody: `pihole -g`
+# after a wipe rebuilds the gravity table and not the mappings, so a half-repaired
+# node looks fully stocked and blocks nothing. Verified against a real 2.4M-row
+# database with adlist_by_group emptied.
+assert_contains "domains with no group mappings are refused" "$(_sane_probe 2394709 17 0)" "REFUSE"
+assert_contains "the refusal says nothing is assigned to a group" \
+    "$(_sane_probe 2394709 17 0)" "none is assigned to a group"
+assert_contains "mappings present is accepted"           "$(_sane_probe 2394709 17 32)" "SANE"
+# No enabled lists at all is someone blocking by regex or denylist only.
+assert_contains "no enabled adlists and no mappings is fine" "$(_sane_probe 0 0 0)" "SANE"
+# Cannot read the mapping table: no opinion, same rule as everywhere else here.
+assert_contains "an unreadable mapping table is not a refusal" "$(_sane_probe 2394709 17 -)" "SANE"
+
 assert_contains "the publisher checks before shipping a blocklist" \
     "$(cat "$SCRIPT_DIR/../pihole-ha-sync")" 'gravity_is_sane /etc/pihole/gravity.db'
 assert_contains "the publisher refuses rather than publishing it" \
@@ -1043,12 +1057,15 @@ assert_contains "the standby keeps its own copy instead" \
 # everything instead of blocking it.
 _canary_probe() {   # $1 blocking.active, $2 domains (space separated), $3.. answers per domain
     local active="$1" domains="$2"; shift 2
-    P_ACTIVE="$active" P_DOMAINS="$domains" P_ANSWERS="$*" bash -c '
+    P_ACTIVE="$active" P_DOMAINS="$domains" P_ANSWERS="$*" P_ADS="${P_ADS:-17}" P_MAPS="${P_MAPS:-32}" bash -c '
         source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
         pihole-FTL() {
             case "$*" in
                 *"dns.blocking.active"*) printf "%s" "$P_ACTIVE" ;;
                 *client_by_group*)       : ;;
+                *g.domain*)              printf "%s\n" $P_DOMAINS ;;
+                *"count(*) FROM adlist_by_group"*) printf "%s" "${P_MAPS:-32}" ;;
+                *"FROM adlist WHERE"*)   printf "%s" "${P_ADS:-17}" ;;
                 *"FROM gravity"*)        printf "%s\n" $P_DOMAINS ;;
             esac
         }
@@ -1084,8 +1101,31 @@ assert_eq "a single resolving domain is inconclusive" "unknown" \
     "$(_canary_probe true "a.test b.test c.test" 93.184.1.1 NONE NONE)"
 assert_eq "IP mode answers with our own address read as blocking" "ok" \
     "$(_canary_probe true "a.test b.test c.test" 127.0.0.1 127.0.0.1 NONE)"
-assert_eq "no sampled domains means no opinion" "unknown" \
-    "$(_canary_probe true "" )"
+# Nothing to sample has two causes and they are not the same fault. No mappings
+# at all: the node blocks nothing and must say so, because "unknown" notifies
+# nobody -- a mappings wipe on the reporter's backup node let doubleclick.net
+# through while this read as no opinion. Mappings that just do not cover THIS
+# client is an ordinary per-group setup and untestable from here.
+assert_contains "enabled lists with no mappings at all is broken" \
+    "$(P_ADS=17 P_MAPS=0 _canary_probe true "")" "broken:"
+assert_eq "mappings that miss this client stay unknown" "unknown" \
+    "$(P_ADS=17 P_MAPS=32 _canary_probe true "")"
+assert_eq "no enabled lists at all stays unknown" "unknown" \
+    "$(P_ADS=0 P_MAPS=0 _canary_probe true "")"
+
+# A refused publish used to be silent: an error line, a build time that stops
+# moving, and no notification, so a cluster could sit un-synced unnoticed.
+_sync_src="$(cat "$SCRIPT_DIR/../pihole-ha-sync")"
+assert_contains "a refused publish notifies"        "$_sync_src" "NOTIFY_TAG=sync_refused"
+assert_contains "the refusal is logged as its own event" "$_sync_src" "event=build_refused"
+assert_contains "losing every adlist is refused"    "$_sync_src" "every adlist is now disabled"
+assert_contains "the refusal names the way out"     "$_sync_src" "pihole-ha-sync --force"
+assert_contains "--force still publishes"           "$_sync_src" '[[ -z "$_refuse" && "$FORCE" != "true" ]]'
+# The baseline must only move on a publish that actually happened, or a refusal
+# rewrites the history it is compared against.
+assert_contains "the adlist baseline is written after the build" "$_sync_src" 'ADLIST_COUNT_FILE'
+assert_contains "the new refusal tag is registered" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-dash")" "sync_refused"
 
 assert_contains "the daemon keeps the canary off the per-cycle path" \
     "$(cat "$SCRIPT_DIR/../pihole-ha")" "BLOCKING_EVERY"

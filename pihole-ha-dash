@@ -942,7 +942,7 @@ if [[ "${1:-}" == "--handle" ]]; then
                 done
                 _tags_json+=']'
             fi
-            printf '{"enabled":%s,"has_user":%s,"has_token":%s,"title":"%s","dhcp_enabled":%s,"dhcp_ignored_macs":"%s","dhcp_ignored_hosts":"%s","muted_tags":%s,"known_tags":["dhcp_new_device","dhcp_activated","dhcp_deactivated","dhcp_failover_failed","vip_claim_failed","sync_role_change","daemon_lifecycle","sync_payload_built","sync_payload_pulled","blocking_broken"]}\n' \
+            printf '{"enabled":%s,"has_user":%s,"has_token":%s,"title":"%s","dhcp_enabled":%s,"dhcp_ignored_macs":"%s","dhcp_ignored_hosts":"%s","muted_tags":%s,"known_tags":["dhcp_new_device","dhcp_activated","dhcp_deactivated","dhcp_failover_failed","vip_claim_failed","sync_role_change","daemon_lifecycle","sync_payload_built","sync_payload_pulled","blocking_broken","sync_refused"]}\n' \
                 "$_PO_ENABLED" "$_has_user" "$_has_token" "$_PO_TITLE" \
                 "$_DHCP_NOTIFY_ENABLED" "$_DHCP_NOTIFY_IGNORED_MACS" "$_DHCP_NOTIFY_IGNORED_HOSTS" "$_tags_json"
             ;;
@@ -961,7 +961,7 @@ if [[ "${1:-}" == "--handle" ]]; then
                 esac
             done
             _nm_tags="$(printf '%b' "${_nm_tags//%/\\x}")"
-            _known_tags="dhcp_new_device dhcp_activated dhcp_deactivated dhcp_failover_failed vip_claim_failed sync_role_change daemon_lifecycle sync_payload_built sync_payload_pulled blocking_broken"
+            _known_tags="dhcp_new_device dhcp_activated dhcp_deactivated dhcp_failover_failed vip_claim_failed sync_role_change daemon_lifecycle sync_payload_built sync_payload_pulled blocking_broken sync_refused"
             _cleaned=""
             IFS=',' read -ra _tarr <<< "$_nm_tags"
             for _t in "${_tarr[@]}"; do

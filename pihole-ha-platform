@@ -49,6 +49,16 @@ json_bool() { [[ "$1" =~ \"$2\"[[:space:]]*:[[:space:]]*(true|false) ]] && print
 # Silent + returns 0 when the database looks sane, INCLUDING the legitimately
 # empty case: no enabled adlists means no domains are expected. Prints the
 # reason and returns 1 when it does not.
+# How many enabled adlists are actually assigned to a group. Zero means the
+# blocklist applies to nobody, however many domains it holds: `pihole -g` after
+# a wipe rebuilds the gravity table but not these mappings, so a half-repaired
+# node looks fully stocked and blocks nothing (reported by sysdad, who broke his
+# own copies the way his cluster broke).
+gravity_mapping_count() {
+    pihole-FTL sqlite3 "${1:-/etc/pihole/gravity.db}" \
+        "SELECT count(*) FROM adlist_by_group ag JOIN adlist a ON a.id = ag.adlist_id WHERE a.enabled = 1;" 2>/dev/null
+}
+
 gravity_is_sane() {
     local db="${1:-/etc/pihole/gravity.db}"
     # No way to look: never turn "cannot check" into "refuse to sync".
@@ -62,6 +72,14 @@ gravity_is_sane() {
     [[ "$adlists" =~ ^[0-9]+$ ]] || { printf 'the adlist table is missing or unreadable'; return 1; }
     if (( adlists > 0 && domains == 0 )); then
         printf 'no blocked domains at all, while %s adlists are enabled' "$adlists"
+        return 1
+    fi
+    # Domains alone are not enough: with no group mappings nothing applies to
+    # any client, so the node serves 2.4 million rows and blocks none of them.
+    local maps
+    maps="$(gravity_mapping_count "$db")"
+    if [[ "$maps" =~ ^[0-9]+$ ]] && (( adlists > 0 && maps == 0 )); then
+        printf '%s adlists are enabled but none is assigned to a group, so nothing is blocked for anyone' "$adlists"
         return 1
     fi
     return 0
@@ -124,7 +142,22 @@ blocking_canary() {
             AND g.domain LIKE '%.%' AND g.domain NOT LIKE 'localhost%'
             AND g.domain NOT IN (SELECT domain FROM domainlist WHERE type IN (0,2) AND enabled=1)
           LIMIT 3;" 2>/dev/null)"
-    [[ -n "$domains" ]] || { printf 'unknown'; return 0; }
+    if [[ -z "$domains" ]]; then
+        # Nothing to sample has two very different causes. No mappings at all
+        # means this blocklist applies to nobody and the node is blocking
+        # nothing -- report that, because "unknown" notifies no one. Mappings
+        # that simply do not cover THIS client is an ordinary per-group setup,
+        # and nothing here can test it.
+        local adlists maps
+        adlists="$(pihole-FTL sqlite3 "$db" "SELECT count(*) FROM adlist WHERE enabled=1;" 2>/dev/null)"
+        maps="$(gravity_mapping_count "$db")"
+        if [[ "$adlists" =~ ^[0-9]+$ && "$maps" =~ ^[0-9]+$ ]] && (( adlists > 0 && maps == 0 )); then
+            printf 'broken:%s adlists are enabled but none is assigned to a group, so nothing is blocked for any client' "$adlists"
+            return 1
+        fi
+        printf 'unknown'
+        return 0
+    fi
     local ours d ans routable=0 last=""
     ours="$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | paste -sd' ' -)"
     while read -r d; do

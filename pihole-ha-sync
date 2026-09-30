@@ -216,6 +216,11 @@ export_settings() {
 # versions), because — unlike the pull-count "generation" — the version only
 # advances on an actual content change, so in-sync nodes always match.
 VER_FILE="/etc/pihole-ha/sync-version"
+# How many adlists were enabled the last time we published. On disk, because the
+# question it answers -- "did the lists just disappear?" -- has to survive a
+# reboot. Zero enabled adlists is a legitimate setup (regex/denylist only), so
+# only the transition from some to none is treated as a fault.
+ADLIST_COUNT_FILE="/etc/pihole-ha/sync-adlist-count"
 GEN_FILE="/etc/pihole-ha/sync-generation"
 _local_ver="$(cat "$VER_FILE" 2>/dev/null || echo 0)"
 _best_ver=$_local_ver
@@ -288,11 +293,27 @@ if [[ "$SYNC_GRAVITY" == "true" ]]; then
     # arriving intact; none of them can tell a blocklist from an empty one, and
     # an empty one outranks the standby's good copy the moment it is published
     # (new hash -> new config version -> every direction guard passes).
-    _gsane="$(gravity_is_sane /etc/pihole/gravity.db)" || {
-        log_error "event=build_fail reason=\"refusing to publish this blocklist: ${_gsane} — the cluster keeps what it already has\""
+    _refuse=""
+    _gsane="$(gravity_is_sane /etc/pihole/gravity.db)" || _refuse="$_gsane"
+    # A blocklist that went from lists to none looks like a fresh install and is
+    # not one. First publish has no history to compare, and --force says "yes, I
+    # meant it".
+    if [[ -z "$_refuse" && "$FORCE" != "true" ]]; then
+        _ads_now="$(pihole-FTL sqlite3 /etc/pihole/gravity.db "SELECT count(*) FROM adlist WHERE enabled=1;" 2>/dev/null)"
+        _ads_was="$(cat "$ADLIST_COUNT_FILE" 2>/dev/null)"
+        if [[ "$_ads_now" == "0" && "$_ads_was" =~ ^[1-9][0-9]*$ ]]; then
+            _refuse="every adlist is now disabled, and $_ads_was were enabled at the last publish — run 'pihole-ha-sync --force' if that was deliberate"
+        fi
+    fi
+    if [[ -n "$_refuse" ]]; then
+        # Keeping the old blocklist is right, but doing it quietly means the
+        # cluster stops syncing and nobody hears about it until someone notices
+        # the build time has stopped moving.
+        log_error "event=build_refused reason=\"refusing to publish this blocklist: ${_refuse} — the cluster keeps what it already has\""
+        NOTIFY_TAG=sync_refused notify "<b><font color='#dd4b39'>Sync Halted</font></b> <br> $MY_ROLE ($LOCAL_IP) refused to publish its blocklist <br> $_refuse <br> Standbys keep the copy they already have"
         rm -rf "$STAGING_DIR"
         exit 1
-    }
+    fi
     cp /etc/pihole/gravity.db "$STAGING_DIR/gravity.db" 2>/dev/null || {
         log_error "event=build_fail reason=\"could not copy gravity.db\""
         exit 1
@@ -426,4 +447,8 @@ rm -rf "$STAGING_DIR"
 echo "$CURRENT" > "$HASH_FILE"
 
 log_info "event=build_complete size=${PAYLOAD_SIZE} hash=$CURRENT gravity=$SYNC_GRAVITY dhcp=$SYNC_DHCP dns=$SYNC_DNS settings=$SYNC_SETTINGS adlists=true"
+# Only after a successful build: a refused or failed one must not move the
+# baseline the check above compares against.
+pihole-FTL sqlite3 /etc/pihole/gravity.db "SELECT count(*) FROM adlist WHERE enabled=1;" 2>/dev/null > "$ADLIST_COUNT_FILE" || true
+
 NOTIFY_TAG=sync_payload_built notify "<b><font color='#3498db'>Pi-hole Sync Payload Ready</font></b> <br> Built on $MY_ROLE <font color='#95a5a6'>($LOCAL_IP)</font> <br> Config exported for standby nodes <br> <font color='#95a5a6'>${PAYLOAD_HUMAN}</font>"
