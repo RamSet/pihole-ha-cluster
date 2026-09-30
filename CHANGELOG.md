@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.18.1 — 2026-09-30
+- Refuse a blocklist that applies to nobody, and say when a publish is refused
+
 ## v3.18.0 — 2026-09-30
 - Refuse to spread a blocklist that blocks nothing, and notice when one does
 
