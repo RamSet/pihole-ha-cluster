@@ -22,7 +22,9 @@ At install it checks whether Pi-hole DHCP is active, probes the LAN for another 
 - **Config Sync** — The sync primary bundles gravity DB, DHCP static leases, custom DNS records, and FTL settings — and rebuilds that bundle **only when something actually changes**. Standbys check the primary every ~15 minutes and download + apply **only when the config differs** (and even then, FTL only restarts on real changes) — plus an on-demand **Sync Now** button. So nothing transfers or restarts on unchanged data, and no SSH keys are needed.
 - **Manual DHCP Master Override** — Force any node to be the DHCP server with one click. The others yield automatically. If the designated master goes down, remaining nodes fall back to priority order.
 - **HA Kill-Switch** — Disable all DHCP failover, health checks, and VIP management cluster-wide with one toggle. Propagates to all nodes automatically.
-- **Pushover Notifications** — Optional alerts on failover events (activation, deactivation, sync).
+- **Blocking Health** — Every node checks that it is still *filtering*, not just answering. ping, port 53, the API and DHCP all pass on a Pi-hole whose blocklist has been emptied, so each node samples domains from its own lists and reports `ok`, `paused`, `broken` or `unknown` to the panel, the log and the diagnostics bundle. A deliberate pause is never a fault, and a node that stops filtering is reported loudly rather than failed over — moving DHCP on this signal is how a LAN ends up with two DHCP servers.
+- **Blocklist Guards** — A blocklist that blocks nothing is never published and never installed. A wiped `gravity.db` is internally valid and *newer* than the good copy a standby holds, so every integrity check passes and it would overwrite the cluster's last working blocklist. The publisher refuses when a blocklist has no domains, or no group mappings (what `pihole -g` leaves after a wipe), or when every adlist has just been disabled; the standby repeats the checks before installing, in case the publisher is on an older version.
+- **Pushover Notifications** — Optional alerts on failover events (activation, deactivation, sync), including a node that stops filtering (`blocking_broken`) and a refused publish (`sync_refused`).
 - **API Authentication** — Mutating API endpoints are protected using Pi-hole's own password. If the local Pi-hole instance has a password set, all write operations require a valid session ID (SID). Read-only endpoints remain open.
 - **Web UI** — A native panel integrated into Pi-hole's admin interface at `/admin/ha` (**Tools > HA Cluster**).
 - **Cluster Join/Leave** — Nodes register themselves with the cluster on install via the `/api/nodes/join` API. The **Cluster Members** panel on the HA page adds, removes, and reorders nodes with one click, and every change propagates to all peers. Adding works from either side: a standalone node joins an existing cluster rather than absorbing it, and an address that doesn't answer is refused instead of being written to the config. A removed node keeps serving DNS on its own with failover switched off, so it can be added back at any time. No manual config editing needed.
@@ -168,7 +170,7 @@ Nodes in `HA_NODES` can optionally include a `:PORT` suffix for the Pi-hole web 
 | `CHECK_INTERVAL` | seconds | `10` | How often each node health-checks its peers. Failover ≈ `CHECK_INTERVAL × ACTIVATE_AFTER` |
 | `ACTIVATE_AFTER` | integer | `2` | Consecutive failed checks before a standby takes over (the last node waits +2 to avoid a tie). Lower = faster failover, higher = ignores brief blips |
 | `DEACTIVATE_AFTER` | integer | `3` | Consecutive healthy checks before a standby yields back to a recovered primary |
-| `HEALTH_TIMEOUT` | seconds | `2` | Per-check timeout for ping / DNS:53 / API |
+| `HEALTH_TIMEOUT` | seconds | `2` | Per-check timeout for ping / DNS:53 / API, and for the blocking canary's lookups |
 | `STANDBY_ONLY` | bool | `false` | This node never takes over DHCP or the VIP, whatever the peers look like, in every mode including DNS-only. Releases both if it already holds them. Re-read every round, so it can be set or lifted without a restart — use it to bring a node up quietly, or to calm a cluster that is already fighting. The installer sets it automatically on a node that could not register with the cluster |
 | `AUTH_TIMEOUT` | seconds | `10` | How long to allow for a peer login. Pi-hole hashes the app password deliberately slowly, so a 1-core Pi can need well over 5s. Raise this if the log reports a login timeout |
 | `AUTH_RETRY_SEC` | seconds | `60` | How long to wait before retrying a peer login that failed. Stops a bad or slow login re-hashing the password every `CHECK_INTERVAL` |
@@ -445,6 +447,43 @@ journalctl -u pihole-ha-sync
 
 # Sync (standbys pull)
 journalctl -u pihole-ha-sync-pull
+```
+
+### Blocking health and blocklist guards
+
+A Pi-hole that answers every query and blocks none of them passes a liveness
+check. This is the state a double gravity rebuild leaves, and a cluster can
+propagate it: a wiped `gravity.db` is a valid file with a new content hash, so it
+outranks the good copy a standby holds.
+
+**On each node, once a minute:** three domains are sampled from that node's own
+blocklist and looked up locally.
+
+| State | Meaning |
+|---|---|
+| `ok` | Nothing sampled resolved to a routable address |
+| `paused` | `dns.blocking.active` is `false` — switched off on purpose, never a fault |
+| `broken` | Two or more sampled domains resolved normally, or enabled adlists have no group mappings at all |
+| `unknown` | Can't tell: one domain resolved (an allowlist entry looks like this), nothing was sampleable, or the lists only map to groups this node's own queries don't fall into |
+
+Only lists that apply to the querying client are sampled, so a per-group setup
+(parental filtering on some clients) is not reported as broken. The verdict needs
+two routable answers because an empty answer means "blocked" under NXDOMAIN mode
+and "domain is dead" under every mode. A `broken` node logs `blocking_broken` at
+WARN and notifies once; it is **not** failed over.
+
+**Before publishing, and again before installing,** a blocklist is refused when:
+
+- it has no domains while adlists are enabled;
+- its enabled adlists have no `adlist_by_group` rows, so nothing applies to any client;
+- every adlist has just been disabled when the last publish had some (override with `pihole-ha-sync --force`).
+
+A refusal logs `build_refused`, notifies as `sync_refused`, and leaves every
+standby on the copy it already has. An empty blocklist with no enabled adlists is
+legal, and a node that cannot run the checks never blocks syncing because of it.
+
+```bash
+sudo pihole-ha-debug | sed -n '/BLOCKING/,/PRIORITY/p'   # per-node blocking + domain/adlist counts
 ```
 
 ## Troubleshooting
