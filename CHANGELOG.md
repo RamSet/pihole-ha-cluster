@@ -2,6 +2,10 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.0 — 2026-10-10
+- Keep a pause local, and stop the publisher role moving on one missed check
+- Document the blocking checks that shipped in 3.18
+
 ## v3.18.1 — 2026-09-30
 - Refuse a blocklist that applies to nobody, and say when a publish is refused
 
