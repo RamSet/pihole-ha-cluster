@@ -92,6 +92,7 @@ SYNC_DHCP=true
 SYNC_DNS=true
 SYNC_SETTINGS=true
 SYNC_NOTIFY=true
+SYNC_UPSTREAMS=false
 SYNC_PRIMARY="${NODES[0]}"
 load_sync_conf "$SYNC_CONF"
 
@@ -148,9 +149,20 @@ ftl_to_json() {
 # round-trip through export_settings is silently rejected by the standby and
 # the value never syncs. Array keys get their own ftl_to_json'd file in the
 # payload instead — see dns-cnames.json / dns-revservers.json below.
+# dns.blocking.active is deliberately NOT here. Pausing blocking is a runtime
+# switch, and syncing it published the pause: a build fired during a 5-minute
+# pause on the publisher left a standby paused for half an hour, answering ad
+# domains with real IPs and reporting itself "paused", which every filtering
+# health check reads as healthy-by-choice. A node paused this way by an older
+# version stays paused until someone resumes it -- nothing here will do it.
+#
+# dns.upstreams is not here either, by default: a node resolving through its own
+# local unbound would be pointed at an unbound it does not have. Set
+# SYNC_UPSTREAMS=true in sync.conf on a cluster whose nodes all use the same
+# public resolvers and it is added below.
 SETTINGS_KEYS=(
     dns.blockTTL dns.blocking.mode dns.blocking.edns
-    dns.blocking.active dns.rateLimit.count dns.rateLimit.interval dns.queryLogging
+    dns.rateLimit.count dns.rateLimit.interval dns.queryLogging
     dns.dnssec dns.showDNSSEC dns.domainNeeded dns.expandHosts dns.bogusPriv
     dns.piholePTR dns.domain.name dns.domain.local dns.cache.size dns.cache.optimizer
     dns.cache.upstreamBlockedTTL dns.specialDomains.mozillaCanary
@@ -192,6 +204,8 @@ current_hash() {
         [[ -f /etc/pihole-ha/sync.conf ]] && md5sum /etc/pihole-ha/sync.conf 2>/dev/null
     } | md5sum | awk '{print $1}'
 }
+
+[[ "${SYNC_UPSTREAMS:-false}" == "true" ]] && SETTINGS_KEYS+=(dns.upstreams)
 
 export_settings() {
     local first=true json="{"

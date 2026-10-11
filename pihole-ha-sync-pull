@@ -423,6 +423,14 @@ apply_settings() {
         fi
         _sval="${_sval//\\\\/\\}"
         _sval="${_sval//\\\"/\"}"
+        # Never take a pause from a peer, whatever it sends. The publisher
+        # stopped shipping dns.blocking.active, but a node still on an older
+        # version has not, and applying it here is what left a standby unfiltered
+        # for half an hour while reporting itself as deliberately paused.
+        if [[ "$_skey" == "dns.blocking.active" ]]; then
+            log_info "event=apply_skip component=settings key=$_skey reason=\"blocking pause is local runtime state, never synced\""
+            _skey=""
+        fi
         if [[ -n "$_skey" ]]; then
             if pihole-FTL --config "$_skey" "$_sval" >/dev/null 2>&1; then
                 (( _settings_applied++ )) || true

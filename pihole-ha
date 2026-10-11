@@ -96,6 +96,12 @@ HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-2}"      # per-check timeout (ping/DNS/API)
 # why this only ever bit password-protected clusters.
 AUTH_TIMEOUT="${AUTH_TIMEOUT:-10}"         # how long to allow for a password hash
 AUTH_RETRY_SEC="${AUTH_RETRY_SEC:-60}"     # after a failed auth, wait this long before trying again
+# Consecutive failed checks before the config-sync PUBLISHER role moves off a
+# node. DHCP takeover has always waited for ACTIVATE_AFTER; publishing moved on
+# the first miss, so a single blip handed the role over, and every hand-off
+# costs a build, a pull and an FTL restart on both sides -- which drops a query
+# when it lands on the node holding the VIP.
+PUBLISH_AFTER="${PUBLISH_AFTER:-3}"
 _ACTIVATE_BASE="${ACTIVATE_AFTER:-2}"      # base down-checks before a standby takes over
 STATUS_DIR="/run/pihole-ha"
 STATUS_FILE="$STATUS_DIR/status.json"
@@ -168,6 +174,7 @@ ensure_ftl_running() {
 declare -i activate_count=0 deactivate_count=0 stable_count=0
 declare -A peer_ping peer_dns peer_api peer_dhcp peer_leases peer_clients peer_auth
 declare -A peer_password peer_sid peer_auth_warned peer_auth_next peer_auth_why peer_needs_pass
+declare -A publish_fail
 _auth_conf_mtime=""   # detects a SAVE even when the value is unchanged
 
 # Load per-node Pi-hole API passwords (for password-protected instances)
@@ -1273,11 +1280,35 @@ is_alive_for_publish() {
     return 0
 }
 
+# Count consecutive publish-liveness failures per peer. Call once per cycle,
+# after the health checks and before anything reads the publisher role.
+update_publish_liveness() {
+    local ip
+    for ip in "${NODES[@]}"; do
+        if is_alive_for_publish "$ip"; then
+            publish_fail[$ip]=0
+        else
+            publish_fail[$ip]=$(( ${publish_fail[$ip]:-0} + 1 ))
+        fi
+    done
+}
+
+# Can this node still hold the publisher role? A node that has only just missed
+# a check keeps it: losing the role and getting it back costs a build and a pull
+# on both sides, so flapping it on a blip is worse than waiting out the blip.
+# Recovery is NOT debounced -- the moment a node answers again it can publish,
+# and catch_up_from_peers covers anything it missed.
+can_publish() {
+    local ip="$1"
+    is_alive_for_publish "$ip" && return 0
+    (( ${publish_fail[$ip]:-0} < PUBLISH_AFTER ))
+}
+
 # The acting sync primary is the highest-priority node that's alive to publish.
 acting_primary_ip() {
     local i
     for (( i=0; i<NODE_COUNT; i++ )); do
-        is_alive_for_publish "${NODES[$i]}" && { echo "${NODES[$i]}"; return; }
+        can_publish "${NODES[$i]}" && { echo "${NODES[$i]}"; return; }
     done
     echo ""
 }
@@ -1551,6 +1582,7 @@ while true; do
     for ip in "${NODES[@]}"; do check_peer "$ip"; done
 
     # Reconcile the config-sync publisher role (auto-promote / catch-up / yield)
+    update_publish_liveness
     manage_sync_role
 
     # STANDBY_ONLY: never take over, whatever the peers look like, in any mode.

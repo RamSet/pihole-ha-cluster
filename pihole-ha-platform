@@ -224,7 +224,7 @@ load_sync_conf() {
         [[ -z "$key" || "$key" == \#* ]] && continue
         val="${val%$'\r'}"
         case "$key" in
-            SYNC_ENABLED|SYNC_GRAVITY|SYNC_DHCP|SYNC_DNS|SYNC_SETTINGS|SYNC_NOTIFY)
+            SYNC_ENABLED|SYNC_GRAVITY|SYNC_DHCP|SYNC_DNS|SYNC_SETTINGS|SYNC_NOTIFY|SYNC_UPSTREAMS)
                 # printf -v is safe here: $key can only be one of the literals above.
                 [[ "$val" == "true" || "$val" == "false" ]] && printf -v "$key" '%s' "$val" ;;
             SYNC_INTERVAL)

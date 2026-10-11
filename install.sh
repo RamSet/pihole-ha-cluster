@@ -105,9 +105,28 @@ _auth_countdown() {   # $1=peer $2=port $3=password $4=timeout
 # instead. That is the LAN address by construction, on the interface that
 # actually carries the default route, and it is never a docker bridge.
 detect_local_ip() {
-    local _gw _ip
+    local _gw _dev _ip
     _gw="$(ip route show default 2>/dev/null | awk '/default/ {print $3; exit}')"
-    _ip="$(ip -o route get "${_gw:-1.0.0.0}" 2>/dev/null \
+    # Take the ADDRESS from the interface, not from the route lookup. `ip route
+    # get` returns a source address, and on a node holding a floating VIP that
+    # can be the VIP itself -- a keepalived VIP added as a /24 on a wider LAN is
+    # picked over the real address, and the node then records the VIP as its own
+    # identity in nodes.conf and sync.conf. Reported by sysdad, who fixed his by
+    # hand before the second node joined.
+    #
+    # Two filters, because one is not enough: the kernel flags an alias in the
+    # same subnet as "secondary" (keepalived's VIP), while a /32 VIP gets no flag
+    # at all (pihole-ha's own) and is only ever listed after the real address.
+    _dev="$(ip -o route get "${_gw:-1.0.0.0}" 2>/dev/null \
+            | sed -n 's/.*[[:space:]]dev[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' | head -1)"
+    if [[ -n "$_dev" ]]; then
+        _ip="$(ip -o -4 addr show dev "$_dev" scope global 2>/dev/null \
+               | grep -v '[[:space:]]secondary[[:space:]]' \
+               | awk '$4 !~ /\/32$/ {print $4}' | cut -d/ -f1 | head -1)"
+    fi
+    # Only then the old route-source path, for a setup where that listing gives
+    # nothing (a /32-only interface, say).
+    [[ -n "$_ip" ]] || _ip="$(ip -o route get "${_gw:-1.0.0.0}" 2>/dev/null \
            | sed -n 's/.*[[:space:]]src[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' | head -1)"
     # No default route at all: fall back to the first global IPv4 that is not on
     # a bridge/virtual interface. Filtering by interface name rather than by
@@ -402,6 +421,24 @@ subnet="$(echo "$local_ip" | cut -d. -f1-3)"
 printf "  %b Local IP:    %b%s%b\\n" "${INFO}" "${COL_BOLD}" "$local_ip" "${COL_NC}"
 printf "  %b Gateway:     %b%s%b\\n" "${INFO}" "${COL_BOLD}" "$detected_gw" "${COL_NC}"
 printf "  %b Subnet:      %b%s.0/24%b\\n" "${INFO}" "${COL_BOLD}" "$subnet" "${COL_NC}"
+printf "\\n"
+
+# This address becomes the node's identity in nodes.conf, auth.conf keys and
+# sync.conf, so it is worth a look rather than a silent guess -- a wrong one is
+# only obvious later, when every peer fails to find itself in the node list.
+read -erp "  This node's IP [$local_ip]: " input_ip
+if [[ -n "$input_ip" ]]; then
+    if is_valid_ip "$input_ip"; then
+        if ip -o -4 addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qx "$input_ip"; then
+            local_ip="$input_ip"
+        else
+            printf "  %b %bNot an address on this machine%b — using %s\\n" "${CROSS}" "${COL_YELLOW}" "${COL_NC}" "$local_ip"
+        fi
+    else
+        printf "  %b %bNot a valid IPv4 address%b — using %s\\n" "${CROSS}" "${COL_YELLOW}" "${COL_NC}" "$local_ip"
+    fi
+fi
+subnet="$(echo "$local_ip" | cut -d. -f1-3)"
 printf "\\n"
 
 # --- 4. Gateway ---
@@ -835,6 +872,25 @@ else
     fi
 fi
 
+# --- 10b. Upstream DNS (local unbound) ---
+# This used to happen silently after "Proceed with installation?", announced only
+# once it was done. It saves the original for uninstall, but repointing someone's
+# resolver is not a detail to find out about afterwards.
+set_unbound_upstream=false
+_unbound_seen=false
+if command -v unbound >/dev/null 2>&1 || command -v unbound-checkconf >/dev/null 2>&1 \
+   || ss -H -lun 2>/dev/null | grep -q ':5335[[:space:]]' || ss -H -ltn 2>/dev/null | grep -q ':5335[[:space:]]'; then
+    _unbound_seen=true
+fi
+_cur_upstream="$(pihole-FTL --config dns.upstreams 2>/dev/null)"
+if [[ "$_unbound_seen" == "true" && "$_cur_upstream" != *"127.0.0.1#5335"* ]]; then
+    printf "  %b Local unbound detected. Pi-hole currently forwards to: %b%s%b\\n" \
+        "${INFO}" "${COL_BOLD}" "${_cur_upstream:-unset}" "${COL_NC}"
+    read -erp "  Point Pi-hole's upstream DNS at it (127.0.0.1#5335)? [Y/n]: " _use_unbound
+    [[ "${_use_unbound,,}" == "n"* ]] || set_unbound_upstream=true
+    printf "\\n"
+fi
+
 # --- 11. Summary ---
 printf "\\n"
 printf "  ${COL_GREEN}╔═══════════════════════════════════════╗${COL_NC}\\n"
@@ -849,6 +905,11 @@ else
     printf "  %b VIP:        %bdisabled%b\\n" "${INFO}" "${COL_YELLOW}" "${COL_NC}"
 fi
 printf "  %b Nodes:      %b%s%b\\n" "${INFO}" "${COL_BOLD}" "$ha_nodes_str" "${COL_NC}"
+if [[ "$set_unbound_upstream" == "true" ]]; then
+    printf "  %b Upstream:   %bwill be set to local unbound (127.0.0.1#5335)%b\\n" "${INFO}" "${COL_BOLD}" "${COL_NC}"
+elif [[ "$_unbound_seen" == "true" ]]; then
+    printf "  %b Upstream:   %bleft as-is%b\\n" "${INFO}" "${COL_BOLD}" "${COL_NC}"
+fi
 if [[ "$is_primary" == "true" ]]; then
     printf "  %b Role:       %bPRIMARY — builds sync payloads%b\\n" "${INFO}" "${COL_GREEN}" "${COL_NC}"
 else
@@ -1154,13 +1215,15 @@ elif ss -H -lun 2>/dev/null | grep -q ':5335[[:space:]]' || ss -H -ltn 2>/dev/nu
     _unbound_present=true
 fi
 _upstream="$(pihole-FTL --config dns.upstreams 2>/dev/null)"
-if [[ "$_unbound_present" == "true" && "$_upstream" != *"127.0.0.1#5335"* ]]; then
+if [[ "$set_unbound_upstream" == "true" && "$_upstream" != *"127.0.0.1#5335"* ]]; then
     _save_orig DNS_UPSTREAMS "$_upstream"
     pihole-FTL --config dns.upstreams '["127.0.0.1#5335"]' >/dev/null 2>&1
     pihole-FTL --config dns.cache.size 10000 >/dev/null 2>&1
     printf "  %b Upstream DNS set to local unbound (127.0.0.1#5335)\\n" "${TICK}"
 elif [[ "$_unbound_present" != "true" ]]; then
     printf "  %b No local unbound detected; leaving Pi-hole upstream DNS unchanged\\n" "${INFO}"
+else
+    printf "  %b Leaving Pi-hole upstream DNS as you had it\\n" "${INFO}"
 fi
 
 # --- 18. Create sync config ---

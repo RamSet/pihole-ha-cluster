@@ -995,6 +995,96 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# A pause is local, and the publisher role must not move on one missed check
+# ------------------------------------------------------------
+# Reported after running v3.18.1 on two nodes (Discourse 86667 #113).
+#
+# dns.blocking.active was in the synced settings, so pausing the publisher
+# published the pause. A build inside a 5-minute pause left a standby paused for
+# half an hour -- answering ad domains with real IPs while reporting itself
+# "paused", which every filtering health check reads as healthy-by-choice.
+_sync_keys="$(cat "$SCRIPT_DIR/../pihole-ha-sync")"
+assert_not_contains "a pause is not a synced setting" \
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha-sync" export_settings)$(sed -n '/^SETTINGS_KEYS=(/,/^)/p' "$SCRIPT_DIR/../pihole-ha-sync")" \
+    "dns.blocking.active"
+# And a node on an older version will still send one, so refuse it on arrival.
+assert_contains "an arriving pause is refused, whoever sent it" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")" '"$_skey" == "dns.blocking.active"'
+# Upstreams stay out by default -- a node resolving through its own unbound must
+# not be pointed at an unbound it does not have -- but can be opted in.
+assert_not_contains "upstreams are not synced by default" \
+    "$(sed -n '/^SETTINGS_KEYS=(/,/^)/p' "$SCRIPT_DIR/../pihole-ha-sync")" "dns.upstreams"
+assert_contains "upstreams can be opted into"  "$_sync_keys" 'SYNC_UPSTREAMS:-false'
+assert_contains "the opt-in adds the key"      "$_sync_keys" 'SETTINGS_KEYS+=(dns.upstreams)'
+# A key the loader does not know is silently ignored, which is worse than an error.
+assert_contains "the loader accepts the new toggle" \
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha-platform" load_sync_conf)" "SYNC_UPSTREAMS"
+
+# The publisher role moved on the first missed check, and each hand-off costs a
+# build, a pull and an FTL restart on both sides -- a dropped query when it lands
+# on the node holding the VIP.
+_pub_probe() {   # $1 fails recorded, $2 currently alive (yes/no)
+    P_FAILS="$1" P_ALIVE="$2" bash -c '
+        PUBLISH_AFTER=3
+        declare -A publish_fail
+        publish_fail[10.0.0.2]="$P_FAILS"
+        is_alive_for_publish() { [[ "$P_ALIVE" == yes ]]; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" can_publish)"'
+        can_publish 10.0.0.2 && echo KEEPS || echo DROPS
+    '
+}
+assert_eq "a single missed check does not move the publisher" "KEEPS" "$(_pub_probe 1 no)"
+assert_eq "two missed checks still do not"                    "KEEPS" "$(_pub_probe 2 no)"
+assert_eq "the third consecutive miss does"                   "DROPS" "$(_pub_probe 3 no)"
+assert_eq "a node that answers again can publish at once"     "KEEPS" "$(_pub_probe 9 yes)"
+assert_contains "the role election uses the debounced view" \
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha" acting_primary_ip)" "can_publish"
+assert_contains "the counter is updated once per cycle" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha")" "update_publish_liveness"
+assert_contains "recovery resets the counter" \
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha" update_publish_liveness)" 'publish_fail[$ip]=0'
+
+# A node's identity must never be taken from a floating VIP: it lands in
+# nodes.conf, auth.conf's keys and sync.conf, and the node then fails to find
+# itself in its own cluster. The route source address is exactly what a VIP
+# holder answers with, so these all feed it a VIP and expect the real address.
+_ip_detect() {   # $1 = `ip -o -4 addr show` output
+    ADDRS="$1" bash -c '
+        ip() {
+            case "$*" in
+                *"route show default"*) echo "default via 10.0.0.1 dev eth0 proto static" ;;
+                *"route get"*)          echo "10.0.0.1 dev eth0 src 10.0.4.1 uid 0" ;;
+                *"addr show"*)          printf "%s\n" "$ADDRS" ;;
+            esac
+        }
+        '"$(sed -n '/^detect_local_ip()/,/^}/p' "$SCRIPT_DIR/../install.sh")"'
+        detect_local_ip
+    '
+}
+assert_eq "a /32 VIP is not taken as this node's address" "10.0.4.7" \
+    "$(_ip_detect '2: eth0    inet 10.0.4.7/24 brd 10.0.4.255 scope global eth0
+2: eth0    inet 10.0.4.1/32 scope global eth0')"
+# keepalived's VIP: same LAN, narrower prefix, no kernel flag. Order carries it.
+assert_eq "a same-LAN keepalived VIP is not taken either" "10.0.4.7" \
+    "$(_ip_detect '2: eth0    inet 10.0.4.7/22 brd 10.0.7.255 scope global eth0
+2: eth0    inet 10.0.4.1/24 scope global eth0')"
+# ...and when it is listed first, the kernel's own "secondary" flag carries it.
+assert_eq "a secondary-flagged VIP listed first is skipped" "10.0.4.7" \
+    "$(_ip_detect '2: eth0    inet 10.0.4.1/24 scope global secondary eth0:vip
+2: eth0    inet 10.0.4.7/22 brd 10.0.7.255 scope global eth0')"
+# A node whose only address is a /32 really does have that address.
+assert_eq "a /32-only interface still yields an address" "10.0.4.1" \
+    "$(_ip_detect '2: eth0    inet 10.0.4.1/32 scope global eth0')"
+
+_inst="$(cat "$SCRIPT_DIR/../install.sh")"
+assert_contains "the detected node IP is offered for correction" "$_inst" "This node's IP ["
+assert_contains "a corrected IP must exist on this machine"      "$_inst" "Not an address on this machine"
+# Repointing someone's resolver is not a thing to report after doing it.
+assert_contains "the unbound switch is asked, not assumed"  "$_inst" "Point Pi-hole's upstream DNS at it"
+assert_contains "the summary says what will happen to upstream" "$_inst" "will be set to local unbound"
+assert_contains "declining is honoured"                      "$_inst" 'set_unbound_upstream" == "true"'
+
+# ============================================================
 # A blocklist that blocks nothing must not spread, and must be noticed
 # ------------------------------------------------------------
 # Every check on a payload asks whether the FILE arrived intact: signature,

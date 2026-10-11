@@ -173,6 +173,7 @@ Nodes in `HA_NODES` can optionally include a `:PORT` suffix for the Pi-hole web 
 | `HEALTH_TIMEOUT` | seconds | `2` | Per-check timeout for ping / DNS:53 / API, and for the blocking canary's lookups |
 | `STANDBY_ONLY` | bool | `false` | This node never takes over DHCP or the VIP, whatever the peers look like, in every mode including DNS-only. Releases both if it already holds them. Re-read every round, so it can be set or lifted without a restart — use it to bring a node up quietly, or to calm a cluster that is already fighting. The installer sets it automatically on a node that could not register with the cluster |
 | `AUTH_TIMEOUT` | seconds | `10` | How long to allow for a peer login. Pi-hole hashes the app password deliberately slowly, so a 1-core Pi can need well over 5s. Raise this if the log reports a login timeout |
+| `PUBLISH_AFTER` | integer | `3` | Consecutive failed checks before the config-sync publisher role moves off a node. DHCP takeover has always debounced with `ACTIVATE_AFTER`; publishing moved on the first miss, and every hand-off costs a build, a pull and an FTL restart on both sides — which drops a query when it lands on the node holding the VIP. Recovery is not debounced: a node that answers again can publish immediately |
 | `AUTH_RETRY_SEC` | seconds | `60` | How long to wait before retrying a peer login that failed. Stops a bad or slow login re-hashing the password every `CHECK_INTERVAL` |
 | `HA_NODES` | CSV | *(required)* | Node IPs in priority order. Format: `IP` or `IP:PORT` |
 
@@ -220,6 +221,12 @@ Two scripts handle config distribution:
   - **FTL settings**: applies DNS, blocking, cache, and misc settings via `pihole-FTL --config`
 
   Array-valued keys (`dns.hosts`, `dhcp.hosts`, `dns.cnameRecords`, `dns.revServers`) are carried as their own JSON file in the payload, because FTL prints an array as `[ a, b ]` but only accepts `["a","b"]` back — a raw round-trip is rejected. An empty list is never applied, so sync can't wipe records that exist only on the standby.
+
+**What is deliberately *not* synced:**
+
+- **`dns.blocking.active`** — pausing blocking is a runtime switch, not config. It used to be synced, so a build that fired during a pause on the publisher published the pause: a standby could sit paused for half an hour, answering ad domains with real IPs while reporting itself as "paused", which a filtering health check reads as healthy-by-choice. An arriving pause is now refused as well, so a node still on an older version can't spread one. A node left paused by that path stays paused until someone resumes it (`pihole enable`).
+- **`dns.upstreams`** — a node resolving through its own local unbound must not be pointed at an unbound it doesn't have. Set `SYNC_UPSTREAMS=true` in `sync.conf` on a cluster whose nodes all use the same public resolvers, and the upstream list travels with the other FTL settings.
+- **Per-node identity and paths** — `HA_NODES` order is converged separately (see the priority order), and `SYNC_BLOB_DIR` is per-node by design.
 
 Sync is entirely over HTTP on port 8887. No SSH keys, no rsync, no shared filesystem.
 
