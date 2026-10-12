@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.1 — 2026-10-12
+- Stop when asked, and stop restarting FTL for settings that did not change
+
 ## v3.19.0 — 2026-10-10
 - Keep a pause local, and stop the publisher role moving on one missed check
 - Document the blocking checks that shipped in 3.18
