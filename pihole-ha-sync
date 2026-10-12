@@ -108,40 +108,8 @@ if [[ "$LOCAL_IP" != "$SYNC_PRIMARY" ]]; then
     exit 0
 fi
 
-# Convert pihole-FTL TOML-style array output to JSON for re-import
-# FTL outputs: [ val1, val2, val3 ]  (unquoted)
-# FTL expects: ["val1","val2","val3"]  (JSON)
-ftl_to_json() {
-    local input
-    input="$(cat)"
-    [[ "$input" == "[]" || -z "$input" ]] && echo "[]" && return
-    # Convert pihole-FTL's "[ a, b, c ]" list into a JSON array. Entries are
-    # grouped so a bare MAC that leads a multi-field record stays attached to it,
-    # and backslashes/quotes are escaped — robust against hostnames or values
-    # that contain commas.
-    awk -v s="$input" '
-    BEGIN {
-        sub(/^\[ /, "", s); sub(/ \]$/, "", s)
-        n = split(s, p, ", ")
-        out = "["; first = 1; pending = ""
-        for (i = 1; i <= n; i++) {
-            if (p[i] ~ /^[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]$/) {
-                pending = (pending == "") ? p[i] : pending ", " p[i]
-                continue
-            }
-            entry = (pending == "") ? p[i] : pending ", " p[i]
-            pending = ""
-            gsub(/\\/, "\\\\", entry); gsub(/"/, "\\\"", entry)
-            out = out (first ? "" : ",") "\"" entry "\""
-            first = 0
-        }
-        if (pending != "") {
-            gsub(/\\/, "\\\\", pending); gsub(/"/, "\\\"", pending)
-            out = out (first ? "" : ",") "\"" pending "\""
-        }
-        print out "]"
-    }'
-}
+# ftl_to_json lives in pihole-ha-platform: the puller compares against its
+# output to decide whether an array needs writing at all, so one copy only.
 
 # Compute current config fingerprint (only enabled components)
 # SCALAR-VALUED KEYS ONLY. Array-valued keys must never be listed here: FTL

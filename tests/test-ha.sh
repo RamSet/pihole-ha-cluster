@@ -995,6 +995,60 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# An unchanged list must not restart FTL either
+# ------------------------------------------------------------
+# The compare-before-write added for the scalar settings missed the
+# array-valued keys: dns.hosts, dns.cnameRecords, dhcp.hosts and dns.revServers
+# were still written unconditionally, each setting HOSTS_APPLIED, which is
+# enough to restart FTL at the end of the pull. So on any cluster with local DNS
+# records every applied pull still restarted FTL -- ~10s unfiltered on the node
+# holding the VIP (Discourse 86667 #120: the fix was half a fix).
+_array_probe() {   # $1 key, $2 file, $3 label, $4 what FTL already holds (display form)
+    local dir; dir="$(mktemp -d)"
+    printf '["1.2.3.4 host.lan"]' > "$dir/$2"
+    P_CUR="$4" STAGING_DIR="$dir" P_KEY="$1" P_LABEL="$3" bash -c '
+        source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
+        COMP_DNS=true; COMP_DHCP=true; COMP_SETTINGS=true
+        HOSTS_APPLIED=false; APPLIED_SOMETHING=false; APPLY_FAILED=false
+        log_info() { echo "INFO $*"; }; log_warn() { echo "WARN $*"; }
+        pihole-FTL() { [[ $# -eq 2 ]] && printf "%s" "$P_CUR"; return 0; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha-sync-pull" _json_is_empty)"'
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha-sync-pull" _array_is_current)"'
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha-sync-pull" apply_dns_hosts)"'
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha-sync-pull" apply_dhcp_hosts)"'
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha-sync-pull" apply_array_key)"'
+        case "$P_LABEL" in
+            dns_hosts)  apply_dns_hosts ;;
+            dhcp_hosts) apply_dhcp_hosts ;;
+            *)          apply_array_key true "$P_KEY" '"$2"' "$P_LABEL" ;;
+        esac
+        echo "restart_needed=$HOSTS_APPLIED"
+    '
+    rm -rf "$dir"
+}
+for _case in "dns.hosts:dns-hosts.json:dns_hosts" "dhcp.hosts:dhcp-hosts.json:dhcp_hosts" "dns.cnameRecords:dns-cnames.json:dns_cnames"; do
+    IFS=: read -r _k _f _l <<< "$_case"
+    _same="$(_array_probe "$_k" "$_f" "$_l" '[ 1.2.3.4 host.lan ]')"
+    assert_contains "$_l identical to ours is not rewritten" "$_same" "status=unchanged"
+    assert_contains "$_l unchanged does not restart FTL"     "$_same" "restart_needed=false"
+    _diff="$(_array_probe "$_k" "$_f" "$_l" '[ 9.9.9.9 other.lan ]')"
+    assert_contains "$_l that differs is applied"            "$_diff" "status=ok"
+    assert_contains "$_l that differs does restart FTL"      "$_diff" "restart_needed=true"
+done
+
+# The comparison only works because it goes through the same converter the
+# publisher built the payload with, so there is exactly one of those.
+assert_eq "the array converter is defined once, in the shared library" "1" \
+    "$(grep -c '^ftl_to_json() {' "$SCRIPT_DIR/../pihole-ha-platform" "$SCRIPT_DIR/../pihole-ha-sync" "$SCRIPT_DIR/../pihole-ha-sync-pull" | awk -F: '{t+=$2} END {print t}')"
+assert_contains "the puller compares through it" \
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha-sync-pull" _array_is_current)" "ftl_to_json"
+# The hard case is a MAC-led reservation: commas inside the record must not split
+# it, or the comparison never matches and every pull writes.
+assert_eq "a MAC-led reservation round-trips exactly" \
+    '["00:08:9B:E8:50:62,10.33.47.2,QNAP","1.2.3.4 host.lan"]' \
+    "$(bash -c 'source "'"$SCRIPT_DIR"'/../pihole-ha-platform"; printf "%s" "[ 00:08:9B:E8:50:62,10.33.47.2,QNAP, 1.2.3.4 host.lan ]" | ftl_to_json')"
+
+# ============================================================
 # Stopping must stop, and an unchanged setting must not restart FTL
 # ------------------------------------------------------------
 # Both reported after a 3.19.0 upgrade on a live pair (Discourse 86667 #118).

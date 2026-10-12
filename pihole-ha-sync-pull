@@ -341,11 +341,28 @@ _json_is_empty() { local s="${1//[[:space:]]/}"; [[ -z "$s" || "$s" == "[]" ]]; 
 # copy on shutdown and silently clobbers the fresh CLI write, reverting the
 # value. Defined as functions here and invoked in the post-restart phase.
 HOSTS_APPLIED=false
+# True when FTL already holds exactly this array.
+#
+# FTL prints an array in its own display form ("[ a, b ]") and accepts only JSON
+# back, so the comparison has to go through the same conversion the publisher
+# used to build the payload -- comparing against the raw display form would
+# never match and every pull would write. Entries in a different ORDER are not
+# equal here, and writing then is right: it aligns the order too.
+_array_is_current() {   # $1 = FTL key, $2 = wanted JSON
+    [[ "$(pihole-FTL --config "$1" 2>/dev/null | ftl_to_json)" == "$2" ]]
+}
+
 apply_dhcp_hosts() {
     [[ "$COMP_DHCP" == "true" && -f "$STAGING_DIR/dhcp-hosts.json" ]] || return 0
     local _v; _v="$(cat "$STAGING_DIR/dhcp-hosts.json")"
     if _json_is_empty "$_v"; then
         log_warn "event=apply_skip component=dhcp_hosts reason=\"refusing to apply an empty reservation list — keeping local\""
+        return 0
+    fi
+    if _array_is_current dhcp.hosts "$_v"; then
+        # Writing an identical list still restarted FTL, and on the node holding
+        # the VIP that is ~10s of answering unfiltered while gravity reloads.
+        log_info "event=apply component=dhcp_hosts status=unchanged"
         return 0
     fi
     if pihole-FTL --config dhcp.hosts "$_v" >/dev/null 2>&1; then
@@ -360,6 +377,10 @@ apply_dns_hosts() {
     local _v; _v="$(cat "$STAGING_DIR/dns-hosts.json")"
     if _json_is_empty "$_v"; then
         log_warn "event=apply_skip component=dns_hosts reason=\"refusing to apply an empty custom-DNS list — keeping local\""
+        return 0
+    fi
+    if _array_is_current dns.hosts "$_v"; then
+        log_info "event=apply component=dns_hosts status=unchanged"
         return 0
     fi
     if pihole-FTL --config dns.hosts "$_v" >/dev/null 2>&1; then
@@ -382,6 +403,10 @@ apply_array_key() {
     local _v; _v="$(cat "$STAGING_DIR/$_file")"
     if _json_is_empty "$_v"; then
         log_warn "event=apply_skip component=$_label reason=\"refusing to apply an empty list — keeping local\""
+        return 0
+    fi
+    if _array_is_current "$_key" "$_v"; then
+        log_info "event=apply component=$_label status=unchanged"
         return 0
     fi
     if pihole-FTL --config "$_key" "$_v" >/dev/null 2>&1; then
