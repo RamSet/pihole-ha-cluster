@@ -995,6 +995,114 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# Stopping must stop, and an unchanged setting must not restart FTL
+# ------------------------------------------------------------
+# Both reported after a 3.19.0 upgrade on a live pair (Discourse 86667 #118).
+#
+# A trap on TERM runs the handler and then CARRIES ON -- bash does not exit for
+# you -- so the daemon kept looping after systemd asked it to stop and was
+# SIGKILLed when TimeoutStopSec expired. Measured on a real node: 90s and
+# "Failed with result 'timeout'" on every update and reboot, 0s after the fix.
+# The loop's sleep has to be interruptible too, or the handler waits it out.
+_term_probe() {
+    local dir; dir="$(mktemp -d)"
+    {
+        echo '#!/bin/bash'
+        echo 'CHECK_INTERVAL=30'
+        echo "_shutdown_release() { echo released >> $dir/ran; }"
+        # the real trap lines and the real sleep, lifted from the daemon
+        sed -n '/^_shutdown_done=false$/,/^trap ._shutdown_once; exit 0. INT TERM$/p' "$SCRIPT_DIR/../pihole-ha"
+        echo 'while true; do'
+        sed -n '/^    sleep "\$CHECK_INTERVAL" &$/,/^    wait \$! 2>\/dev\/null || true$/p' "$SCRIPT_DIR/../pihole-ha"
+        echo 'done'
+    } > "$dir/loop.sh"
+    chmod +x "$dir/loop.sh"
+    # If the daemon's trap or sleep lines ever move, this probe would build an
+    # empty loop and pass without testing anything.
+    if ! grep -q 'wait \$!' "$dir/loop.sh" || ! grep -q '_shutdown_once' "$dir/loop.sh"; then
+        rm -rf "$dir"; echo "PROBE DID NOT FIND THE LOOP"; return 0
+    fi
+    "$dir/loop.sh" & local pid=$!
+    sleep 0.5
+    local start; start="$(date +%s)"
+    kill -TERM "$pid" 2>/dev/null
+    local waited=0
+    while kill -0 "$pid" 2>/dev/null && (( waited < 10 )); do sleep 0.5; waited=$(( waited + 1 )); done
+    local took=$(( $(date +%s) - start ))
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null
+        echo "STILL RUNNING after ${took}s"
+    else
+        # Promptly = well inside the 30s sleep this loop is sitting in, which is
+        # the thing that used to hold the signal.
+        (( took < 5 )) && echo -n "exited promptly (${took}s), " || echo -n "exited LATE (${took}s), "
+        echo "handler ran $(grep -c released "$dir/ran" 2>/dev/null || echo 0) time(s)"
+    fi
+    rm -rf "$dir"
+}
+_term_result="$(_term_probe)"
+assert_contains "SIGTERM during the sleep stops the daemon" "$_term_result" "exited"
+assert_contains "and it stops without waiting out the interval" "$_term_result" "exited promptly"
+# EXIT fires too when the handler exits, so the release must be idempotent or it
+# runs twice and logs a VIP release twice on every stop.
+assert_contains "the shutdown release runs exactly once" "$_term_result" "handler ran 1 time(s)"
+
+# Settings were written unconditionally on every pull, and writing anything at
+# all restarts FTL -- so a payload whose settings already matched still cost a
+# restart, which on the VIP holder is ~10s of answering unfiltered while gravity
+# reloads. It also made any change to the synced KEY SET look like a config
+# change on every node at once.
+_settings_probe() {   # $1 = value this node already has
+    local dir; dir="$(mktemp -d)"
+    printf '{"dns.blockTTL":"2"}' > "$dir/settings.json"
+    P_CUR="$1" STAGING_DIR="$dir" bash -c '
+        COMP_SETTINGS=true
+        log_info() { echo "INFO $*"; }; log_warn() { :; }; log_error() { echo "ERROR $*"; }
+        pihole-FTL() {
+            # read: report what this node holds; write: succeed
+            [[ $# -eq 2 ]] && { printf "%s" "$P_CUR"; return 0; }
+            return 0
+        }
+        SETTINGS_APPLIED=false; APPLIED_SOMETHING=false; APPLY_FAILED=false
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha-sync-pull" apply_settings)"'
+        apply_settings
+        echo "restart_needed=$SETTINGS_APPLIED"
+    '
+    rm -rf "$dir"
+}
+assert_contains "settings identical to ours are not rewritten" \
+    "$(_settings_probe 2)" "status=unchanged"
+assert_contains "and nothing identical triggers an FTL restart" \
+    "$(_settings_probe 2)" "restart_needed=false"
+assert_contains "a genuinely different setting is applied" \
+    "$(_settings_probe 999)" "status=ok"
+assert_contains "and that one does restart FTL" \
+    "$(_settings_probe 999)" "restart_needed=true"
+
+# FTL answers before it has finished loading gravity, so a node that just
+# restarted is briefly not blocking. Reporting that as broken notifies on every
+# sync that swaps the blocklist.
+_age_probe() {   # $1 = seconds since pihole-FTL started
+    P_AGE="$1" bash -c '
+        source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
+        pihole-FTL() {
+            case "$*" in
+                *"dns.blocking.active"*) printf "true" ;;
+                *g.domain*)              printf "a.test\nb.test\nc.test\n" ;;
+                *"count(*) FROM adlist_by_group"*) printf "32" ;;
+                *"FROM adlist WHERE"*)   printf "17" ;;
+            esac
+        }
+        pgrep() { echo 4242; }
+        ps() { printf "%s\n" "$P_AGE"; }
+        ip() { printf "1: lo inet 127.0.0.1/8 scope host lo\n"; }
+        dig() { printf "93.184.1.1\n"; }   # every canary domain resolves: broken
+        blocking_canary /dev/null
+    '
+}
+assert_eq "a node whose FTL just restarted is not called broken" "unknown" "$(_age_probe 5)"
+assert_contains "once FTL has settled the verdict stands" "$(_age_probe 600)" "broken:"
+# ============================================================
 # A pause is local, and the publisher role must not move on one missed check
 # ------------------------------------------------------------
 # Reported after running v3.18.1 on two nodes (Discourse 86667 #113).
@@ -2105,7 +2213,10 @@ _pullsrc2="$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")"
 # goes away. A stop, a `pihole-ha update` or a crash left it bound with no
 # process managing it, and another node then claimed the same address.
 assert_contains "shutdown releases the VIP"        "$_hasrc2" "event=shutdown_release_vip"
-assert_contains "the trap runs the full release"   "$_hasrc2" "trap '_shutdown_release' EXIT INT TERM"
+assert_contains "the release is wired to EXIT"      "$_hasrc2" "trap '_shutdown_once' EXIT"
+# INT/TERM must EXIT after releasing, not fall back into the loop: that is what
+# left systemd waiting out its stop timeout and SIGKILLing the daemon.
+assert_contains "and INT/TERM exit after releasing"  "$_hasrc2" "trap '_shutdown_once; exit 0' INT TERM"
 # DHCP must NOT be dropped on shutdown: dhcp.active outlives this process, and a
 # node that is legitimately the DHCP server should survive a daemon restart.
 assert_not_contains "shutdown does not disable DHCP" "$_hasrc2" '_shutdown_release() {

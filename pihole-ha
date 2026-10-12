@@ -748,7 +748,20 @@ _shutdown_release() {
 # It cannot cover the startup checks that exit above this line — the handler
 # calls has_vip/remove_vip, which are not defined yet at that point. A VIP left
 # over from a previous process is instead reconciled by the loop's own election.
-trap '_shutdown_release' EXIT INT TERM
+# Run once, whichever signal gets here first: INT/TERM call this and then exit,
+# which fires the EXIT trap as well.
+_shutdown_done=false
+_shutdown_once() {
+    [[ "$_shutdown_done" == "true" ]] && return 0
+    _shutdown_done=true
+    _shutdown_release
+}
+# A trap on TERM runs the handler and then CARRIES ON: bash does not exit for
+# you. So the daemon kept looping after systemd asked it to stop, and systemd
+# killed it when TimeoutStopSec ran out -- 90s of "stopping" on every update and
+# reboot, reported after a 3.19.0 upgrade. Exit explicitly.
+trap '_shutdown_once' EXIT
+trap '_shutdown_once; exit 0' INT TERM
 
 # Does this peer's Pi-hole require a password RIGHT NOW?
 #
@@ -1558,7 +1571,11 @@ else
 fi
 
 while true; do
-    sleep "$CHECK_INTERVAL"
+    # Backgrounded sleep + wait, so a signal is acted on now rather than after
+    # the sleep returns. A foreground `sleep 60` holds the trap for up to a
+    # minute, which is most of what made stopping look hung.
+    sleep "$CHECK_INTERVAL" &
+    wait $! 2>/dev/null || true
     load_auth         # reload passwords in case user saved new ones via web UI
     # Re-read STANDBY_ONLY each round so it can be set or lifted without a restart —
     # the point of it is to calm a cluster that is already misbehaving.

@@ -222,6 +222,14 @@ Two scripts handle config distribution:
 
   Array-valued keys (`dns.hosts`, `dhcp.hosts`, `dns.cnameRecords`, `dns.revServers`) are carried as their own JSON file in the payload, because FTL prints an array as `[ a, b ]` but only accepts `["a","b"]` back — a raw round-trip is rejected. An empty list is never applied, so sync can't wipe records that exist only on the standby.
 
+**Settings are compared before they are written.** A pull reads each key's
+current value and skips the ones that already match, so a payload whose settings
+are identical costs no write and no FTL restart. This matters beyond the obvious:
+changing which keys are synced moves the bundle hash, so without the comparison
+the first build after such an upgrade looked like new config on every node and
+restarted FTL everywhere — about 10 seconds of answering unfiltered on whichever
+node holds the VIP, while gravity reloads.
+
 **What is deliberately *not* synced:**
 
 - **`dns.blocking.active`** — pausing blocking is a runtime switch, not config. It used to be synced, so a build that fired during a pause on the publisher published the pause: a standby could sit paused for half an hour, answering ad domains with real IPs while reporting itself as "paused", which a filtering health check reads as healthy-by-choice. An arriving pause is now refused as well, so a node still on an older version can't spread one. A node left paused by that path stays paused until someone resumes it (`pihole enable`).

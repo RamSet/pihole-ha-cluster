@@ -125,6 +125,17 @@ blocking_canary() {
     # Switching blocking off is a choice, not a fault. A pause reads false here;
     # a wiped database still reads true, so this cannot mask the real thing.
     [[ "$(pihole-FTL --config dns.blocking.active 2>/dev/null)" == "false" ]] && { printf 'paused'; return 0; }
+    # FTL answers queries before it has finished loading gravity -- about 10s on
+    # a Pi 4, longer on slower hardware -- so a node that has just restarted
+    # genuinely is not blocking yet, and saying so notifies on every sync that
+    # swaps the blocklist. Wait for it to settle instead of reporting a
+    # transient as a fault.
+    local _ftl_pid _ftl_age
+    _ftl_pid="$(pgrep -x pihole-FTL 2>/dev/null | head -1)"
+    if [[ -n "$_ftl_pid" ]]; then
+        _ftl_age="$(ps -o etimes= -p "$_ftl_pid" 2>/dev/null | tr -d ' ')"
+        [[ "$_ftl_age" =~ ^[0-9]+$ ]] && (( _ftl_age < 60 )) && { printf 'unknown'; return 0; }
+    fi
     # Which groups apply to the address we query from. An unassigned client is in
     # the default group, which is also the answer when these tables are empty.
     local groups

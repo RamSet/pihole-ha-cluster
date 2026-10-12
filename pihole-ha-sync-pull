@@ -400,7 +400,7 @@ apply_array_key() {
 SETTINGS_APPLIED=false
 apply_settings() {
     [[ "$COMP_SETTINGS" == "true" && -f "$STAGING_DIR/settings.json" ]] || return 0
-    local _settings_applied=0 _settings_failed=0 _sjson _skey _sval _rest
+    local _settings_applied=0 _settings_failed=0 _settings_same=0 _sjson _skey _sval _rest
     _sjson="$(cat "$STAGING_DIR/settings.json")"
     _sjson="${_sjson#\{}"
     _sjson="${_sjson%\}}"
@@ -432,7 +432,18 @@ apply_settings() {
             _skey=""
         fi
         if [[ -n "$_skey" ]]; then
-            if pihole-FTL --config "$_skey" "$_sval" >/dev/null 2>&1; then
+            # Compare before writing. Every key used to be written on every
+            # pull, and writing anything at all restarts FTL below -- so a
+            # payload whose settings are identical to ours still cost a restart,
+            # and on the node holding the VIP that is ~10s of answering
+            # unfiltered while gravity reloads. It also made any change to the
+            # SYNCED KEY SET look like a config change on every node at once:
+            # dropping dns.blocking.active in 3.19.0 moved the bundle hash, so
+            # the first build after upgrading pulled and restarted everywhere
+            # (reported by sysdad, who caught his VIP node unfiltered for 10s).
+            if [[ "$(pihole-FTL --config "$_skey" 2>/dev/null)" == "$_sval" ]]; then
+                (( _settings_same++ )) || true
+            elif pihole-FTL --config "$_skey" "$_sval" >/dev/null 2>&1; then
                 (( _settings_applied++ )) || true
             else
                 (( _settings_failed++ )) || true
@@ -443,10 +454,14 @@ apply_settings() {
     # status=ok was unconditional: every key could fail and the run still
     # reported success and recorded the hash, so it never retried.
     if (( _settings_failed > 0 )); then
-        log_error "event=apply component=settings status=partial keys=$_settings_applied failed=$_settings_failed"
+        log_error "event=apply component=settings status=partial keys=$_settings_applied unchanged=$_settings_same failed=$_settings_failed"
         APPLY_FAILED=true
+    elif (( _settings_applied == 0 )); then
+        # Nothing differed: no write, so nothing to restart for.
+        log_info "event=apply component=settings status=unchanged keys=$_settings_same"
+        return 0
     else
-        log_info "event=apply component=settings status=ok keys=$_settings_applied"
+        log_info "event=apply component=settings status=ok keys=$_settings_applied unchanged=$_settings_same"
     fi
     APPLIED_SOMETHING=true
     SETTINGS_APPLIED=true
