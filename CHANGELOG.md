@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.3 — 2026-10-13
+- Ship synced upstreams as JSON, and stop ignoring a mistyped sync toggle
+
 ## v3.19.2 — 2026-10-12
 - Compare the synced lists too, not just the scalar settings
 
