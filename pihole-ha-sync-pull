@@ -620,6 +620,9 @@ apply_dns_hosts
 apply_array_key "$COMP_DNS" dns.cnameRecords dns-cnames.json dns_cnames
 apply_settings
 apply_array_key "$COMP_SETTINGS" dns.revServers dns-revservers.json dns_revservers
+# Gated by the file's presence, not a component flag: a publisher that has not
+# opted in simply does not ship it, and an older one has never heard of it.
+apply_array_key true dns.upstreams dns-upstreams.json dns_upstreams
 
 # Restart FTL after settings apply so the running daemon (and admin UI)
 # reflects the new values. pihole-FTL --config writes to pihole.toml but

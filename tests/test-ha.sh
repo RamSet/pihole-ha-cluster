@@ -1176,8 +1176,39 @@ assert_contains "an arriving pause is refused, whoever sent it" \
 # not be pointed at an unbound it does not have -- but can be opted in.
 assert_not_contains "upstreams are not synced by default" \
     "$(sed -n '/^SETTINGS_KEYS=(/,/^)/p' "$SCRIPT_DIR/../pihole-ha-sync")" "dns.upstreams"
-assert_contains "upstreams can be opted into"  "$_sync_keys" 'SYNC_UPSTREAMS:-false'
-assert_contains "the opt-in adds the key"      "$_sync_keys" 'SETTINGS_KEYS+=(dns.upstreams)'
+# The opt-in ships upstreams as their own JSON file, NOT through the scalar
+# settings: FTL prints an array as "[ a, b ]" and parses a written one as JSON
+# (src/config/cli.c), so a value taken from the settings list is refused by
+# every standby. Confirmed against live FTL: writing back its own display form
+# exits 2, writing the JSON form is accepted. That is what 3.19.0 shipped, and
+# why a reporter saw his secondaries keep the old list.
+assert_contains "upstreams are staged as their own JSON file" "$_sync_keys" 'ftl_to_json > "$STAGING_DIR/dns-upstreams.json"'
+assert_contains "and only when the cluster opted in"          "$_sync_keys" '[[ "$SYNC_UPSTREAMS" == "true" ]]'
+assert_contains "a change to them triggers a build"           "$_sync_keys" '"$SYNC_UPSTREAMS" == "true" ]] && pihole-FTL --config dns.upstreams'
+assert_not_contains "upstreams never ride in the scalar settings" "$_sync_keys" 'SETTINGS_KEYS+=(dns.upstreams)'
+assert_contains "the standby applies them as an array" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")" "apply_array_key true dns.upstreams dns-upstreams.json"
+# apply_array_key refuses an empty list, so sync can never leave a node with no
+# resolvers at all.
+assert_contains "an empty upstream list is refused like the other arrays" \
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha-sync-pull" apply_array_key)" "_json_is_empty"
+
+# A mistyped toggle used to sit in sync.conf doing nothing at all.
+_typo_probe() {
+    local conf; conf="$(mktemp)"
+    printf 'SYNC_ENABLED=true
+SYNC_UPTREAMS=true
+' > "$conf"
+    P_CONF="$conf" bash -c '
+        source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
+        log_warn() { echo "WARN $*"; }
+        load_sync_conf "$P_CONF"
+        echo "enabled=$SYNC_ENABLED upstreams=${SYNC_UPSTREAMS:-unset}"
+    '
+    rm -f "$conf"
+}
+assert_contains "a mistyped sync toggle is reported" "$(_typo_probe)" "sync_conf_unknown_key key=SYNC_UPTREAMS"
+assert_contains "and the rest of the file still loads" "$(_typo_probe)" "enabled=true"
 # A key the loader does not know is silently ignored, which is worse than an error.
 assert_contains "the loader accepts the new toggle" \
     "$(extract_fn "$SCRIPT_DIR/../pihole-ha-platform" load_sync_conf)" "SYNC_UPSTREAMS"

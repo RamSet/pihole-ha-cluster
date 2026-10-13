@@ -282,6 +282,12 @@ load_sync_conf() {
                 [[ "$val" =~ ^[0-9]+$ ]] && (( 10#$val >= 1 && 10#$val <= 1440 )) && SYNC_INTERVAL="$((10#$val))" ;;
             SYNC_PRIMARY)
                 is_valid_ip "$val" && SYNC_PRIMARY="$val" ;;
+            SYNC_*)
+                # Unknown SYNC_ key: almost always a typo (SYNC_UPTREAMS for
+                # SYNC_UPSTREAMS, reported on the forum), and silently ignoring
+                # it leaves someone waiting for a feature they did switch on.
+                command -v log_warn >/dev/null 2>&1 && \
+                    log_warn "event=sync_conf_unknown_key key=$key reason=\"not a setting this version knows — check the spelling; it is being ignored\"" ;;
         esac
     done < "$conf"
 }

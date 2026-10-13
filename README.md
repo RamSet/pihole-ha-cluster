@@ -233,7 +233,7 @@ node holds the VIP, while gravity reloads.
 **What is deliberately *not* synced:**
 
 - **`dns.blocking.active`** — pausing blocking is a runtime switch, not config. It used to be synced, so a build that fired during a pause on the publisher published the pause: a standby could sit paused for half an hour, answering ad domains with real IPs while reporting itself as "paused", which a filtering health check reads as healthy-by-choice. An arriving pause is now refused as well, so a node still on an older version can't spread one. A node left paused by that path stays paused until someone resumes it (`pihole enable`).
-- **`dns.upstreams`** — a node resolving through its own local unbound must not be pointed at an unbound it doesn't have. Set `SYNC_UPSTREAMS=true` in `sync.conf` on a cluster whose nodes all use the same public resolvers, and the upstream list travels with the other FTL settings.
+- **`dns.upstreams`** — a node resolving through its own local unbound must not be pointed at an unbound it doesn't have. Set `SYNC_UPSTREAMS=true` in `sync.conf` on a cluster whose nodes all use the same public resolvers, and the upstream list travels as its own JSON file alongside the other array-valued keys. An empty list is refused like the others, so sync can never leave a node with no resolvers.
 - **Per-node identity and paths** — `HA_NODES` order is converged separately (see the priority order), and `SYNC_BLOB_DIR` is per-node by design.
 
 Sync is entirely over HTTP on port 8887. No SSH keys, no rsync, no shared filesystem.

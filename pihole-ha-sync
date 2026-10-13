@@ -127,7 +127,11 @@ fi
 # dns.upstreams is not here either, by default: a node resolving through its own
 # local unbound would be pointed at an unbound it does not have. Set
 # SYNC_UPSTREAMS=true in sync.conf on a cluster whose nodes all use the same
-# public resolvers and it is added below.
+# public resolvers and it travels as its own JSON file, like the other
+# array-valued keys. It cannot ride in here: FTL prints an array as
+# "[ a, b ]" and parses a written one as JSON (src/config/cli.c), so a value
+# from this list would be refused by every standby -- which is exactly what
+# happened to the first version of this option in 3.19.0.
 SETTINGS_KEYS=(
     dns.blockTTL dns.blocking.mode dns.blocking.edns
     dns.rateLimit.count dns.rateLimit.interval dns.queryLogging
@@ -164,6 +168,7 @@ current_hash() {
             done
             pihole-FTL --config dns.revServers 2>/dev/null
         fi
+        [[ "$SYNC_UPSTREAMS" == "true" ]] && pihole-FTL --config dns.upstreams 2>/dev/null
         # Filtered the same way the payload is: a change to PO_USER/PO_TOKEN
         # alone must not look like a config change, since it is not shipped.
         [[ "$SYNC_NOTIFY" == "true" && -f /etc/pihole-ha/notify.conf ]] && \
@@ -172,8 +177,6 @@ current_hash() {
         [[ -f /etc/pihole-ha/sync.conf ]] && md5sum /etc/pihole-ha/sync.conf 2>/dev/null
     } | md5sum | awk '{print $1}'
 }
-
-[[ "${SYNC_UPSTREAMS:-false}" == "true" ]] && SETTINGS_KEYS+=(dns.upstreams)
 
 export_settings() {
     local first=true json="{"
@@ -323,6 +326,13 @@ if [[ "$SYNC_SETTINGS" == "true" ]]; then
     # Conditional forwarding is an array key — same JSON treatment as CNAMEs.
     pihole-FTL --config dns.revServers 2>/dev/null | ftl_to_json > "$STAGING_DIR/dns-revservers.json"
     TAR_FILES+=" dns-revservers.json"
+fi
+
+# Upstream resolvers, when the cluster has opted in. Its own file for the same
+# reason as the other arrays: FTL only accepts JSON back.
+if [[ "$SYNC_UPSTREAMS" == "true" ]]; then
+    pihole-FTL --config dns.upstreams 2>/dev/null | ftl_to_json > "$STAGING_DIR/dns-upstreams.json"
+    TAR_FILES+=" dns-upstreams.json"
 fi
 
 if [[ "$SYNC_NOTIFY" == "true" && -f /etc/pihole-ha/notify.conf ]]; then
