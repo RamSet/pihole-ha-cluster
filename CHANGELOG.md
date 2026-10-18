@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.5 — 2026-10-18
+- Name the Docker traps the example walks people into
+
 ## v3.19.4 — 2026-10-17
 - Identify the Pi-hole container by what runs in it, not by its image name
 
