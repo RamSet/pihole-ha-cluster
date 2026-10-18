@@ -1,6 +1,14 @@
 # Pi-hole HA — Docker Sidecar
 
-Run Pi-hole HA as a Docker sidecar alongside the stock `pihole/pihole` image. No custom Pi-hole fork needed.
+Run Pi-hole HA as a Docker sidecar alongside your Pi-hole container. No custom Pi-hole fork needed.
+
+**Which images work:** any container running Pi-hole v6 — the installer identifies it by finding `pihole-FTL` inside, not by the image name, so combined images such as `mpgirro/pihole-unbound` (Pi-hole and unbound in one container) are fine. The sidecar carries its own copy of the `pihole-FTL` binary to drive `--config`, taken from `pihole/pihole:latest` by default; build it from the image you actually run if you want the two versions locked together:
+
+```bash
+docker compose build --build-arg PIHOLE_IMAGE=mpgirro/pihole-unbound:latest pihole-ha
+```
+
+With a combined image, leave `SYNC_UPSTREAMS` off (the default): each node's upstream is its own in-container unbound, and syncing that list would point every node at an unbound only one of them has.
 
 ## Architecture
 

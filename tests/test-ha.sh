@@ -995,6 +995,50 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# A Pi-hole container is one running pihole-FTL, not one named pihole/pihole
+# ------------------------------------------------------------
+# The Docker installer looked for an image called "pihole/pihole", so a combined
+# image -- Pi-hole and unbound in one container, mpgirro/pihole-unbound -- was
+# reported as "no running Pi-hole container found" (Discourse 86667 #125).
+# Verified against the real image: it carries /usr/bin/pihole-FTL v6.8, the same
+# version as the stock image this sidecar builds from.
+_detect_probe() {   # $1 = docker ps table, $2 = ids that have pihole-FTL
+    P_PS="$1" P_HAS="$2" bash -c '
+        docker() {
+            case "$1" in
+                ps)   printf "%s\n" "$P_PS" ;;
+                exec) [[ " $P_HAS " == *" $2 "* ]] ;;
+            esac
+        }
+        '"$(sed -n '/^# Find it by what it IS/,/^done$/p' "$SCRIPT_DIR/../docker-install.sh")"'
+        printf "%s" "${pihole_containers:-NONE}"
+    '
+}
+_ps_combined=$'c1\tpihole\tmpgirro/pihole-unbound:latest\nc2\tgrafana\tgrafana/grafana'
+assert_contains "a combined pihole+unbound image is found" \
+    "$(_detect_probe "$_ps_combined" "c1")" "mpgirro/pihole-unbound"
+# Named like anything at all: the fallback pass asks every container.
+_ps_disguised=$'c1\tweather-box\talpine\nc2\tgrafana\tgrafana/grafana'
+assert_contains "a container named nothing like Pi-hole is still found" \
+    "$(_detect_probe "$_ps_disguised" "c1")" "weather-box"
+assert_eq "nothing running Pi-hole finds nothing" "NONE" \
+    "$(_detect_probe "$_ps_disguised" "")"
+# The sidecar carries pihole-FTL too, to drive --config. It must not nominate
+# itself as the Pi-hole container.
+_ps_with_sidecar=$'c1\tpihole\tpihole/pihole:latest\nc2\tpihole-ha\tdocker-pihole-ha'
+_both="$(_detect_probe "$_ps_with_sidecar" "c1 c2")"
+assert_contains "the real Pi-hole container is picked"     "$_both" "pihole/pihole"
+assert_not_contains "and the sidecar is not picked as one" "$_both" "docker-pihole-ha"
+assert_not_contains "detection no longer keys on the image name" \
+    "$(sed -n '/^# Find it by what it IS/,/^done$/p' "$SCRIPT_DIR/../docker-install.sh")" "grep -i 'pihole/pihole'"
+# The sidecar's FTL binary writes pihole.toml for an FTL it does not run, so it
+# has to be buildable from whichever image is actually in use.
+assert_contains "the sidecar can be built from another Pi-hole image" \
+    "$(cat "$SCRIPT_DIR/../docker/Dockerfile")" 'ARG PIHOLE_IMAGE=pihole/pihole:latest'
+assert_contains "and that argument is what the build stage uses" \
+    "$(cat "$SCRIPT_DIR/../docker/Dockerfile")" 'FROM ${PIHOLE_IMAGE} AS pihole-src'
+
+# ============================================================
 # An unchanged list must not restart FTL either
 # ------------------------------------------------------------
 # The compare-before-write added for the scalar settings missed the

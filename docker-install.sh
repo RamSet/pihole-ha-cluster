@@ -158,14 +158,41 @@ fi
 # --- 3. Detect running Pi-hole container ---
 printf "  %b Searching for Pi-hole container..." "${INFO}"
 
-pihole_containers="$(docker ps --format '{{.ID}}\t{{.Names}}\t{{.Image}}' 2>/dev/null \
-    | grep -i 'pihole/pihole' || true)"
+# Find it by what it IS, not by what it is called. Matching the image name
+# against "pihole/pihole" missed every combined image -- a reporter running
+# mpgirro/pihole-unbound (Pi-hole and unbound in one container) would be told no
+# Pi-hole was running at all. Containers whose image or name mentions pihole are
+# checked first because that is nearly always it; only if none qualify is every
+# running container asked whether it has pihole-FTL.
+_is_pihole_container() { docker exec "$1" sh -c 'command -v pihole-FTL' >/dev/null 2>&1; }
+
+_all_running="$(docker ps --format '{{.ID}}\t{{.Names}}\t{{.Image}}' 2>/dev/null)"
+pihole_containers=""
+for _pass in likely rest; do
+    [[ -n "$pihole_containers" ]] && break
+    if [[ "$_pass" == "likely" ]]; then
+        _candidates="$(printf '%s\n' "$_all_running" | grep -i 'pihole' || true)"
+    else
+        _candidates="$(printf '%s\n' "$_all_running" | grep -vi 'pihole' || true)"
+    fi
+    while IFS=$'\t' read -r _cid _cname _cimg; do
+        [[ -n "$_cid" ]] || continue
+        # The sidecar carries pihole-FTL too (to drive --config), so without
+        # this it would nominate itself as the Pi-hole container.
+        [[ "$_cimg" == *pihole-ha* || "$_cname" == *pihole-ha* ]] && continue
+        _is_pihole_container "$_cid" \
+            && pihole_containers+="${pihole_containers:+$'\n'}${_cid}"$'\t'"${_cname}"$'\t'"${_cimg}"
+    done <<< "$_candidates"
+done
 
 if [[ -z "$pihole_containers" ]]; then
     printf "%b  %b %bNo running Pi-hole container found%b\\n" "${OVER}" "${CROSS}" "${COL_RED}" "${COL_NC}"
     printf "\\n"
     printf "      Start Pi-hole first, e.g.:\\n"
     printf "        docker run -d --name pihole --network host pihole/pihole:latest\\n"
+    printf "\\n"
+    printf "      A container counts as Pi-hole if pihole-FTL runs inside it, whatever\\n"
+    printf "      the image is called — combined Pi-hole+unbound images are fine.\\n"
     printf "\\n"
     exit 1
 fi

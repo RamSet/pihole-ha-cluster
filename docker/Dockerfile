@@ -1,8 +1,13 @@
 # pihole-ha sidecar — runs alongside stock pihole/pihole container
 # Build context is repo root: docker build -f docker/Dockerfile -t pihole-ha .
 
-# Stage 1: grab pihole-FTL binary for --config CLI
-FROM pihole/pihole:latest AS pihole-src
+# Stage 1: grab pihole-FTL binary for --config CLI.
+#
+# Build it from the SAME image Pi-hole runs from, so the binary that writes
+# pihole.toml matches the FTL that reads it. Combined images work here:
+#   docker build --build-arg PIHOLE_IMAGE=mpgirro/pihole-unbound:latest ...
+ARG PIHOLE_IMAGE=pihole/pihole:latest
+FROM ${PIHOLE_IMAGE} AS pihole-src
 
 # Stage 2: Alpine sidecar
 FROM alpine:3.21

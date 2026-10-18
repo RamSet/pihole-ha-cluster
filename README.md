@@ -28,7 +28,7 @@ At install it checks whether Pi-hole DHCP is active, probes the LAN for another 
 - **API Authentication** — Mutating API endpoints are protected using Pi-hole's own password. If the local Pi-hole instance has a password set, all write operations require a valid session ID (SID). Read-only endpoints remain open.
 - **Web UI** — A native panel integrated into Pi-hole's admin interface at `/admin/ha` (**Tools > HA Cluster**).
 - **Cluster Join/Leave** — Nodes register themselves with the cluster on install via the `/api/nodes/join` API. The **Cluster Members** panel on the HA page adds, removes, and reorders nodes with one click, and every change propagates to all peers. Adding works from either side: a standalone node joins an existing cluster rather than absorbing it, and an address that doesn't answer is refused instead of being written to the config. A removed node keeps serving DNS on its own with failover switched off, so it can be added back at any time. No manual config editing needed.
-- **Docker Support** — Runs as a sidecar container alongside the stock `pihole/pihole` image. No custom Pi-hole fork needed. Interactive installer detects existing Pi-hole containers and preserves volume mounts.
+- **Docker Support** — Runs as a sidecar container alongside any Pi-hole v6 container, identified by finding `pihole-FTL` inside it rather than by image name (combined Pi-hole+unbound images work). No custom Pi-hole fork needed. Interactive installer detects existing Pi-hole containers and preserves volume mounts.
 - **Mixed Clusters** — Supports nodes running on different Pi-hole web ports (e.g., bare-metal on port 80 alongside Docker on port 8081) using `IP:PORT` format in the node list.
 
 ## Requirements
