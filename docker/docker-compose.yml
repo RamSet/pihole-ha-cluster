@@ -14,7 +14,12 @@ services:
     entrypoint:
       - /bin/bash
       - -c
-      - 'until [ -f /pihole-ha-src/pihole-ha-inject-docker.sh ]; do sleep 1; done; exec /pihole-ha-src/pihole-ha-inject-docker.sh'
+      # Bounded on purpose. An endless wait deadlocks a node whose Pi-hole IS
+      # the LAN's DNS: the sidecar image cannot be built because nothing
+      # resolves, and nothing resolves because Pi-hole is waiting for the
+      # sidecar. After 90s, start Pi-hole anyway (replace start.sh with your
+      # image's own entrypoint if it has one, e.g. /custom-entrypoint.sh).
+      - 'n=0; while [ ! -f /pihole-ha-src/pihole-ha-inject-docker.sh ] && [ $$n -lt 90 ]; do n=$$((n+1)); sleep 1; done; if [ -f /pihole-ha-src/pihole-ha-inject-docker.sh ]; then exec /pihole-ha-src/pihole-ha-inject-docker.sh; fi; echo "pihole-ha: sidecar never staged the panel - starting Pi-hole without it"; exec start.sh'
     volumes:
       - pihole-etc:/etc/pihole
       - pihole-dnsmasq:/etc/dnsmasq.d

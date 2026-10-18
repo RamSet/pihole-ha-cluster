@@ -995,6 +995,46 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# The Docker panel injection must not hijack or deadlock Pi-hole's startup
+# ------------------------------------------------------------
+# Two traps a Synology user walked into (Discourse 86667 #130), both of them in
+# what the docs told him to paste.
+#
+# The inject script ended with `exec start.sh`, which is the STOCK image's
+# entrypoint. A combined image starts at its own script -- mpgirro's
+# /custom-entrypoint.sh launches unbound and then Pi-hole -- so start.sh skips
+# unbound, and a node whose upstream is 127.0.0.1#5335 then answers nothing.
+_entrypoint_probe() {   # $1 = PIHOLE_HA_ENTRYPOINT, $2 = "custom" if /custom-entrypoint.sh exists
+    P_EP="$1" P_CUSTOM="$2" bash -c '
+        PIHOLE_HA_ENTRYPOINT="$P_EP"
+        # the real resolution block, lifted from the script
+        '"$(sed -n '/^_real_entrypoint=/,/^exec "\$_real_entrypoint"/p' "$SCRIPT_DIR/../docker/pihole-ha-inject-docker.sh" | sed 's/^exec /echo EXEC /; s/\[\[ -x \/custom-entrypoint.sh \]\]/[[ "$P_CUSTOM" == custom ]]/')"'
+    ' 2>/dev/null | tail -1
+}
+assert_contains "a combined image hands off to its own entrypoint" \
+    "$(_entrypoint_probe "" custom)" "EXEC /custom-entrypoint.sh"
+assert_contains "the stock image still hands off to start.sh" \
+    "$(_entrypoint_probe "" none)" "EXEC start.sh"
+assert_contains "an explicit entrypoint wins over both" \
+    "$(_entrypoint_probe /opt/mine.sh custom)" "EXEC /opt/mine.sh"
+
+# The documented entrypoint waited for the sidecar forever. On a node whose
+# Pi-hole IS the LAN's DNS that deadlocks: the sidecar image cannot be built
+# because nothing resolves, and nothing resolves because Pi-hole is waiting for
+# the sidecar. Exactly what happened to him.
+for _f in docker/docker-compose.yml docker/README.md; do
+    _src="$(cat "$SCRIPT_DIR/../$_f")"
+    assert_not_contains "$_f: the panel wait is not unbounded" \
+        "$_src" "until [ -f /pihole-ha-src/pihole-ha-inject-docker.sh ]; do sleep 1; done"
+    assert_contains "$_f: the wait is capped"            "$_src" '-lt 90'
+    assert_contains "$_f: and Pi-hole starts regardless" "$_src" 'exec start.sh'
+done
+assert_contains "the docs name the combined-image entrypoint override" \
+    "$(cat "$SCRIPT_DIR/../docker/README.md")" "PIHOLE_HA_ENTRYPOINT=/custom-entrypoint.sh"
+assert_contains "and warn to build the image before changing the entrypoint" \
+    "$(cat "$SCRIPT_DIR/../docker/README.md")" "Build the sidecar image before you add this entrypoint"
+
+# ============================================================
 # A Pi-hole container is one running pihole-FTL, not one named pihole/pihole
 # ------------------------------------------------------------
 # The Docker installer looked for an image called "pihole/pihole", so a combined

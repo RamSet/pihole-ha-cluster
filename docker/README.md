@@ -62,6 +62,22 @@ If you already run Pi-hole in Docker, add the pihole-ha sidecar to your existing
 3. **Share volumes** — both containers need `/etc/pihole` and `/etc/dnsmasq.d`, **plus the shared `pihole-ha-src` volume** (this is how the HA panel gets injected)
 4. **Override the entrypoint** — the Pi-hole container must run the inject step, or `/admin/ha` returns 404. The line below waits for the sidecar to stage the script, runs it, then hands off to Pi-hole's own `start.sh`. It needs no local file, so it works even when the sidecar is built from the git URL.
 
+> **Build the sidecar image before you add this entrypoint.** If this node's
+> Pi-hole is your LAN's DNS, an entrypoint that waits for a sidecar that does
+> not exist yet takes DNS down, and then the sidecar image cannot be built
+> because nothing resolves. The wait above is capped at 90 seconds and then
+> starts Pi-hole regardless, but the safe order is: build the image, then change
+> the entrypoint.
+
+> **Combined images (Pi-hole + unbound in one container):** the last `exec` in
+> that line, and the hand-off at the end of the inject script, both assume the
+> stock image's `start.sh`. If your image has its own entrypoint — for example
+> `mpgirro/pihole-unbound`'s `/custom-entrypoint.sh`, which starts unbound and
+> then Pi-hole — set `PIHOLE_HA_ENTRYPOINT=/custom-entrypoint.sh` in the Pi-hole
+> service's environment and use it in place of `start.sh` above. Otherwise
+> unbound never starts and the node answers nothing, because its upstream is the
+> unbound that didn't start.
+
 > **This is the step people miss.** Adding the sidecar alone does **not** inject the panel — the Pi-hole container has to run the inject entrypoint and mount `pihole-ha-src`. Without both, the sidecar and `:8887` API still work, but `/admin/ha` 404s.
 
 ### Example: adding pihole-ha to existing compose
@@ -76,7 +92,7 @@ services:
     entrypoint:
       - /bin/bash
       - -c
-      - 'until [ -f /pihole-ha-src/pihole-ha-inject-docker.sh ]; do sleep 1; done; exec /pihole-ha-src/pihole-ha-inject-docker.sh'
+      - 'n=0; while [ ! -f /pihole-ha-src/pihole-ha-inject-docker.sh ] && [ $$n -lt 90 ]; do n=$$((n+1)); sleep 1; done; if [ -f /pihole-ha-src/pihole-ha-inject-docker.sh ]; then exec /pihole-ha-src/pihole-ha-inject-docker.sh; fi; exec start.sh'
     volumes:
       - ./etc-pihole:/etc/pihole    # keep your existing mounts
       - ./etc-dnsmasq:/etc/dnsmasq.d

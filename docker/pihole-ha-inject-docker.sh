@@ -61,5 +61,22 @@ inject_ha() {
 # Run injection in background so Pi-hole starts immediately
 inject_ha &
 
-# Hand off to the real pihole entrypoint
-exec start.sh "$@"
+# Hand off to THIS image's entrypoint, not a hardcoded one.
+#
+# The stock image starts at start.sh, but a combined image starts at its own
+# script -- mpgirro/pihole-unbound's /custom-entrypoint.sh launches unbound and
+# then Pi-hole. Running start.sh there skips unbound entirely, and since such a
+# setup points dns.upstreams at 127.0.0.1#5335, the node comes up answering
+# nothing. Set PIHOLE_HA_ENTRYPOINT in the pihole container to whatever the
+# image's own entrypoint is; the two fallbacks below just save you doing that
+# for the images we know about.
+_real_entrypoint="${PIHOLE_HA_ENTRYPOINT:-}"
+if [[ -z "$_real_entrypoint" ]]; then
+    if [[ -x /custom-entrypoint.sh ]]; then
+        _real_entrypoint=/custom-entrypoint.sh
+    else
+        _real_entrypoint=start.sh
+    fi
+fi
+echo "pihole-ha-inject: handing off to $_real_entrypoint"
+exec "$_real_entrypoint" "$@"
