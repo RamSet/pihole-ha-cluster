@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.7 — 2026-10-18
+- Say why the sidecar build needs Pi-hole to answer the Docker bridge
+
 ## v3.19.6 — 2026-10-18
 - Stop the panel injection hijacking or deadlocking Pi-hole's own startup
 
