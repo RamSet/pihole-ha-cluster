@@ -127,6 +127,30 @@ volumes:
   pihole-ha-src:
 ```
 
+### If this node's Pi-hole is also the host's DNS
+
+Building the sidecar image needs working DNS on the Docker host, and on a
+Synology (or anywhere the build runs on a bridge network) the build container
+asks that same Pi-hole from an address like `172.25.0.x`. With
+`dns.listeningMode=single` Pi-hole answers only on the one interface it was
+told about, refuses the bridge, and the build fails with
+`temporary error (try again later)` fetching Alpine packages — which looks like
+a network outage and isn't.
+
+Use `local`, which is FTL's default and its own recommendation: it accepts
+queries from any subnet the host has an interface on, which includes the Docker
+bridge, without becoming an open resolver. `all` also works but, in FTL's
+words, "truly allows any traffic to be replied to and is a dangerous thing to
+do" — if you use it, the only thing protecting port 53 is your firewall.
+
+```yaml
+    environment:
+      FTLCONF_dns_listeningMode: local
+```
+
+Under `network_mode: host` the sidecar's `:8887` is bound on every interface
+too, so firewall it the same way you firewall port 53.
+
 ### Portainer, Synology and other remote Docker hosts
 
 Portainer resolves `build.context` inside **its own** container, not on the
