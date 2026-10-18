@@ -91,6 +91,8 @@ services:
       context: /path/to/pihole-ha   # repo root
       dockerfile: docker/Dockerfile
     network_mode: host
+    # BOTH of these name YOUR Pi-hole service. If yours is called something else
+    # — pihole-unbound, say — change them here or the stack will not come up.
     pid: "service:pihole"           # shares PID namespace with pihole
     cap_add: [NET_ADMIN, NET_RAW]
     depends_on: [pihole]
@@ -108,6 +110,35 @@ volumes:
   pihole-ha-run:
   pihole-ha-src:
 ```
+
+### Portainer, Synology and other remote Docker hosts
+
+Portainer resolves `build.context` inside **its own** container, not on the
+Docker host, so an absolute host path like `/volume1/docker/pihole-ha` comes
+back as `path not found` however correct it looks over SSH. Two ways round it:
+
+**Build once over SSH, then reference the image by tag** (simplest):
+
+```bash
+git clone https://github.com/RamSet/pihole-ha-cluster /volume1/docker/pihole-ha
+cd /volume1/docker/pihole-ha
+docker build -f docker/Dockerfile -t pihole-ha:local .
+# combined Pi-hole+unbound image? build the FTL binary from the same one:
+#   docker build -f docker/Dockerfile --build-arg PIHOLE_IMAGE=mpgirro/pihole-unbound:latest -t pihole-ha:local .
+```
+
+Then in the stack, drop the whole `build:` block and use:
+
+```yaml
+  pihole-ha:
+    image: pihole-ha:local
+```
+
+**Or deploy the stack from a Git repository** in Portainer instead of the web
+editor, which gives the build a context it can actually see.
+
+Under `network_mode: host`, `ports:` entries do nothing for traffic — keep them
+only if, like Synology's firewall UI, something reads them as declarations.
 
 ### Create your `.env`
 
