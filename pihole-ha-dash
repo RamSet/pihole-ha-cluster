@@ -416,8 +416,13 @@ if [[ "${1:-}" == "--handle" ]]; then
             SYNC_ENABLED=true SYNC_GRAVITY=true SYNC_DHCP=true SYNC_DNS=true SYNC_SETTINGS=true SYNC_PRIMARY="${_HA_NODES[0]}" SYNC_INTERVAL=15
             load_sync_conf "$SYNC_CONF"
             send_headers "200 OK" "application/json"
-            printf '{"enabled":%s,"gravity":%s,"dhcp":%s,"dns":%s,"settings":%s,"primary":"%s","interval":%s}\n' \
-                "$SYNC_ENABLED" "$SYNC_GRAVITY" "$SYNC_DHCP" "$SYNC_DNS" "$SYNC_SETTINGS" "$SYNC_PRIMARY" "$SYNC_INTERVAL"
+            # Last completed pull on THIS node: the manifest only carries the
+            # publisher's build time, which does not tell a standby whether it
+            # ever received it.
+            _lp="$(cat /etc/pihole-ha/sync-last-pull 2>/dev/null)"
+            printf '{"enabled":%s,"gravity":%s,"dhcp":%s,"dns":%s,"settings":%s,"primary":"%s","interval":%s,"last_pull":"%s","last_pull_status":"%s"}\n' \
+                "$SYNC_ENABLED" "$SYNC_GRAVITY" "$SYNC_DHCP" "$SYNC_DNS" "$SYNC_SETTINGS" "$SYNC_PRIMARY" "$SYNC_INTERVAL" \
+                "${_lp%% *}" "${_lp##* }"
             ;;
         /api/sync/toggle/enabled*)
             _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi

@@ -995,6 +995,51 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# Config the container is ignoring must say so, and a standby must be able to
+# see when IT last synced
+# ------------------------------------------------------------
+# Both from a Docker user setting up a two-node cluster (Discourse 86667 #135).
+#
+# nodes.conf is generated once and the volume keeps it, so PIHOLE_HA_VIP added
+# after the first start did nothing and the file kept VIP= empty. Indistinguish-
+# able from guessing the wrong variable name, which is what he concluded.
+_ignored_probe() {   # $1 = env VIP, $2 = VIP already in nodes.conf
+    local conf; conf="$(mktemp)"
+    printf 'GATEWAY=10.0.0.1\nVIP=%s\nVIP_ENABLED=false\nHA_NODES=10.0.0.2,10.0.0.3\n' "$2" > "$conf"
+    NODES_CONF="$conf" PIHOLE_HA_VIP="$1" bash -c '
+        log_warn() { echo "WARN $*"; }
+        '"$(sed -n '/^    _ignored=""/,/^    fi$/p' "$SCRIPT_DIR/../docker/docker-entrypoint.sh")"'
+    '
+    rm -f "$conf"
+}
+assert_contains "an env var the container is ignoring is named" \
+    "$(_ignored_probe 192.168.1.100 "")" "PIHOLE_HA_VIP"
+assert_contains "the warning says how to apply it" \
+    "$(_ignored_probe 192.168.1.100 "")" "PIHOLE_HA_FORCE_CONFIG=true"
+assert_eq "a value that already matches is not reported" "" \
+    "$(_ignored_probe 192.168.1.100 192.168.1.100)"
+assert_eq "an unset variable is not reported" "" "$(_ignored_probe "" "")"
+
+# The panel could only show the publisher's build time. On a standby that
+# answers a different question than "did I actually receive it?".
+assert_contains "a completed pull is recorded, applied or not" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")" "_record_pull unchanged"
+assert_contains "and when it changed something"  \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")" "_record_pull applied"
+assert_contains "it is kept on disk, not in /run" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")" "/etc/pihole-ha/sync-last-pull"
+assert_contains "the sync API exposes it"  \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-dash")" '"last_pull":"%s","last_pull_status":"%s"'
+assert_contains "the panel shows when this node last synced" \
+    "$(cat "$SCRIPT_DIR/../ha.js")" 'Last synced: '
+# It reads the response the panel already fetches; a different variable name
+# would silently render nothing.
+assert_contains "and reads it from the object the panel already has" \
+    "$(cat "$SCRIPT_DIR/../ha.js")" 'syncCfg && syncCfg.last_pull'
+assert_contains "the VIP address variable is documented, not just its toggle" \
+    "$(cat "$SCRIPT_DIR/../docker/README.md")" "PIHOLE_HA_VIP=192.168.1.100"
+
+# ============================================================
 # The Docker panel injection must not hijack or deadlock Pi-hole's startup
 # ------------------------------------------------------------
 # Two traps a Synology user walked into (Discourse 86667 #130), both of them in

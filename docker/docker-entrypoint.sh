@@ -93,6 +93,26 @@ if [[ "${PIHOLE_HA_FORCE_CONFIG:-false}" == "true" ]] || [[ ! -f "$NODES_CONF" ]
     generate_config
 else
     log_info "event=config_exists action=skip reason=\"using persisted config\""
+    # nodes.conf is written once. Adding an env var later therefore does
+    # nothing, and the only sign of it was this line -- someone adding
+    # PIHOLE_HA_VIP after first start watched it never appear in the file and
+    # reasonably concluded the variable was wrong. Name what is being ignored.
+    _ignored=""
+    _check_ignored() {   # $1 = env value, $2 = nodes.conf key, $3 = env name
+        [[ -n "$1" ]] || return 0
+        local _have
+        _have="$(sed -n "s/^$2=//p" "$NODES_CONF" 2>/dev/null | head -1)"
+        [[ "$_have" == "$1" ]] || _ignored+="${_ignored:+, }$3 ($2 is currently '${_have}')"
+    }
+    _check_ignored "${PIHOLE_HA_VIP:-}"          VIP          PIHOLE_HA_VIP
+    _check_ignored "${PIHOLE_HA_VIP_ENABLED:-}"  VIP_ENABLED  PIHOLE_HA_VIP_ENABLED
+    _check_ignored "${PIHOLE_HA_NODES:-}"        HA_NODES     PIHOLE_HA_NODES
+    _check_ignored "${PIHOLE_HA_GATEWAY:-}"      GATEWAY      PIHOLE_HA_GATEWAY
+    _check_ignored "${PIHOLE_HA_DHCP_HA:-}"      DHCP_HA      PIHOLE_HA_DHCP_HA
+    _check_ignored "${PIHOLE_HA_STANDBY_ONLY:-}" STANDBY_ONLY PIHOLE_HA_STANDBY_ONLY
+    if [[ -n "$_ignored" ]]; then
+        log_warn "event=config_env_ignored keys=\"$_ignored\" reason=\"nodes.conf already exists and is not regenerated — set PIHOLE_HA_FORCE_CONFIG=true for one start to apply these, or edit the file in the volume\""
+    fi
 fi
 
 # --- 3. Create runtime dirs and ensure empty config files exist ---

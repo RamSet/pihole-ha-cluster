@@ -180,6 +180,14 @@ editor, which gives the build a context it can actually see.
 Under `network_mode: host`, `ports:` entries do nothing for traffic — keep them
 only if, like Synology's firewall UI, something reads them as declarations.
 
+> **`nodes.conf` is written once.** The `/etc/pihole-ha` volume keeps it, so a
+> variable added to the environment *after* the first start is not picked up and
+> the file keeps the old value — which looks exactly like the variable being
+> wrong. The startup log now names any that are being ignored. To apply them,
+> set `PIHOLE_HA_FORCE_CONFIG=true` for one start (it regenerates the file from
+> the environment, discarding changes made in the panel), or edit the file in
+> the volume directly.
+
 ### Create your `.env`
 
 ```bash
@@ -190,7 +198,8 @@ PIHOLE_HA_GATEWAY=192.168.1.1
 # Optional
 PIHOLE_PASSWORD=your-pihole-password
 PIHOLE_WEB_PORT=80                            # Pi-hole web port on this node
-PIHOLE_HA_VIP_ENABLED=false
+PIHOLE_HA_VIP_ENABLED=false                   # true = manage a floating VIP on this cluster
+PIHOLE_HA_VIP=192.168.1.100                   # the VIP address itself (needed when VIP_ENABLED=true)
 PIHOLE_HA_DHCP_HA=false                       # true = this node's Pi-hole serves DHCP (failover); false = DNS-only. If unset, inferred: true when a DHCP scope below is set, else false.
 PIHOLE_HA_DHCP_START=192.168.1.50
 PIHOLE_HA_DHCP_END=192.168.1.200

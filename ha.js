@@ -521,10 +521,18 @@ $(function () {
             }
         }
 
-        // Last sync timestamp from manifest (UTC → viewer's local time)
+        // Two different questions, and a standby cares about the second:
+        // when did the publisher last BUILD, and when did this node last SYNC.
+        var tsParts = [];
         if (syncManifest && syncManifest.timestamp) {
-            $("#sync-ts").text("Last build: " + fmtTime(syncManifest.timestamp));
+            tsParts.push("Last build: " + fmtTime(syncManifest.timestamp));
         }
+        if (syncCfg && syncCfg.last_pull) {
+            var lp = "Last synced: " + fmtTime(syncCfg.last_pull);
+            if (syncCfg.last_pull_status === "unchanged") { lp += " (nothing to apply)"; }
+            tsParts.push(lp);
+        }
+        if (tsParts.length) { $("#sync-ts").text(tsParts.join(" · ")); }
 
         // Cluster entanglement: entangled when sync is on and every peer is
         // reachable; decoherence (link lost) when a peer is unreachable.
