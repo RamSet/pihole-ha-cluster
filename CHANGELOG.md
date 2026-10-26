@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.8 — 2026-10-26
+- Say when config from the environment is being ignored, and when a node last synced
+
 ## v3.19.7 — 2026-10-18
 - Say why the sidecar build needs Pi-hole to answer the Docker bridge
 
