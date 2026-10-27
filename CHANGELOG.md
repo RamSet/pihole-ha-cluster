@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.10 — 2026-10-27
+- Document the per-node web port in the Docker node list
+
 ## v3.19.9 — 2026-10-27
 - Give the Pi-hole container what the HA page actually reads
 
