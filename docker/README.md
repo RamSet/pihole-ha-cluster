@@ -97,6 +97,11 @@ services:
       - ./etc-pihole:/etc/pihole    # keep your existing mounts
       - ./etc-dnsmasq:/etc/dnsmasq.d
       - pihole-ha-src:/pihole-ha-src:ro   # panel files staged by the sidecar
+      # The HA page is rendered by Pi-hole's own web server, inside THIS
+      # container, and reads these directly. Without them the page still loads
+      # but shows no VIP address, no node list and nothing under Config Sync.
+      - pihole-ha-conf:/etc/pihole-ha:ro
+      - pihole-ha-run:/run/pihole-ha:ro
     environment:
       TZ: America/New_York
       FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD:-}
@@ -126,6 +131,12 @@ volumes:
   pihole-ha-run:
   pihole-ha-src:
 ```
+
+> **A panel with blank fields is almost always a missing mount.** `/admin/ha`
+> is served by Pi-hole, not by the sidecar, so anything the page shows from
+> `/etc/pihole-ha` or `/run/pihole-ha` — the VIP address, the node list, the
+> Config Sync panel — comes from those two read-only mounts on the **Pi-hole**
+> service, not from the sidecar's copies.
 
 ### If this node's Pi-hole is also the host's DNS
 

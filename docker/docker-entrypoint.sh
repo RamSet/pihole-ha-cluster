@@ -13,6 +13,10 @@ if [[ -d /pihole-ha-src ]]; then
     cp /usr/local/share/pihole-ha/ha.lp /pihole-ha-src/ 2>/dev/null || true
     cp /usr/local/share/pihole-ha/ha-api.lp /pihole-ha-src/ 2>/dev/null || true
     cp /usr/local/share/pihole-ha/ha.js /pihole-ha-src/ 2>/dev/null || true
+    # The panel renders INSIDE the pihole container and reads the version from
+    # its own filesystem, where nothing had ever put it -- so every Docker
+    # install showed "Pi-hole HA vunknown".
+    cp /usr/local/share/pihole-ha/VERSION /pihole-ha-src/ 2>/dev/null || true
     cp /usr/local/bin/pihole-ha-inject-docker.sh /pihole-ha-src/ 2>/dev/null || true
     chmod 755 /pihole-ha-src/pihole-ha-inject-docker.sh 2>/dev/null || true
     # Stage the DHCP-event hook where the pihole container can exec it (dnsmasq,

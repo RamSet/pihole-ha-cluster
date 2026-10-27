@@ -995,6 +995,36 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# The HA page renders inside the PI-HOLE container, so it needs what it reads
+# ------------------------------------------------------------
+# ha.lp is served by Pi-hole's own web server and opens /etc/pihole-ha/*,
+# /run/pihole-ha/status.json and the VERSION file from its OWN filesystem. On
+# Docker those live in the sidecar, so anything not mounted or staged across
+# renders blank -- a user saw VIP_ENABLED=true with no address, an empty Config
+# Sync panel and "Pi-hole HA vunknown" (Discourse 86667 #137).
+_lp_reads="$(grep -oE 'io.open\("[^"]+"' "$SCRIPT_DIR/../ha.lp" | cut -d'"' -f2 | sort -u)"
+for _path in $_lp_reads; do
+    case "$_path" in
+        /etc/pihole-ha/*)
+            assert_contains "the compose mounts $_path into the pihole container" \
+                "$(cat "$SCRIPT_DIR/../docker/docker-compose.yml")" "pihole-ha-conf:/etc/pihole-ha"
+            assert_contains "and the docs example does too" \
+                "$(cat "$SCRIPT_DIR/../docker/README.md")" "pihole-ha-conf:/etc/pihole-ha:ro" ;;
+        /run/pihole-ha/*)
+            assert_contains "the compose mounts $_path into the pihole container" \
+                "$(cat "$SCRIPT_DIR/../docker/docker-compose.yml")" "pihole-ha-run:/run/pihole-ha"
+            assert_contains "and the docs example does too" \
+                "$(cat "$SCRIPT_DIR/../docker/README.md")" "pihole-ha-run:/run/pihole-ha:ro" ;;
+        /usr/local/share/pihole-ha/VERSION)
+            # Not a mount: the sidecar stages it and the inject copies it in.
+            assert_contains "the sidecar stages the version file" \
+                "$(cat "$SCRIPT_DIR/../docker/docker-entrypoint.sh")" "cp /usr/local/share/pihole-ha/VERSION /pihole-ha-src/"
+            assert_contains "and the inject installs it where ha.lp reads it" \
+                "$(cat "$SCRIPT_DIR/../docker/pihole-ha-inject-docker.sh")" 'cp "$SRCDIR/VERSION" /usr/local/share/pihole-ha/VERSION' ;;
+    esac
+done
+
+# ============================================================
 # Config the container is ignoring must say so, and a standby must be able to
 # see when IT last synced
 # ------------------------------------------------------------

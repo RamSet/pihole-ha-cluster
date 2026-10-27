@@ -36,6 +36,11 @@ inject_ha() {
     cp "$SRCDIR/ha.lp" "$WEBDIR/ha.lp"
     cp "$SRCDIR/ha-api.lp" "$WEBDIR/ha-api.lp"
     cp "$SRCDIR/ha.js" "$WEBDIR/scripts/js/ha.js"
+    # Same path the bare-metal install uses, because ha.lp reads it from there.
+    if [[ -f "$SRCDIR/VERSION" ]]; then
+        mkdir -p /usr/local/share/pihole-ha
+        cp "$SRCDIR/VERSION" /usr/local/share/pihole-ha/VERSION
+    fi
     echo "pihole-ha-inject: copied ha.lp, ha-api.lp, ha.js"
 
     # Patch sidebar if not already done
