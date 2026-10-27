@@ -204,11 +204,19 @@ only if, like Synology's firewall UI, something reads them as declarations.
 ```bash
 # Required
 PIHOLE_HA_NODES=192.168.1.10,192.168.1.11    # all node IPs, primary first
+                                              # NOT on port 80? Say so per node:
+                                              #   192.168.1.10:8080,192.168.1.11
+                                              # Peers reach each other's Pi-hole API
+                                              # on this port; without it they try 80
+                                              # and report "could not reach the peer's
+                                              # API (curl rc=7)".
 PIHOLE_HA_GATEWAY=192.168.1.1
 
 # Optional
 PIHOLE_PASSWORD=your-pihole-password
-PIHOLE_WEB_PORT=80                            # Pi-hole web port on this node
+PIHOLE_WEB_PORT=80                            # this node's own web port, for its
+                                              # self-checks only — peers learn it
+                                              # from the IP:PORT form above
 PIHOLE_HA_VIP_ENABLED=false                   # true = manage a floating VIP on this cluster
 PIHOLE_HA_VIP=192.168.1.100                   # the VIP address itself (needed when VIP_ENABLED=true)
 PIHOLE_HA_DHCP_HA=false                       # true = this node's Pi-hole serves DHCP (failover); false = DNS-only. If unset, inferred: true when a DHCP scope below is set, else false.
