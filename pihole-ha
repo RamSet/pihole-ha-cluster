@@ -1165,8 +1165,12 @@ write_status() {
     has_vip && vip_held="true"
     local tmp="$STATUS_FILE.tmp"
     {
-        printf '{"ha_enabled":%s,"dhcp_master":"%s","node":{"ip":"%s","role":"%s","priority":%d,"dhcp_active":%s,"vip":"%s","vip_enabled":%s,"vip_held":%s},' \
-            "$HA_ENABLED" "$DHCP_MASTER" "$LOCAL_IP" "$ROLE" "$PRIORITY" "$dhcp" "$VIP" "$VIP_ENABLED" "$vip_held"
+        # dhcp_ha tells the panel which kind of cluster this is. Without it every
+        # card is labelled from dhcp_active, so on a DNS-only cluster -- where no
+        # node ever activates DHCP -- every node reads "Standby", including the
+        # one holding the VIP and answering every query.
+        printf '{"ha_enabled":%s,"dhcp_master":"%s","dhcp_ha":%s,"node":{"ip":"%s","role":"%s","priority":%d,"dhcp_active":%s,"vip":"%s","vip_enabled":%s,"vip_held":%s},' \
+            "$HA_ENABLED" "$DHCP_MASTER" "$DHCP_HA" "$LOCAL_IP" "$ROLE" "$PRIORITY" "$dhcp" "$VIP" "$VIP_ENABLED" "$vip_held"
         printf '"blocking":"%s","blocking_why":"%s",' "$BLOCKING_STATE" "$(printf '%s' "$BLOCKING_WHY" | sed 's/[\\"]/ /g')"
         printf '"gateway":%s,"timestamp":"%s",' "$gw" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
         printf '"reason":"%s","peers":{' "$(echo "$reason" | sed 's/"/\\"/g')"

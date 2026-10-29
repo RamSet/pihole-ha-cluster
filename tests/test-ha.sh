@@ -995,6 +995,46 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# A DNS-only cluster must not label every node "Standby"
+# ------------------------------------------------------------
+# The node cards were labelled from dhcp_active alone. On a DNS-only cluster no
+# node ever activates DHCP, so every card read "Standby" — including the one
+# holding the VIP and answering every query. Two users asked what it meant
+# (Discourse 86667 #141).
+assert_contains "the daemon tells the panel which kind of cluster this is" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha")" '"dhcp_ha":%s'
+_card_probe() {   # $1 dhcp_ha, $2 vip_enabled, $3 vip_held
+    node -e '
+        var dhcpHa = process.argv[1] === "true";
+        var vipEnabled = process.argv[2] === "true";
+        var vipHeld = process.argv[3] === "true";
+        var reachable = true, dhcpActive = false, isDesignatedMaster = false, manualMaster = false;
+        var statusData = { dhcp_ha: dhcpHa };
+        var label = "";
+        var $status = { text: function (t) { label = t; } };
+        var bgClass;
+        var dnsOnly = statusData.dhcp_ha === false;
+        if (!reachable) { bgClass = "bg-red"; $status.text("UNREACHABLE"); }
+        else if (dnsOnly) {
+            if (vipHeld) { bgClass = "bg-green"; $status.text("Serving DNS (VIP)"); }
+            else if (!vipEnabled) { bgClass = "bg-green"; $status.text("Serving DNS"); }
+            else { bgClass = "bg-aqua"; $status.text("Standby"); }
+        }
+        else if (dhcpActive) { $status.text("DHCP Active"); }
+        else { $status.text("Standby"); }
+        console.log(label);
+    ' "$1" "$2" "$3"
+}
+assert_eq "the DNS-only node holding the VIP says so"  "Serving DNS (VIP)" "$(_card_probe false true true)"
+assert_eq "a DNS-only standby still says Standby"      "Standby"           "$(_card_probe false true false)"
+assert_eq "DNS-only with no VIP: every node is serving" "Serving DNS"      "$(_card_probe false false false)"
+assert_eq "a DHCP cluster keeps its own labels"        "Standby"           "$(_card_probe true true false)"
+# The branch has to be reached before the DHCP ones, or it never runs.
+assert_contains "the DNS-only branch precedes the DHCP labels" \
+    "$(sed -n '/var dnsOnly = statusData.dhcp_ha === false/,/dhcpActive && isDesignatedMaster/p' "$SCRIPT_DIR/../ha.js")" \
+    "Serving DNS (VIP)"
+
+# ============================================================
 # The HA page renders inside the PI-HOLE container, so it needs what it reads
 # ------------------------------------------------------------
 # ha.lp is served by Pi-hole's own web server and opens /etc/pihole-ha/*,

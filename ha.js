@@ -281,9 +281,24 @@ $(function () {
             var isDesignatedMaster = manualMaster && statusData.dhcp_master === node.ip;
 
             var bgClass;
+            // A DNS-only cluster never activates DHCP anywhere, so the labels
+            // below would call every node "Standby" — the VIP holder included.
+            var dnsOnly = statusData.dhcp_ha === false;
             if (!reachable) {
                 bgClass = "bg-red";
                 $status.text("UNREACHABLE");
+            } else if (dnsOnly) {
+                if (vipHeld) {
+                    bgClass = "bg-green";
+                    $status.text("Serving DNS (VIP)");
+                } else if (!vipEnabled) {
+                    // No VIP to move: every node answers for itself.
+                    bgClass = "bg-green";
+                    $status.text("Serving DNS");
+                } else {
+                    bgClass = "bg-aqua";
+                    $status.text("Standby");
+                }
             } else if (dhcpActive && isDesignatedMaster) {
                 bgClass = "bg-green";
                 $status.text("MANUAL MASTER");
