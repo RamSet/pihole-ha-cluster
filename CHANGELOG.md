@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.11 — 2026-10-29
+- Stop calling every node in a DNS-only cluster "Standby"
+
 ## v3.19.10 — 2026-10-27
 - Document the per-node web port in the Docker node list
 
