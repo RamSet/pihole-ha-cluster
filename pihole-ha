@@ -402,14 +402,14 @@ if [[ "$CONFIG_VERSION" -ne "$EXPECTED_CONFIG_VERSION" ]]; then
 fi
 
 # Manage dnsmasq DHCP options advertised to clients
-# VIP enabled:  DNS=VIP only, DHCP server-id=VIP
+# VIP enabled: DNS=VIP only; keep dnsmasq's native DHCP server identifier
 # VIP disabled: DNS=all node IPs, no server-id override
 DNSMASQ_HA="/etc/dnsmasq.d/09-pihole-ha.conf"
 build_dns_option() {
     local lines=""
     if [[ "$VIP_ENABLED" == "true" && -n "$VIP" ]]; then
-        # VIP mode: single VIP as DNS + DHCP server identifier
-        lines="dhcp-option=6,$VIP"$'\n'"dhcp-option=54,$VIP"
+        # Generic option 54 can duplicate the built-in option and cause NAKs.
+        lines="dhcp-option=6,$VIP"
     else
         # No VIP: all node IPs as DNS, no server-id override
         local dns_list=""

@@ -18,7 +18,7 @@ At install it checks whether Pi-hole DHCP is active, probes the LAN for another 
 ## What It Does
 
 - **DHCP Failover** — If the primary Pi-hole goes down, a secondary node automatically takes over DHCP within ~40-80 seconds. When the primary recovers, the secondary yields back. Clients never lose DHCP.
-- **Virtual IP (VIP)** — Optional floating IP. In DHCP-HA mode it follows the active DHCP node (clients get it as their DNS server and DHCP server-id, so renewals always reach the right node). In DNS-only mode it follows the highest-priority node that's answering DNS, giving health-based DNS failover. When disabled, clients get all node IPs as DNS servers instead.
+- **Virtual IP (VIP)** — Optional floating IP. In DHCP-HA mode it follows the active DHCP node (clients get it as their DNS server; DHCP server identifiers remain node-specific). In DNS-only mode it follows the highest-priority node that's answering DNS, giving health-based DNS failover. When disabled, clients get all node IPs as DNS servers instead.
 - **Config Sync** — The sync primary bundles gravity DB, DHCP static leases, custom DNS records, and FTL settings — and rebuilds that bundle **only when something actually changes**. Standbys check the primary every ~15 minutes and download + apply **only when the config differs** (and even then, FTL only restarts on real changes) — plus an on-demand **Sync Now** button. So nothing transfers or restarts on unchanged data, and no SSH keys are needed.
 - **Manual DHCP Master Override** — Force any node to be the DHCP server with one click. The others yield automatically. If the designated master goes down, remaining nodes fall back to priority order.
 - **HA Kill-Switch** — Disable all DHCP failover, health checks, and VIP management cluster-wide with one toggle. Propagates to all nodes automatically.
@@ -72,7 +72,7 @@ At install it checks whether Pi-hole DHCP is active, probes the LAN for another 
 
 All nodes run the same software. Priority order determines who serves DHCP when in automatic mode.
 
-**VIP enabled**: The VIP (`/32`) is added to the active node's interface and removed when it deactivates, with gratuitous ARP to update switch/router tables. Clients receive only the VIP as their DNS server (`dhcp-option=6`) and DHCP server identifier (`dhcp-option=54`), so lease renewals always reach the active node.
+**VIP enabled**: The VIP (`/32`) is added to the active node's interface and removed when it deactivates, with gratuitous ARP to update switch/router tables. Clients receive only the VIP as their DNS server (`dhcp-option=6`). The DHCP server identifier remains the serving node address; a unicast T1 renewal can still target the old node after failover.
 
 **VIP disabled**: No floating IP is managed. Clients receive all node IPs as DNS servers (`dhcp-option=6`), providing redundancy without a VIP. Clients use whichever node answered their DHCP request as the server identifier.
 
@@ -198,7 +198,7 @@ The core daemon runs on every node (systemd service or Docker supervisor). Every
    - Deactivation: All nodes need 3 consecutive checks (60s)
 5. **Manages the VIP** (if `VIP_ENABLED=true`) — adds it on activation with gratuitous ARP, removes it on deactivation
 6. **Updates DHCP options** — writes `/etc/dnsmasq.d/09-pihole-ha.conf`:
-   - VIP enabled: `dhcp-option=6,<VIP>` + `dhcp-option=54,<VIP>` (single DNS + server-id)
+   - VIP enabled: `dhcp-option=6,<VIP>` (stable DNS endpoint, native node server-id)
    - VIP disabled: `dhcp-option=6,<node1>,<node2>,<node3>` (all nodes as DNS)
 7. **Writes status JSON** to `/run/pihole-ha/status.json` for the dashboard
 
@@ -257,7 +257,7 @@ The VIP is an optional floating IP address, controlled by `VIP_ENABLED` in `node
 
 | `VIP_ENABLED` | DHCP options written to `09-pihole-ha.conf` | Behavior |
 |---------------|----------------------------------------------|----------|
-| `true` | `dhcp-option=6,<VIP>` + `dhcp-option=54,<VIP>` | Clients see one stable DNS endpoint. DHCP renewals always target the VIP, which follows the active node. |
+| `true` | `dhcp-option=6,<VIP>` | Clients see one stable DNS endpoint; DHCP server identifiers remain node-specific. |
 | `false` | `dhcp-option=6,<node1>,<node2>,<node3>` | Clients see all node IPs as DNS. No VIP is managed. Clients renew against whichever node answered. |
 
 - `dhcp-option=6` = DNS servers advertised to clients (RFC 2132)
@@ -675,3 +675,20 @@ docker compose down
 ## License
 
 [Apache License 2.0](LICENSE).
+## Fork compatibility fixes
+
+This fork carries the Docker fixes used in a tested Pi-hole FTL v6.8 deployment:
+
+- Do not append a generic DHCP option 54 override. In wire-level tests it either was not sent (when absent from the parameter request list), or duplicated the native server identifier and caused a NAK when the client chose VIP. VIP remains DNS option 6. This is a compatibility mitigation, not seamless unicast T1 failover.
+- Change Docker DHCP activation through the running FTL API using the configured `PIHOLE_PASSWORD` / `PIHOLE_HA_API_PASSWORD` and `PIHOLE_WEB_PORT`. Do not rely on a CLI disk-config write to activate the running DHCP server. Systemd retains the upstream CLI path.
+- Include the `pihole` UID/GID 1000 in the sidecar so sync-created files remain readable by the official Pi-hole container.
+
+`SYNC_DHCP` still syncs reservations, not active leases. Active lease replication is a separate planned change and is not implemented by these fixes.
+
+Run the focused function/HTTP-fixture regressions with:
+
+```sh
+python3 tests/test_docker_dhcp.py
+```
+
+The fixture tests do not replace real FTL DORA/failover checks. They test the production Bash functions, a local HTTP API boundary, failure propagation, session cleanup, and unchanged systemd behavior.

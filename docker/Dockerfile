@@ -27,6 +27,10 @@ RUN apk add --no-cache \
     tar \
     gzip
 
+# Match the official Pi-hole UID/GID so sync-installed files stay readable by FTL.
+RUN addgroup -g 1000 pihole \
+ && adduser -D -H -u 1000 -G pihole pihole
+
 # Copy pihole-FTL binary (needed for --config CLI to signal running FTL)
 COPY --from=pihole-src /usr/bin/pihole-FTL /usr/bin/pihole-FTL
 
