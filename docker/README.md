@@ -265,6 +265,16 @@ Same value on both — the node whose IP comes first in the list is primary.
 
 The HA page is automatically injected into Pi-hole's admin UI at container startup. Access it at `http://<node-ip>:<pihole-port>/admin/ha`. The sidecar stages the HA source files to a shared volume, and an inject script running in the Pi-hole container copies them to the web root and patches the sidebar.
 
+**After rebuilding the sidecar image, restart the Pi-hole container too.** The
+panel files live inside the Pi-hole container and are refreshed only by its own
+entrypoint, so a rebuilt sidecar alone leaves the old page in place — the
+version, the node labels and the Config Sync panel all come from those copies.
+Check what is actually installed there:
+
+```bash
+docker exec <pihole-container> cat /usr/local/share/pihole-ha/VERSION
+```
+
 If the HA page disappears after a Pi-hole container rebuild, restart both containers:
 ```bash
 docker compose restart

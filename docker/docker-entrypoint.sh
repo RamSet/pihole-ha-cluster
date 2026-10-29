@@ -10,13 +10,25 @@ log_error() { _log "ERROR" "$*"; }
 
 # --- 0. Populate shared volume with HA web source files ---
 if [[ -d /pihole-ha-src ]]; then
-    cp /usr/local/share/pihole-ha/ha.lp /pihole-ha-src/ 2>/dev/null || true
-    cp /usr/local/share/pihole-ha/ha-api.lp /pihole-ha-src/ 2>/dev/null || true
-    cp /usr/local/share/pihole-ha/ha.js /pihole-ha-src/ 2>/dev/null || true
+    # Named, and complained about when missing: these copies used to swallow
+    # every error, so a file the image did not actually contain staged nothing
+    # and said nothing. VERSION was missing from the image for three releases
+    # that way.
+    _stage() {
+        if [[ -f "/usr/local/share/pihole-ha/$1" ]]; then
+            cp "/usr/local/share/pihole-ha/$1" /pihole-ha-src/ || \
+                log_warn "event=stage_failed file=$1 reason=\"could not copy into the shared volume\""
+        else
+            log_warn "event=stage_missing file=$1 reason=\"not present in this image — the panel will fall back or show unknown\""
+        fi
+    }
+    _stage ha.lp
+    _stage ha-api.lp
+    _stage ha.js
     # The panel renders INSIDE the pihole container and reads the version from
     # its own filesystem, where nothing had ever put it -- so every Docker
     # install showed "Pi-hole HA vunknown".
-    cp /usr/local/share/pihole-ha/VERSION /pihole-ha-src/ 2>/dev/null || true
+    _stage VERSION
     cp /usr/local/bin/pihole-ha-inject-docker.sh /pihole-ha-src/ 2>/dev/null || true
     chmod 755 /pihole-ha-src/pihole-ha-inject-docker.sh 2>/dev/null || true
     # Stage the DHCP-event hook where the pihole container can exec it (dnsmasq,

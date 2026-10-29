@@ -995,6 +995,30 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# Everything the sidecar stages must actually be in the sidecar image
+# ------------------------------------------------------------
+# The entrypoint staged /usr/local/share/pihole-ha/VERSION into the shared
+# volume for the panel to pick up, the Dockerfile never copied it into the
+# image, and the copy ended in "|| true" — so for three releases every Docker
+# install read "Pi-hole HA vunknown" and nothing said why. My own end-to-end
+# test passed because the fixture supplied the file the image lacked
+# (Discourse 86667 #144).
+#
+# Derived, not listed: whatever the entrypoint stages from that directory has
+# to be COPYed into the image, so the next addition cannot repeat this.
+_staged_files="$(grep -oE '^ *_stage [A-Za-z0-9._-]+' "$SCRIPT_DIR/../docker/docker-entrypoint.sh" | awk '{print $2}' | sort -u)"
+assert_contains "the entrypoint stages the version file" "$_staged_files" "VERSION"
+for _f in $_staged_files; do
+    assert_contains "the image contains $_f, which the entrypoint stages" \
+        "$(cat "$SCRIPT_DIR/../docker/Dockerfile")" "/usr/local/share/pihole-ha/$_f"
+done
+# And a missing one must be audible rather than swallowed.
+assert_contains "a file missing from the image is reported" \
+    "$(cat "$SCRIPT_DIR/../docker/docker-entrypoint.sh")" "event=stage_missing"
+assert_not_contains "staging no longer discards its errors" \
+    "$(cat "$SCRIPT_DIR/../docker/docker-entrypoint.sh")" 'cp /usr/local/share/pihole-ha/VERSION /pihole-ha-src/ 2>/dev/null || true'
+
+# ============================================================
 # A DNS-only cluster must not label every node "Standby"
 # ------------------------------------------------------------
 # The node cards were labelled from dhcp_active alone. On a DNS-only cluster no
@@ -1058,7 +1082,7 @@ for _path in $_lp_reads; do
         /usr/local/share/pihole-ha/VERSION)
             # Not a mount: the sidecar stages it and the inject copies it in.
             assert_contains "the sidecar stages the version file" \
-                "$(cat "$SCRIPT_DIR/../docker/docker-entrypoint.sh")" "cp /usr/local/share/pihole-ha/VERSION /pihole-ha-src/"
+                "$(cat "$SCRIPT_DIR/../docker/docker-entrypoint.sh")" "_stage VERSION"
             assert_contains "and the inject installs it where ha.lp reads it" \
                 "$(cat "$SCRIPT_DIR/../docker/pihole-ha-inject-docker.sh")" 'cp "$SRCDIR/VERSION" /usr/local/share/pihole-ha/VERSION' ;;
     esac

@@ -49,6 +49,11 @@ RUN chmod 755 /usr/local/bin/pihole-ha* /usr/local/bin/new-dhcp-device /usr/loca
 COPY ha.lp /usr/local/share/pihole-ha/ha.lp
 COPY ha-api.lp /usr/local/share/pihole-ha/ha-api.lp
 COPY ha.js /usr/local/share/pihole-ha/ha.js
+# The version the panel and /api/version report. Staged into the shared volume
+# at startup and copied into the pihole container by the inject script -- and
+# absent from this image until 3.19.12, so every Docker install read "vunknown"
+# and the staging copy failed silently.
+COPY VERSION /usr/local/share/pihole-ha/VERSION
 
 # Install entrypoint and inject script
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
