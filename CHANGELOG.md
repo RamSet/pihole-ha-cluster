@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.12 — 2026-10-29
+- Put VERSION in the sidecar image it was being staged from
+
 ## v3.19.11 — 2026-10-29
 - Stop calling every node in a DNS-only cluster "Standby"
 
