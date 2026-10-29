@@ -241,9 +241,19 @@ PREVIOUS="$(cat "$HASH_FILE" 2>/dev/null || echo "")"
 FORCE=false
 [[ "${1:-}" == "--force" ]] && FORCE=true
 
+# "Nothing changed" is only a reason to skip if what we published last time is
+# still there. The hash file and the payload live in different places -- on
+# Docker the hash is on a volume and the payload was not -- so a recreated
+# container could come back believing it was up to date while serving nothing,
+# and standbys then log "no peer has a manifest" until some unrelated config
+# change happens to trigger a build. Reported by a Docker user whose "Last
+# build" vanished after a redeploy.
 if [[ "$CURRENT" == "$PREVIOUS" && "$FORCE" != "true" ]]; then
-    log_info "event=skip reason=\"no changes\""
-    exit 0
+    if [[ -s "$PAYLOAD_FILE" && -s "$MANIFEST_FILE" ]]; then
+        log_info "event=skip reason=\"no changes\""
+        exit 0
+    fi
+    log_warn "event=rebuild reason=\"config unchanged but the published payload or manifest is missing — rebuilding so standbys have something to pull\" payload=\"$PAYLOAD_FILE\" manifest=\"$MANIFEST_FILE\""
 fi
 
 # Advance the content-version ONLY on a real content change (not on --force of

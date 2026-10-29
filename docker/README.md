@@ -123,12 +123,15 @@ services:
       - ./etc-dnsmasq:/etc/dnsmasq.d
       - pihole-ha-conf:/etc/pihole-ha
       - pihole-ha-run:/run/pihole-ha
+      - pihole-ha-blob:/var/lib/pihole-ha  # built payload + manifest; without
+                                           # this a redeploy destroys them
       - pihole-ha-src:/pihole-ha-src   # sidecar stages the panel here (rw)
     restart: unless-stopped
 
 volumes:
   pihole-ha-conf:
   pihole-ha-run:
+  pihole-ha-blob:
   pihole-ha-src:
 ```
 

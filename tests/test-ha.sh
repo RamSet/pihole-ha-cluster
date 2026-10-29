@@ -995,6 +995,39 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# "Nothing changed" is no reason to skip when there is nothing published
+# ------------------------------------------------------------
+# The hash the publisher compares against and the payload it serves lived in
+# different places — on Docker the hash was on a volume and /var/lib/pihole-ha
+# was not — so a recreated container came back believing it was up to date
+# while serving nothing. Standbys then log "no peer has a manifest" until some
+# unrelated change happens to trigger a build. A Docker user's "Last build"
+# vanished after a redeploy and never came back (Discourse 86667 #146).
+_skip_probe() {   # $1 = "present" or "missing"
+    local dir; dir="$(mktemp -d)"
+    if [[ "$1" == present ]]; then echo payload > "$dir/p"; echo manifest > "$dir/m"; fi
+    PAYLOAD_FILE="$dir/p" MANIFEST_FILE="$dir/m" bash -c '
+        CURRENT=abc; PREVIOUS=abc; FORCE=false
+        log_info() { echo "INFO $*"; }; log_warn() { echo "WARN $*"; }
+        '"$(sed -n '/^if \[\[ "\$CURRENT" == "\$PREVIOUS" && "\$FORCE" != "true" \]\]; then/,/^fi$/p' "$SCRIPT_DIR/../pihole-ha-sync")"'
+        echo "reached-the-build"
+    '
+    rm -rf "$dir"
+}
+assert_contains "an unchanged config with a payload still skips" "$(_skip_probe present)" "no changes"
+assert_not_contains "and does not reach the build"               "$(_skip_probe present)" "reached-the-build"
+assert_contains "a missing payload rebuilds instead of skipping" "$(_skip_probe missing)" "reached-the-build"
+assert_contains "and says why"                                   "$(_skip_probe missing)" "event=rebuild"
+# ...which only matters because the payload now survives a redeploy at all.
+assert_contains "the compose keeps the payload on a volume" \
+    "$(cat "$SCRIPT_DIR/../docker/docker-compose.yml")" "pihole-ha-blob:/var/lib/pihole-ha"
+assert_contains "and the docs example does too" \
+    "$(cat "$SCRIPT_DIR/../docker/README.md")" "pihole-ha-blob:/var/lib/pihole-ha"
+# A publisher has no "last synced" — say so rather than leaving a blank label.
+assert_contains "a publisher explains its empty sync time" \
+    "$(cat "$SCRIPT_DIR/../ha.js")" "this node publishes (never pulls)"
+
+# ============================================================
 # Everything the sidecar stages must actually be in the sidecar image
 # ------------------------------------------------------------
 # The entrypoint staged /usr/local/share/pihole-ha/VERSION into the shared

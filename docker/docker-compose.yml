@@ -50,12 +50,17 @@ services:
       - pihole-dnsmasq:/etc/dnsmasq.d
       - pihole-ha-conf:/etc/pihole-ha
       - pihole-ha-run:/run/pihole-ha
+      # The built payload and its manifest. Without this they live in the
+      # container layer and are destroyed by every redeploy, leaving the
+      # publisher with nothing to serve.
+      - pihole-ha-blob:/var/lib/pihole-ha
       - pihole-ha-src:/pihole-ha-src
       - pihole-ha-ieee:/var/lib/ieee-data
     restart: unless-stopped
 
 volumes:
   pihole-etc:
+  pihole-ha-blob:
     external: true
   pihole-dnsmasq:
     external: true

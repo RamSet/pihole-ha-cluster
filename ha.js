@@ -546,6 +546,11 @@ $(function () {
             var lp = "Last synced: " + fmtTime(syncCfg.last_pull);
             if (syncCfg.last_pull_status === "unchanged") { lp += " (nothing to apply)"; }
             tsParts.push(lp);
+        } else if (syncCfg && statusData && statusData.node &&
+                   syncCfg.primary === statusData.node.ip) {
+            // A publisher never pulls, so an empty "last synced" is not a fault
+            // — but a blank label reads like one.
+            tsParts.push("this node publishes (never pulls)");
         }
         if (tsParts.length) { $("#sync-ts").text(tsParts.join(" · ")); }
 
