@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.13 — 2026-10-29
+- Rebuild when the published payload is gone, and stop Docker throwing it away
+
 ## v3.19.12 — 2026-10-29
 - Put VERSION in the sidecar image it was being staged from
 
