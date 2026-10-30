@@ -60,6 +60,12 @@ if [[ "$SYNC_BLOB_DIR" != /* ]] || ! mkdir -p "$SYNC_BLOB_DIR" 2>/dev/null || [[
 fi
 SYNC_DIR="/run/pihole-ha"
 LAST_HASH_FILE="$SYNC_DIR/last-pull-hash"
+# When this node last completed a check against the publisher, and what came of
+# it. Every successful outcome records it -- including "already up to date",
+# which is the steady state: a timestamp that only moves when the config
+# changes answers "when did something change", not "is sync alive", and the
+# second is the question people are asking when they look at it.
+_record_pull() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" > /etc/pihole-ha/sync-last-pull 2>/dev/null || true; }
 STAGING_DIR="$SYNC_BLOB_DIR/staging-pull"
 SYNC_CONF="/etc/pihole-ha/sync.conf"
 
@@ -204,6 +210,7 @@ if [[ "$REMOTE_HASH" == "$LOCAL_HASH" && "$FORCE" != "true" ]]; then
         echo "$REMOTE_VER" > /etc/pihole-ha/sync-version
         log_info "event=version_adopt version=$REMOTE_VER reason=\"same content, newer version\""
     fi
+    _record_pull unchanged
     log_info "event=skip reason=\"already up to date\" hash=$REMOTE_HASH"
     exit 0
 fi
@@ -665,7 +672,6 @@ echo "$(( _cur_gen + 1 ))" > "$GEN_FILE"
 # a different question than "did I sync?" (asked for on the forum). On disk,
 # not in /run, so a reboot does not erase the answer.
 
-_record_pull() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" > /etc/pihole-ha/sync-last-pull 2>/dev/null || true; }
 if [[ "$APPLIED_SOMETHING" == "true" ]]; then
     _record_pull applied
     log_info "event=pull_complete status=applied primary=$SYNC_PRIMARY ts=$REMOTE_TS"

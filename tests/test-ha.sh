@@ -995,6 +995,31 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# "Last synced" must answer "is sync alive", not "when did it last change"
+# ------------------------------------------------------------
+# The timestamp was only recorded on the paths that downloaded a payload, so in
+# the steady state -- remote hash unchanged, which is almost always -- the
+# puller exited early and recorded nothing. A user watched it sit at 11:55 for
+# four hours on a healthy cluster and reasonably asked why (Discourse 86667
+# #148). It is the same complaint he had about "Last build", in the line I
+# added to answer it.
+_pullmark_probe() {   # $1 = the log event to look for around the exit
+    grep -B4 "$1" "$SCRIPT_DIR/../pihole-ha-sync-pull" | grep -c '_record_pull' || true
+}
+assert_eq "the steady-state check records a successful sync" "1" \
+    "$(_pullmark_probe 'reason=\\"already up to date\\"')"
+assert_eq "so does a pull that applied something" "1" "$(_pullmark_probe 'status=applied')"
+# Failures must NOT look like a successful sync.
+assert_eq "a peer with no manifest records nothing" "0" \
+    "$(_pullmark_probe 'reason=\\"no peer has a manifest\\"')"
+assert_eq "an unparseable manifest records nothing" "0" \
+    "$(_pullmark_probe 'reason=\\"could not parse manifest\\"')"
+assert_eq "a refused rollback records nothing" "0" "$(_pullmark_probe 'event=pull_reject_older')"
+# One definition, early enough for every caller.
+assert_eq "the recorder is defined once" "1" \
+    "$(grep -c '^_record_pull() {' "$SCRIPT_DIR/../pihole-ha-sync-pull")"
+
+# ============================================================
 # "Nothing changed" is no reason to skip when there is nothing published
 # ------------------------------------------------------------
 # The hash the publisher compares against and the payload it serves lived in
