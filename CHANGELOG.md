@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.15 — 2026-10-31
+- Announce the VIP so the LAN learns it moved
+
 ## v3.19.14 — 2026-10-30
 - Record a sync that found nothing to do, not just one that changed something
 
