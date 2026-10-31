@@ -995,6 +995,71 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# Taking the VIP must actually be announced on the LAN
+# ------------------------------------------------------------
+# Captured on a live interface, the old `arping -U -c3 -I <iface> <VIP>` put
+# this on the wire:
+#
+#   ARP, Request who-has <VIP> (ff:ff:ff:ff:ff:ff) tell <node address>
+#
+# A request FOR the VIP from the node's own address — nothing learns the new
+# MAC from it. Habets arping (the "arping" package on Alpine and Debian)
+# defaults the sender to the interface address and only -S overrides it, while
+# iputils-arping's -U sets sender = target. So whether a failover was announced
+# at all depended on which implementation happened to be installed, and where
+# it was not, clients kept the old MAC until their ARP entry aged out — minutes
+# (Discourse 86667 #150: "the VIP came back but did not answer for several
+# minutes"). The fixed command emits "who-has <VIP> tell <VIP>", verified with
+# tcpdump.
+_announce_probe() {   # $1 = arping identity line, $2 = exit code, $3 = output
+    # The function captures arping's output, so the stub records what it was
+    # called with in a file rather than on stdout, which never comes back.
+    local log; log="$(mktemp)"
+    P_LOG="$log" P_ID="$1" P_RC="$2" P_OUT="$3" bash -c '
+        VIP=10.0.0.9; IFACE=eth0
+        log_info() { echo "INFO $*"; }; log_warn() { echo "WARN $*"; }
+        arping() {
+            if [[ "$1" == "-h" ]]; then printf "%s\n" "$P_ID"; return 0; fi
+            echo "CMD: $*" >> "$P_LOG"
+            printf "%s\n" "$P_OUT"
+            return "$P_RC"
+        }
+        command() { [[ "$1" == "-v" && "$2" == "arping" ]] && return 0; builtin command "$@"; }
+        sleep() { :; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" announce_vip)"'
+        announce_vip
+    '
+    cat "$log"; rm -f "$log"
+}
+_hab="ARPing 2.25, by Thomas Habets <thomas@habets.se>"
+_ipu="Usage: arping [-fqbDUAV] [-c count] ... (iputils)"
+_quiet="ARPING 10.0.0.9 Timeout --- 10.0.0.9 statistics --- 3 packets transmitted, 0 packets received"
+assert_contains "Habets arping is told which address to announce" \
+    "$(_announce_probe "$_hab" 1 "$_quiet")" "-S 10.0.0.9"
+assert_not_contains "iputils arping is not given -S, its -U already does it" \
+    "$(_announce_probe "$_ipu" 0 "$_quiet")" "-S 10.0.0.9"
+assert_contains "the announcement names the interface" \
+    "$(_announce_probe "$_hab" 1 "$_quiet")" "-I eth0"
+# Nobody answers an announcement, so "0 packets received" is success, not failure.
+assert_contains "no replies is not treated as a failure" \
+    "$(_announce_probe "$_hab" 1 "$_quiet")" "status=ok"
+# A real error says so on stderr instead of counting replies.
+assert_contains "a genuine arping error is reported" \
+    "$(_announce_probe "$_hab" 2 "arping: Unknown iface eth0")" "status=failed"
+# Two bursts: one can land while the previous holder is still answering.
+assert_eq "it announces twice" "2" \
+    "$(_announce_probe "$_hab" 1 "$_quiet" | grep -c '^CMD: ')"
+# And if arping is not installed at all, say what the consequence is.
+assert_contains "a missing arping is called out" \
+    "$(bash -c '
+        VIP=10.0.0.9; IFACE=eth0
+        log_warn() { echo "WARN $*"; }; log_info() { echo "INFO $*"; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" announce_vip)"'
+        announce_vip')" "arping is not installed"
+assert_contains "taking the VIP triggers the announcement" \
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha" add_vip)" "announce_vip"
+
+# ============================================================
 # "Last synced" must answer "is sync alive", not "when did it last change"
 # ------------------------------------------------------------
 # The timestamp was only recorded on the paths that downloaded a payload, so in

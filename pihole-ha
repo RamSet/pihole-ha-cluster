@@ -614,6 +614,53 @@ ensure_iface() {
     return 1
 }
 
+# Tell the LAN the VIP has moved here.
+#
+# This was `arping -U -c3 -I <iface> <VIP>` with its output thrown away, and on
+# the wire that produced:
+#
+#   ARP, Request who-has <VIP> (ff:ff:ff:ff:ff:ff) tell <node address>
+#
+# which is an ordinary request FOR the VIP, not an announcement OF it: nothing
+# learns the new MAC from it. Habets arping -- the "arping" package on Alpine
+# and on Debian -- defaults the sender address to the interface's own address,
+# and only -S overrides that. iputils-arping's -U does set sender = target, so
+# which implementation is installed decided whether failover was announced at
+# all. Where it was not, every client and router kept the old MAC until its ARP
+# entry expired, which is minutes: reported as "the VIP came back but did not
+# answer for several minutes".
+#
+# Two bursts, because a single one lands during the window where the previous
+# holder may still be replying, and some switches rate-limit.
+announce_vip() {
+    if ! command -v arping >/dev/null 2>&1; then
+        log_warn "event=vip_announce status=skipped reason=\"arping is not installed — the VIP will work only once clients age out their old ARP entry, which can take minutes\""
+        return 1
+    fi
+    local -a cmd
+    if arping -h 2>&1 | head -1 | grep -qi habets; then
+        cmd=(arping -U -S "$VIP" -c 3 -I "$IFACE" "$VIP")
+    else
+        cmd=(arping -U -c 3 -I "$IFACE" "$VIP")
+    fi
+    local out rc=0 burst
+    for burst in 1 2; do
+        out="$("${cmd[@]}" 2>&1)" || rc=$?
+        (( burst == 1 )) && sleep 2
+    done
+    # An announcement is not a question, so nobody answers it: Habets arping
+    # exits 1 on "0 packets received", which is the normal outcome here and was
+    # being logged as a failure. Only a real error -- no such interface, no
+    # permission, unknown flag -- is worth reporting, and those say so on
+    # stderr rather than counting replies.
+    if (( rc != 0 )) && [[ "$out" != *"packets transmitted"* ]]; then
+        log_warn "event=vip_announce status=failed iface=$IFACE rc=$rc detail=\"${out//$'\n'/ }\""
+        return 1
+    fi
+    log_info "event=vip_announce ip=$VIP iface=$IFACE status=ok bursts=2"
+    return 0
+}
+
 add_vip() {
     [[ "$VIP_ENABLED" != "true" ]] && return 0
     if ! ensure_iface; then
@@ -632,9 +679,7 @@ add_vip() {
         NOTIFY_TAG=vip_claim_failed notify "<b><font color='#e74c3c'>VIP CLAIM VERIFY FAILED</font></b> <br> $LOCAL_IP: kernel did not bind $VIP on $IFACE" &
         return 1
     fi
-    if command -v arping &>/dev/null; then
-        arping -U -c3 -I "$IFACE" "$VIP" &>/dev/null &
-    fi
+    announce_vip &
     log_info "event=vip_add ip=$VIP iface=$IFACE status=ok"
     return 0
 }
