@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.17 — 2026-11-01
+- Keep announcing the VIP while holding it
+
 ## v3.19.16 — 2026-10-31
 - Let a node be told its own address, for Pi-hole on a bridge network
 
