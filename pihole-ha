@@ -1604,6 +1604,28 @@ update_blocking_state() {
     return 0
 }
 
+# Re-announce the VIP while we hold it.
+#
+# A takeover announces once. If that burst is lost, filtered, or ignored --
+# switches rate-limit ARP, and a client that was mid-conversation with the
+# previous holder may keep its entry -- the LAN does not find out until the
+# entry ages out, which is minutes. A reporter saw exactly that: clients
+# broadcasting "who-has <VIP>" for six minutes with nothing answering, then
+# everything recovering the moment another takeover sent a fresh burst.
+# keepalived re-announces for the same reason. Three packets a minute.
+VIP_ANNOUNCE_EVERY=60
+VIP_ANNOUNCE_NEXT=0
+reannounce_vip() {
+    [[ "$VIP_ENABLED" == "true" ]] || return 0
+    has_vip || { VIP_ANNOUNCE_NEXT=0; return 0; }
+    local now="$EPOCHSECONDS"
+    (( now < VIP_ANNOUNCE_NEXT )) && return 0
+    VIP_ANNOUNCE_NEXT=$(( now + VIP_ANNOUNCE_EVERY ))
+    # Quietly: the claim already logged, and a line a minute is noise.
+    announce_vip >/dev/null 2>&1 &
+    return 0
+}
+
 # --- Main Loop ---
 log_info "event=startup ip=$LOCAL_IP priority=$PRIORITY interval=${CHECK_INTERVAL}s activate_after=$ACTIVATE_AFTER deactivate_after=$DEACTIVATE_AFTER"
 log_info "event=startup checks=\"ping dns:53 api dhcp\""
@@ -1638,6 +1660,7 @@ while true; do
     # renewal, NetworkManager. Cheap: returns immediately once it is already
     # pinned, which is the steady state.
     enforce_dns_pin
+    reannounce_vip            # keep the LAN's ARP entry for the VIP fresh
     update_blocking_state     # does this node still actually block anything?
     reconcile_node_order      # adopt a newer priority order a peer holds
     if reload_vip_conf; then  # only update DNS option when VIP config actually changes

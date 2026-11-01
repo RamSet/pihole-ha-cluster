@@ -995,6 +995,40 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# Holding the VIP must be re-announced, not announced once
+# ------------------------------------------------------------
+# A takeover announces once. A reporter captured clients broadcasting
+# "who-has <VIP>" for six minutes with nothing answering, then everything
+# recovering the instant another takeover sent a fresh burst — a lost or
+# ignored announcement is invisible until ARP entries age out (Discourse
+# 86667 #156). keepalived re-announces for the same reason.
+_reann_probe() {   # $1 = holds the VIP?, $2 = seconds from now until next due
+    # The real call redirects to /dev/null, so the stub records to a file; and
+    # EPOCHSECONDS cannot be faked, so timings are measured against it.
+    local log; log="$(mktemp)"
+    P_HAS="$1" P_IN="$2" P_LOG="$log" bash -c '
+        VIP_ENABLED=true; VIP_ANNOUNCE_EVERY=60
+        VIP_ANNOUNCE_NEXT=$(( EPOCHSECONDS + P_IN ))
+        has_vip() { [[ "$P_HAS" == yes ]]; }
+        announce_vip() { echo ANNOUNCED >> "$P_LOG"; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" reannounce_vip)"'
+        reannounce_vip; wait 2>/dev/null
+        echo "due_in=$(( VIP_ANNOUNCE_NEXT - EPOCHSECONDS )) next_raw=$VIP_ANNOUNCE_NEXT"
+    '
+    cat "$log" 2>/dev/null; rm -f "$log"
+}
+assert_contains "the holder re-announces when due"        "$(_reann_probe yes 0)"  "ANNOUNCED"
+assert_contains "and schedules the next one a minute out" "$(_reann_probe yes 0)"  "due_in=60"
+assert_not_contains "it does not announce before due"     "$(_reann_probe yes 30)" "ANNOUNCED"
+assert_contains "and leaves that schedule alone"          "$(_reann_probe yes 30)" "due_in=30"
+assert_not_contains "a node without the VIP says nothing" "$(_reann_probe no 0)"   "ANNOUNCED"
+# Losing the VIP must re-arm, or the node that takes it back waits out the timer.
+# Re-armed means "due immediately", i.e. the timer is reset to zero rather than
+# left in the future — otherwise retaking the VIP waits out the old schedule.
+assert_contains "losing the VIP re-arms the next claim"   "$(_reann_probe no 999)" "next_raw=0"
+assert_contains "the loop re-announces every cycle"     "$(cat "$SCRIPT_DIR/../pihole-ha")" "reannounce_vip            #"
+
+# ============================================================
 # A node must be able to be told its own address
 # ------------------------------------------------------------
 # Identity is detected from the addresses this process can see. That is the
