@@ -995,6 +995,68 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# A VIP another daemon put there is not ours to claim or to fail to remove
+# ------------------------------------------------------------
+# has_vip matches the address with ANY prefix, but remove_vip deleted /32. On a
+# node where keepalived had added the same address as /24, the node therefore
+# believed it held the VIP and could not release it:
+#   vip_remove status=failed error="RTNETLINK answers: Address not available"
+# It then kept reporting a VIP that another daemon owned, while nothing on the
+# LAN answered for it (Discourse 86667 #161).
+_vip_prefix_probe() {   # $1 = the `ip addr show` line to present
+    P_LINE="$1" bash -c '
+        VIP=192.168.1.100; IFACE=eth0
+        ip() { printf "%s\n" "$P_LINE"; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" vip_prefix)"'
+        vip_prefix
+    '
+}
+assert_eq "our own /32 is read back"        "32" "$(_vip_prefix_probe '    inet 192.168.1.100/32 scope global eth0')"
+assert_eq "a foreign /24 is read back"      "24" "$(_vip_prefix_probe '    inet 192.168.1.100/24 brd 192.168.1.255 scope global eth0')"
+assert_eq "an absent address yields nothing" ""  "$(_vip_prefix_probe '    inet 192.168.1.7/24 scope global eth0')"
+_remove_probe() {   # $1 = prefix present on the interface
+    # remove_vip captures the command's output into $err, so the stub records
+    # the invocation to a file instead of stdout.
+    local log; log="$(mktemp)"
+    P_LOG="$log" P_PLEN="$1" bash -c '
+        VIP=192.168.1.100; IFACE=eth0
+        log_info() { echo "INFO $*"; }; log_error() { echo "ERROR $*"; }
+        has_vip() { return 0; }
+        vip_prefix() { printf "%s" "$P_PLEN"; }
+        ip() { echo "CMD: $*" >> "$P_LOG"; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" remove_vip)"'
+        remove_vip
+    '
+    cat "$log"; rm -f "$log"
+}
+assert_contains "removal uses the prefix that is actually there" \
+    "$(_remove_probe 24)" "addr del 192.168.1.100/24"
+assert_contains "and still handles our own /32" \
+    "$(_remove_probe 32)" "addr del 192.168.1.100/32"
+# Claiming an address another daemon owns must be said out loud, not absorbed.
+_claim_probe() {   # $1 = prefix already present
+    P_PLEN="$1" bash -c '
+        VIP=192.168.1.100; IFACE=eth0; VIP_ENABLED=true
+        log_info() { echo "INFO $*"; }; log_warn() { echo "WARN $*"; }; log_error() { :; }
+        notify() { :; }; announce_vip() { :; }
+        ensure_iface() { return 0; }
+        has_vip() { return 0; }
+        vip_prefix() { printf "%s" "$P_PLEN"; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" add_vip)"'
+        add_vip
+    '
+}
+assert_contains "a VIP with a foreign prefix is flagged" "$(_claim_probe 24)" "event=vip_foreign"
+assert_contains "and names the likely owner"             "$(_claim_probe 24)" "keepalived"
+assert_not_contains "our own /32 is not flagged"         "$(_claim_probe 32)" "event=vip_foreign"
+
+# "Unknown IP: x.x.x.x" told nobody what it had been compared against.
+_hasrc3="$(cat "$SCRIPT_DIR/../pihole-ha")"
+assert_contains "the identity error prints the node list"  "$_hasrc3" 'not in the cluster node list (HA_NODES='
+assert_contains "and names the Docker override"            "$_hasrc3" "PIHOLE_HA_LOCAL_IP"
+assert_contains "and explains why a changed list was ignored" "$_hasrc3" "PIHOLE_HA_FORCE_CONFIG=true"
+
+# ============================================================
 # Holding the VIP must be re-announced, not announced once
 # ------------------------------------------------------------
 # A takeover announces once. A reporter captured clients broadcasting

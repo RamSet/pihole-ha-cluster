@@ -116,7 +116,16 @@ MY_IDX=-1
 for (( i=0; i<NODE_COUNT; i++ )); do
     [[ "$LOCAL_IP" == "${NODES[$i]}" ]] && { MY_IDX=$i; break; }
 done
-[[ $MY_IDX -lt 0 ]] && { echo "Unknown IP: $LOCAL_IP" >&2; exit 1; }
+if (( MY_IDX < 0 )); then
+    # "Unknown IP: x.x.x.x" on its own told nobody what it was compared against.
+    # A Docker user hit it with a stale nodes.conf naming a different address
+    # and had no way to see that from the message.
+    echo "ERROR: this node's address ($LOCAL_IP) is not in the cluster node list (HA_NODES=${NODES[*]})." >&2
+    echo "       Either the detected address is wrong — set PIHOLE_HA_LOCAL_IP (Docker) or correct it in $NODES_CONF —" >&2
+    echo "       or the node list is: fix HA_NODES there. On Docker, nodes.conf is only regenerated from the" >&2
+    echo "       environment when PIHOLE_HA_FORCE_CONFIG=true, so a changed PIHOLE_HA_NODES is otherwise ignored." >&2
+    exit 1
+fi
 
 PRIORITY=$((MY_IDX + 1))
 ROLE="${ROLES[$MY_IDX]}"
@@ -601,6 +610,20 @@ has_vip() {
     ip -4 addr show dev "$IFACE" 2>/dev/null | grep -qE "inet $VIP/"
 }
 
+# The prefix length the VIP is actually configured with, if it is present.
+#
+# We add it as /32, but has_vip matches any prefix -- so an address put there
+# by something else (keepalived adds its VIPs with the interface's own prefix,
+# /24 typically) reads as "we hold it". Deleting then fails, because
+# `ip addr del` needs the exact prefix: a node logged
+#   vip_remove status=failed error="RTNETLINK answers: Address not available"
+# on shutdown, kept the address, and went on reporting that it held a VIP that
+# another daemon owned (Discourse 86667 #161).
+vip_prefix() {
+    [[ -n "$VIP" && -n "$IFACE" ]] || return 1
+    ip -4 addr show dev "$IFACE" 2>/dev/null | sed -n "s#.*inet $VIP/\([0-9]\{1,3\}\).*#\1#p" | head -1
+}
+
 # Re-detect IFACE if missing (interface may rename after reboot or USB ethernet reattach)
 ensure_iface() {
     [[ -n "$IFACE" ]] && ip link show "$IFACE" &>/dev/null && return 0
@@ -667,7 +690,17 @@ add_vip() {
         NOTIFY_TAG=vip_claim_failed notify "<b><font color='#e74c3c'>VIP CLAIM FAILED</font></b> <br> $LOCAL_IP: no network interface" &
         return 1
     fi
-    has_vip && return 0
+    if has_vip; then
+        # Already there. If it is not the /32 we would have added, someone else
+        # put it there -- keepalived, a static config, an older release -- and
+        # two managers on one address is worth saying out loud rather than
+        # quietly counting it as ours.
+        local _plen; _plen="$(vip_prefix)"
+        if [[ -n "$_plen" && "$_plen" != "32" ]]; then
+            log_warn "event=vip_foreign ip=$VIP iface=$IFACE prefix=/$_plen reason=\"this address is already configured with a prefix pihole-ha does not use — something else (keepalived?) is probably managing it; running both on one VIP will fight\""
+        fi
+        return 0
+    fi
     local err
     err="$(ip addr add "$VIP/32" dev "$IFACE" 2>&1)" || {
         log_error "event=vip_add status=failed iface=$IFACE error=\"$err\""
@@ -686,12 +719,16 @@ add_vip() {
 
 remove_vip() {
     has_vip || return 0
-    local err
-    err="$(ip addr del "$VIP/32" dev "$IFACE" 2>&1)" || {
-        log_error "event=vip_remove status=failed iface=$IFACE error=\"$err\""
+    # Delete the prefix that is actually there. Hardcoding /32 failed against
+    # an address another daemon had added as /24, which left it bound with this
+    # node still claiming it.
+    local plen err
+    plen="$(vip_prefix)"; plen="${plen:-32}"
+    err="$(ip addr del "$VIP/$plen" dev "$IFACE" 2>&1)" || {
+        log_error "event=vip_remove status=failed iface=$IFACE prefix=/$plen error=\"$err\" note=\"if another daemon manages this address, pihole-ha should not also be configured with it\""
         return 1
     }
-    log_info "event=vip_remove ip=$VIP iface=$IFACE status=ok"
+    log_info "event=vip_remove ip=$VIP iface=$IFACE prefix=/$plen status=ok"
 }
 
 set_dhcp() {
