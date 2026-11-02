@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.18 — 2026-11-02
+- Stop claiming a VIP another daemon owns, and say what "Unknown IP" compared
+
 ## v3.19.17 — 2026-11-01
 - Keep announcing the VIP while holding it
 
