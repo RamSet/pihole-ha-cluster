@@ -1218,6 +1218,13 @@ yielded_to() {
 # consecutive silences.
 VIP_ORPHAN_AFTER=3
 vip_orphan_count=0
+# The probe is two ARP packets, and running it every cycle put a pair on the
+# wire every few seconds forever -- visible in a reporter's capture as a steady
+# stream of "who-has <VIP>" from the standby, and it also parks the loop for up
+# to two seconds each time. Once per VIP_PROBE_EVERY is enough: three silences
+# still catches a stranded VIP inside a minute.
+VIP_PROBE_EVERY=10
+vip_probe_next=0
 # Set when we took the VIP because nobody was holding it. Until the node we are
 # meant to defer to proves it can actually hold it, giving the address back
 # just strands it again: a reporter saw the VIP answer for 17s and time out for
@@ -1231,6 +1238,19 @@ vip_claimed_stranded=false
 # It is used only to decide whether to give back a VIP we picked up because it
 # was stranded, where the conservative answer (keep holding) is also the safe
 # one: we are the only holder either way.
+# Does this peer actually answer DNS, as opposed to having port 53 open?
+#
+# The health check is a port probe, which FTL satisfies the moment it binds --
+# before gravity is loaded and before it answers anything. Good enough for
+# "is it alive", wrong for "can I hand it the VIP": a standby released the
+# address to a node that then took another minute to serve, and the VIP was
+# dark in between (Discourse 86667 #178).
+peer_answers_dns() {
+    local ip="$1"
+    command -v dig >/dev/null 2>&1 || return 0   # cannot ask: keep old behaviour
+    dig +short +tries=1 +time="${HEALTH_TIMEOUT:-2}" "@$ip" pi.hole A >/dev/null 2>&1
+}
+
 peer_ha_alive() {
     local ip="$1" resp ts
     resp="$(curl -sf --max-time "${HEALTH_TIMEOUT:-2}" "http://${ip}:8887/api/status" 2>/dev/null)" || return 1
@@ -1406,7 +1426,8 @@ dns_only_vip_cycle() {
             # We yielded to a higher-priority node. Check it actually took the
             # address: if nobody answers for it over several cycles, the node we
             # deferred to cannot claim it and the VIP is stranded.
-            if is_dns_healthy "$LOCAL_IP" && ! vip_is_answered; then
+            if is_dns_healthy "$LOCAL_IP" && (( EPOCHSECONDS >= vip_probe_next )) && ! vip_is_answered; then
+                vip_probe_next=$(( EPOCHSECONDS + VIP_PROBE_EVERY ))
                 (( vip_orphan_count++ )) || true
                 if (( vip_orphan_count >= VIP_ORPHAN_AFTER )); then
                     log_warn "event=vip_orphaned ip=$VIP checks=$vip_orphan_count reason=\"a higher-priority node answers DNS but nothing answers for the VIP — claiming it so the address is served\""
@@ -1435,6 +1456,13 @@ dns_only_vip_cycle() {
             if [[ -n "$_heir" ]] && ! peer_ha_alive "$_heir"; then
                 deactivate_count=0
                 write_status "DNS-only - holding VIP $VIP ($_heir answers DNS but its HA daemon is not running)"
+                return
+            fi
+            # Its daemon is back. Hand over only once it can answer a query --
+            # port 53 opens well before FTL has loaded gravity.
+            if [[ -n "$_heir" ]] && ! peer_answers_dns "$_heir"; then
+                deactivate_count=0
+                write_status "DNS-only - holding VIP $VIP ($_heir is starting up, not answering queries yet)"
                 return
             fi
         fi

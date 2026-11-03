@@ -995,6 +995,38 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# Hand the VIP over when the heir can serve, and stop ARPing every cycle
+# ------------------------------------------------------------
+# Two things a reporter saw after the previous fixes (Discourse 86667 #178):
+# a steady stream of "who-has <VIP>" from the standby, which was the orphan
+# probe running every cycle; and the VIP dark for a minute after a switchover,
+# because the standby released it to a node whose port 53 was open while FTL
+# was still loading gravity.
+assert_contains "the stranded-VIP probe has its own slower clock" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha")" "VIP_PROBE_EVERY"
+assert_contains "and the cycle respects it" \
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha" dns_only_vip_cycle)" 'EPOCHSECONDS >= vip_probe_next'
+
+_answers_probe() {   # $1 = dig exit code, "nodig" for no dig at all
+    P_RC="$1" bash -c '
+        HEALTH_TIMEOUT=1
+        if [[ "$P_RC" != nodig ]]; then
+            dig() { return "$P_RC"; }
+            command() { [[ "$1" == "-v" && "$2" == "dig" ]] && return 0; builtin command "$@"; }
+        else
+            command() { [[ "$1" == "-v" && "$2" == "dig" ]] && return 1; builtin command "$@"; }
+        fi
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" peer_answers_dns)"'
+        peer_answers_dns 10.0.0.2 && echo SERVING || echo NOT_YET
+    '
+}
+assert_eq "a peer that replies is ready"            "SERVING" "$(_answers_probe 0)"
+assert_eq "a peer that does not reply is not"       "NOT_YET" "$(_answers_probe 9)"
+# No dig: fall back to the old behaviour rather than never handing over.
+assert_eq "without dig we do not block the handover" "SERVING" "$(_answers_probe nodig)"
+
+
+# ============================================================
 # A port is a number, whatever the environment hands us
 # ------------------------------------------------------------
 # A user's status JSON came back saying:
@@ -1072,7 +1104,7 @@ assert_eq "no answer at all means it is not"                     "DEAD" "$(_aliv
 assert_eq "an answer without a timestamp means it is not"        "DEAD" "$(_alive_probe 0 '{"node":{}}')"
 
 _hold_probe() {   # $1 = claimed-stranded?, $2 = heir's daemon alive?
-    P_CLAIMED="$1" P_ALIVE="$2" bash -c '
+    P_CLAIMED="$1" P_ALIVE="$2" P_ANSWERS="${3:-yes}" bash -c '
         VIP=10.0.0.9; IFACE=eth0; VIP_ENABLED=true; HA_ENABLED=true
         GATEWAY=10.0.0.1; MY_IDX=1; NODES=(10.0.0.1 10.0.0.2); LOCAL_IP=10.0.0.2
         ROLE=SECONDARY; DEACTIVATE_AFTER=3; ACTIVATE_AFTER=2
@@ -1084,6 +1116,7 @@ _hold_probe() {   # $1 = claimed-stranded?, $2 = heir's daemon alive?
         should_i_hold_vip() { return 1; }     # a higher-priority node answers DNS
         has_vip() { return 0; }               # and we are holding the address
         peer_ha_alive() { [[ "$P_ALIVE" == yes ]]; }
+        peer_answers_dns() { [[ "${P_ANSWERS:-yes}" == yes ]]; }
         remove_vip() { echo RELEASED; }
         add_vip() { :; }; vip_is_answered() { return 0; }
         write_status() { echo "STATUS: $1"; }
@@ -1100,6 +1133,13 @@ assert_not_contains "a living heir gets the normal release countdown" \
 # A VIP held normally is unaffected by any of this.
 assert_not_contains "a normally-held VIP is unaffected" \
     "$(_hold_probe false no)" "its HA daemon is not running"
+# Its daemon being back is not the same as it being able to serve: port 53
+# opens before FTL has loaded gravity, and releasing then leaves the VIP dark.
+assert_contains "a heir still starting up keeps the VIP here" \
+    "$(_hold_probe true yes no)" "not answering queries yet"
+assert_not_contains "and it is not released"  "$(_hold_probe true yes no)" "RELEASED"
+assert_not_contains "a heir that answers gets the normal countdown" \
+    "$(_hold_probe true yes yes)" "not answering queries yet"
 
 # ============================================================
 # A VIP nobody is holding must be picked up
@@ -1146,7 +1186,7 @@ assert_contains "claiming a stranded VIP needs several silent checks" \
 assert_contains "and says why it claimed" \
     "$(cat "$SCRIPT_DIR/../pihole-ha")" "event=vip_orphaned"
 assert_contains "a node whose own DNS is down never claims" \
-    "$(extract_fn "$SCRIPT_DIR/../pihole-ha" dns_only_vip_cycle)" 'is_dns_healthy "$LOCAL_IP" && ! vip_is_answered'
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha" dns_only_vip_cycle)" 'is_dns_healthy "$LOCAL_IP" &&'
 
 # ============================================================
 # A VIP another daemon put there is not ours to claim or to fail to remove
