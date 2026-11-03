@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.20 — 2026-11-03
+- Keep a stranded VIP until the node we defer to can actually hold it
+
 ## v3.19.19 — 2026-11-02
 - Pick up a VIP that nobody is holding
 
