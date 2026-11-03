@@ -995,6 +995,25 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# The PID-namespace dependency has to be documented, including its escape
+# ------------------------------------------------------------
+# "failed to join PID namespace: container <id> is not running" means the
+# target exists but was not running at that instant -- a race, not a stale
+# reference, which reads "No such container" instead. Reproduced both, plus the
+# part that actually bites: after a failed join the sidecar stays exited and
+# the restart policy never retries it (Discourse 86667 #174).
+_docker_readme="$(cat "$SCRIPT_DIR/../docker/README.md")"
+assert_contains "the join failure is explained"          "$_docker_readme" "failed to join PID namespace"
+assert_contains "and that the restart policy will not fix it" \
+    "$_docker_readme" "restart policy will not do it for you"
+assert_contains "and that nothing needs recreating"      "$_docker_readme" "nothing has to be recreated"
+assert_contains "pid: host is offered as the way out"    "$_docker_readme" "pid: host"
+assert_contains "with its trade-off stated"              "$_docker_readme" "every process on the host"
+# Ordering still belongs in the compose we generate.
+assert_contains "the generated compose orders the sidecar after Pi-hole" \
+    "$(cat "$SCRIPT_DIR/../docker/docker-compose.yml")" "depends_on"
+
+# ============================================================
 # Don't hand a stranded VIP back to a node that cannot hold it
 # ------------------------------------------------------------
 # Claiming a stranded VIP is only half of it: the standby then yields again,
