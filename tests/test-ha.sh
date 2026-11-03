@@ -995,6 +995,53 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# A VIP nobody is holding must be picked up
+# ------------------------------------------------------------
+# A standby yields to any higher-priority node that answers ping and DNS. When
+# that node's Pi-hole is up but its HA daemon is not — a container that failed
+# to restart — the standby releases the VIP and the peer never claims it:
+# minutes of clients broadcasting "who-has <VIP>" into silence (Discourse
+# 86667 #167). Gating the yield on the peer's HA API would instead leave both
+# nodes holding the address when that API is simply unreachable, so the
+# standby asks the question that cannot be wrong: does anything answer for it.
+_answered_probe() {   # $1 = what arping prints
+    P_OUT="$1" bash -c '
+        VIP=10.0.0.9; IFACE=eth0
+        arping() { printf "%s\n" "$P_OUT"; return 1; }
+        command() { [[ "$1" == "-v" && "$2" == "arping" ]] && return 0; builtin command "$@"; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" vip_is_answered)"'
+        vip_is_answered && echo OWNED || echo UNOWNED
+    '
+}
+assert_eq "a reply means someone holds it" "OWNED" \
+    "$(_answered_probe '2 packets transmitted, 1 packets received,  50% unanswered')"
+assert_eq "no reply from a probe that ran means nobody does" "UNOWNED" \
+    "$(_answered_probe '2 packets transmitted, 0 packets received, 100% unanswered')"
+assert_eq "iputils wording is understood too" "UNOWNED" \
+    "$(_answered_probe 'Sent 2 probes (2 broadcast(s)) Received 0 response(s)')"
+assert_eq "and its positive case" "OWNED" \
+    "$(_answered_probe 'Sent 2 probes (2 broadcast(s)) Received 2 response(s)')"
+# The dangerous direction: a probe that could not run must never read as
+# "nobody owns it", or a standby claims an address another node is holding.
+# Caught in testing — as an unprivileged user every probe came back silent,
+# including the gateway's.
+assert_eq "a probe that could not run reads as owned" "OWNED" \
+    "$(_answered_probe 'arping: Could not open raw socket: Operation not permitted')"
+assert_eq "an unknown interface reads as owned" "OWNED" \
+    "$(_answered_probe 'arping: Unknown interface eth9')"
+assert_eq "no arping at all reads as owned" "OWNED" \
+    "$(bash -c '
+        VIP=10.0.0.9; IFACE=eth0
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" vip_is_answered)"'
+        vip_is_answered && echo OWNED || echo UNOWNED')"
+assert_contains "claiming a stranded VIP needs several silent checks" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha")" "VIP_ORPHAN_AFTER"
+assert_contains "and says why it claimed" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha")" "event=vip_orphaned"
+assert_contains "a node whose own DNS is down never claims" \
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha" dns_only_vip_cycle)" 'is_dns_healthy "$LOCAL_IP" && ! vip_is_answered'
+
+# ============================================================
 # A VIP another daemon put there is not ours to claim or to fail to remove
 # ------------------------------------------------------------
 # has_vip matches the address with ANY prefix, but remove_vip deleted /32. On a

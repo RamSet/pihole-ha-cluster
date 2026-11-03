@@ -1202,6 +1202,42 @@ yielded_to() {
 }
 
 # --- DNS-only VIP failover helpers ---
+# Is anyone actually answering for the VIP?
+#
+# A standby yields to any higher-priority node that answers ping and DNS. On a
+# node where Pi-hole is up but the HA daemon is not -- a container that failed
+# to restart, a stopped service -- that test passes and nothing then claims the
+# address: the standby releases it and the "healthy" peer never takes it. A
+# reporter's capture showed minutes of clients broadcasting "who-has <VIP>"
+# with silence (Discourse 86667 #167).
+#
+# Gating the yield on the peer's HA API would risk the opposite fault: a peer
+# whose dash we cannot reach but whose daemon is fine would leave both nodes
+# holding the address. So ask the only question that cannot be wrong -- does
+# anything on the LAN answer for this address -- and reclaim only after several
+# consecutive silences.
+VIP_ORPHAN_AFTER=3
+vip_orphan_count=0
+vip_is_answered() {
+    # No way to ask: assume it is owned, which is the conservative answer.
+    command -v arping >/dev/null 2>&1 || return 0
+    [[ -n "$IFACE" && -n "$VIP" ]] || return 0
+    local out
+    out="$(arping -c 2 -w 2 -I "$IFACE" "$VIP" 2>&1)"
+    # Exit status alone is not safe here. arping without a raw socket, or
+    # pointed at an interface that does not exist, also "fails" -- and reading
+    # that as "nobody owns the VIP" would have a standby claim an address
+    # another node is holding. Caught exactly that way in testing: as an
+    # unprivileged user every probe came back silent, including the gateway's.
+    # So only a probe that demonstrably RAN may report an unanswered address.
+    case "$out" in
+        *"packets transmitted"*)                       # Habets arping
+            [[ "$out" == *" 0 packets received"* ]] && return 1 ;;
+        *"probes"*|*"response(s)"*)                     # iputils arping
+            [[ "$out" == *"Received 0 response(s)"* ]] && return 1 ;;
+    esac
+    return 0
+}
 # Health for DNS failover deliberately excludes the Pi-hole API and DHCP: all we
 # need to know is whether the node can answer DNS (port 53). Requiring the API
 # would let a password-locked peer look "down" and trigger a false takeover.
@@ -1343,6 +1379,22 @@ dns_only_vip_cycle() {
         activate_count=0
         if ! has_vip; then
             deactivate_count=0
+            # We yielded to a higher-priority node. Check it actually took the
+            # address: if nobody answers for it over several cycles, the node we
+            # deferred to cannot claim it and the VIP is stranded.
+            if is_dns_healthy "$LOCAL_IP" && ! vip_is_answered; then
+                (( vip_orphan_count++ )) || true
+                if (( vip_orphan_count >= VIP_ORPHAN_AFTER )); then
+                    log_warn "event=vip_orphaned ip=$VIP checks=$vip_orphan_count reason=\"a higher-priority node answers DNS but nothing answers for the VIP — claiming it so the address is served\""
+                    add_vip && notify "<b><font color='#f39c12'>$ROLE CLAIMED STRANDED VIP</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> took <b>$VIP</b>: nobody was answering for it" &
+                    vip_orphan_count=0
+                    write_status "DNS-only - holding VIP $VIP (claimed, nobody held it)"
+                    return
+                fi
+                write_status "DNS-only - standby (VIP unanswered $vip_orphan_count/$VIP_ORPHAN_AFTER)"
+                return
+            fi
+            vip_orphan_count=0
             write_status "DNS-only - standby"
             return
         fi
