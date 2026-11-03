@@ -141,6 +141,30 @@ volumes:
 > Config Sync panel — comes from those two read-only mounts on the **Pi-hole**
 > service, not from the sidecar's copies.
 
+### Platforms that recreate containers (Synology DSM HA, and similar)
+
+`pid: "service:pihole"` is resolved to a specific **container** when the
+sidecar is created, not to the service name. Anything that recreates the
+Pi-hole container — a DSM HA controller switchover, for instance — leaves the
+sidecar pointing at a container ID that no longer exists, and it then fails to
+start with:
+
+```
+State.Error = container <id> is not running
+HostConfig.PidMode = container:<id>
+```
+
+Restarting that container cannot fix it, because the dead ID is part of its
+configuration; it has to be **recreated**. `docker compose up -d` on the stack
+does that, and `depends_on` is worth having for ordering but does not re-resolve
+the namespace on its own. On a platform that fails over by itself, run
+`docker compose up -d` from a boot task rather than relying on the restart
+policy.
+
+Meanwhile the other node keeps serving: since v3.19.19 a standby that has
+yielded will claim a VIP nothing answers for, and since v3.19.20 it holds onto
+it until the node it deferred to shows its HA daemon running again.
+
 ### Keeping Pi-hole on a bridge network
 
 The sidecar itself must run `network_mode: host`: it identifies this node by

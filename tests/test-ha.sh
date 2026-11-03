@@ -995,6 +995,65 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# Don't hand a stranded VIP back to a node that cannot hold it
+# ------------------------------------------------------------
+# Claiming a stranded VIP is only half of it: the standby then yields again,
+# because the peer still answers DNS, and the address flaps — a reporter
+# measured it answering for 17s and silent for 12s, repeatedly (Discourse
+# 86667). So once we have picked up a stranded VIP, we keep it until the node
+# we are meant to defer to shows its HA daemon is actually running. Safe in the
+# conservative direction: we are the only holder, so refusing to let go cannot
+# produce two.
+_alive_probe() {   # $1 = curl exit, $2 = body
+    P_RC="$1" P_BODY="$2" bash -c '
+        CHECK_INTERVAL=10; HEALTH_TIMEOUT=1
+        source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
+        curl() { printf "%s" "$P_BODY"; return "$P_RC"; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" peer_ha_alive)"'
+        peer_ha_alive 10.0.0.2 && echo ALIVE || echo DEAD
+    '
+}
+_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+_old="$(date -u -d "-10 min" +%Y-%m-%dT%H:%M:%SZ)"
+assert_eq "a freshly written status means the daemon is running" "ALIVE" \
+    "$(_alive_probe 0 "{\"timestamp\":\"$_now\"}")"
+# The dash keeps answering after the daemon stops; the status file goes stale.
+assert_eq "a stale status means it is not"                       "DEAD" \
+    "$(_alive_probe 0 "{\"timestamp\":\"$_old\"}")"
+assert_eq "no answer at all means it is not"                     "DEAD" "$(_alive_probe 7 '')"
+assert_eq "an answer without a timestamp means it is not"        "DEAD" "$(_alive_probe 0 '{"node":{}}')"
+
+_hold_probe() {   # $1 = claimed-stranded?, $2 = heir's daemon alive?
+    P_CLAIMED="$1" P_ALIVE="$2" bash -c '
+        VIP=10.0.0.9; IFACE=eth0; VIP_ENABLED=true; HA_ENABLED=true
+        GATEWAY=10.0.0.1; MY_IDX=1; NODES=(10.0.0.1 10.0.0.2); LOCAL_IP=10.0.0.2
+        ROLE=SECONDARY; DEACTIVATE_AFTER=3; ACTIVATE_AFTER=2
+        activate_count=0; deactivate_count=0; vip_orphan_count=0
+        vip_claimed_stranded="$P_CLAIMED"
+        log_info() { :; }; log_warn() { :; }; notify() { :; }
+        ping() { return 0; }
+        is_dns_healthy() { return 0; }
+        should_i_hold_vip() { return 1; }     # a higher-priority node answers DNS
+        has_vip() { return 0; }               # and we are holding the address
+        peer_ha_alive() { [[ "$P_ALIVE" == yes ]]; }
+        remove_vip() { echo RELEASED; }
+        add_vip() { :; }; vip_is_answered() { return 0; }
+        write_status() { echo "STATUS: $1"; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" dns_only_vip_cycle)"'
+        dns_only_vip_cycle
+    '
+}
+assert_contains "a stranded VIP is kept while the heir's daemon is down" \
+    "$(_hold_probe true no)" "its HA daemon is not running"
+assert_not_contains "and is not released"          "$(_hold_probe true no)"  "RELEASED"
+# Once it can take it, the normal countdown resumes.
+assert_not_contains "a living heir gets the normal release countdown" \
+    "$(_hold_probe true yes)" "its HA daemon is not running"
+# A VIP held normally is unaffected by any of this.
+assert_not_contains "a normally-held VIP is unaffected" \
+    "$(_hold_probe false no)" "its HA daemon is not running"
+
+# ============================================================
 # A VIP nobody is holding must be picked up
 # ------------------------------------------------------------
 # A standby yields to any higher-priority node that answers ping and DNS. When

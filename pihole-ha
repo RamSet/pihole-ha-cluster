@@ -1218,6 +1218,30 @@ yielded_to() {
 # consecutive silences.
 VIP_ORPHAN_AFTER=3
 vip_orphan_count=0
+# Set when we took the VIP because nobody was holding it. Until the node we are
+# meant to defer to proves it can actually hold it, giving the address back
+# just strands it again: a reporter saw the VIP answer for 17s and time out for
+# 12s, over and over, which is this exact loop (Discourse 86667).
+vip_claimed_stranded=false
+
+# Is the peer's HA daemon alive, as opposed to its Pi-hole?
+#
+# Deliberately NOT used to decide whether to yield in general -- a peer whose
+# dash we merely cannot reach would then leave both nodes holding the address.
+# It is used only to decide whether to give back a VIP we picked up because it
+# was stranded, where the conservative answer (keep holding) is also the safe
+# one: we are the only holder either way.
+peer_ha_alive() {
+    local ip="$1" resp ts
+    resp="$(curl -sf --max-time "${HEALTH_TIMEOUT:-2}" "http://${ip}:8887/api/status" 2>/dev/null)" || return 1
+    ts="$(json_str "$resp" timestamp)"
+    [[ -n "$ts" ]] || return 1
+    # The daemon rewrites status every cycle, so a stale file means it stopped.
+    local now_s age_s
+    now_s="$(date -u +%s)"
+    age_s="$(( now_s - $(date -u -d "$ts" +%s 2>/dev/null || echo 0) ))"
+    (( age_s >= 0 && age_s <= (CHECK_INTERVAL * 3 + 30) ))
+}
 vip_is_answered() {
     # No way to ask: assume it is owned, which is the conservative answer.
     command -v arping >/dev/null 2>&1 || return 0
@@ -1386,6 +1410,7 @@ dns_only_vip_cycle() {
                 (( vip_orphan_count++ )) || true
                 if (( vip_orphan_count >= VIP_ORPHAN_AFTER )); then
                     log_warn "event=vip_orphaned ip=$VIP checks=$vip_orphan_count reason=\"a higher-priority node answers DNS but nothing answers for the VIP — claiming it so the address is served\""
+                    vip_claimed_stranded=true
                     add_vip && notify "<b><font color='#f39c12'>$ROLE CLAIMED STRANDED VIP</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> took <b>$VIP</b>: nobody was answering for it" &
                     vip_orphan_count=0
                     write_status "DNS-only - holding VIP $VIP (claimed, nobody held it)"
@@ -1398,9 +1423,25 @@ dns_only_vip_cycle() {
             write_status "DNS-only - standby"
             return
         fi
+        # We hold a VIP we picked up because it was stranded. Handing it back to
+        # a node that answers DNS but whose HA daemon is not running simply
+        # strands it again, and the address flaps between answering and silent.
+        # Keep it until that node can actually take it.
+        if [[ "$vip_claimed_stranded" == "true" ]]; then
+            local _heir="" _i
+            for (( _i=0; _i<MY_IDX; _i++ )); do
+                is_dns_healthy "${NODES[$_i]}" && { _heir="${NODES[$_i]}"; break; }
+            done
+            if [[ -n "$_heir" ]] && ! peer_ha_alive "$_heir"; then
+                deactivate_count=0
+                write_status "DNS-only - holding VIP $VIP ($_heir answers DNS but its HA daemon is not running)"
+                return
+            fi
+        fi
         (( deactivate_count++ )) || true
         if (( deactivate_count >= DEACTIVATE_AFTER )); then
             log_info "event=vip_release mode=dns-only"
+            vip_claimed_stranded=false
             remove_vip
             notify "<b><font color='#f39c12'>$ROLE DNS VIP RELEASED</font></b> <br> <font color='#95a5a6'>$LOCAL_IP</font> released VIP <b>$VIP</b>, yielding to higher-priority node" &
             deactivate_count=0
