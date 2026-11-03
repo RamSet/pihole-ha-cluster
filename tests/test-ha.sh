@@ -1008,7 +1008,8 @@ assert_contains "and that the restart policy will not fix it" \
     "$_docker_readme" "restart policy will not do it for you"
 assert_contains "and that nothing needs recreating"      "$_docker_readme" "nothing has to be recreated"
 assert_contains "pid: host is offered as the way out"    "$_docker_readme" "pid: host"
-assert_contains "with its trade-off stated"              "$_docker_readme" "every process on the host"
+# Matched on a fragment the prose cannot line-wrap away.
+assert_contains "with its trade-off stated"              "$_docker_readme" "process on the host, not just"
 # Ordering still belongs in the compose we generate.
 assert_contains "the generated compose orders the sidecar after Pi-hole" \
     "$(cat "$SCRIPT_DIR/../docker/docker-compose.yml")" "depends_on"
