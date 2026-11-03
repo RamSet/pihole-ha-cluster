@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.23 — 2026-11-03
+- Treat a port as a number, whatever the environment hands over
+
 ## v3.19.22 — 2026-11-03
 - Match the docs assertion on text the prose cannot rewrap
 
