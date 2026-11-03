@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.21 — 2026-11-03
+- Correct the PID-namespace advice, and document the way out of it
+
 ## v3.19.20 — 2026-11-03
 - Keep a stranded VIP until the node we defer to can actually hold it
 
