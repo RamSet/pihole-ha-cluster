@@ -53,7 +53,7 @@ declare -A NODE_PORTS
 for _rn in "${_RAW_NODES[@]}"; do
     if [[ "$_rn" == *:* ]]; then
         NODES+=("${_rn%%:*}")
-        NODE_PORTS["${_rn%%:*}"]="${_rn##*:}"
+        NODE_PORTS["${_rn%%:*}"]="$(sane_port "${_rn##*:}")"
     else
         NODES+=("$_rn")
         NODE_PORTS["$_rn"]=80
@@ -278,7 +278,7 @@ reload_vip_conf() {
         for _rn in "${_RAW_NODES[@]}"; do
             if [[ "$_rn" == *:* ]]; then
                 NODES+=("${_rn%%:*}")
-                NODE_PORTS["${_rn%%:*}"]="${_rn##*:}"
+                NODE_PORTS["${_rn%%:*}"]="$(sane_port "${_rn##*:}")"
             else
                 NODES+=("$_rn")
                 NODE_PORTS["$_rn"]=80
@@ -583,7 +583,7 @@ ensure_sid() {
 
 # Override local node's port from env var or FTL query (Docker may differ from nodes.conf)
 if [[ -n "${PIHOLE_WEB_PORT:-}" ]]; then
-    NODE_PORTS["$LOCAL_IP"]="$PIHOLE_WEB_PORT"
+    NODE_PORTS["$LOCAL_IP"]="$(sane_port "$PIHOLE_WEB_PORT")"
 elif _ftl_port="$(pihole-FTL --config webserver.port 2>/dev/null | grep -o '^[0-9]*')" && [[ -n "$_ftl_port" ]]; then
     NODE_PORTS["$LOCAL_IP"]="$_ftl_port"
 fi

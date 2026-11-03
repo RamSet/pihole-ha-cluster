@@ -995,6 +995,34 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# A port is a number, whatever the environment hands us
+# ------------------------------------------------------------
+# A user's status JSON came back saying:
+#   "this node's own Pi-hole API on port 80    # The HOST port for Pi-hole
+#    webgui did not answer"
+# His PIHOLE_WEB_PORT carried an inline comment from a .env file, and the whole
+# string went into a URL (Discourse 86667 #175).
+_port_probe() { bash -c '
+    source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
+    log_warn() { echo "WARN $*"; }
+    sane_port "$1" "${2:-80}"' _ "$1" "${2:-}"; }
+assert_contains "a plain port is used as-is"      "$(_port_probe 8080)" "8080"
+assert_not_contains "and says nothing about it"   "$(_port_probe 8080)" "WARN"
+assert_contains "a trailing comment is trimmed"   "$(_port_probe '80   # the host port')" "80"
+assert_contains "and the trimming is reported"    "$(_port_probe '80   # the host port')" "event=port_trimmed"
+assert_contains "something that is not a port falls back" "$(_port_probe 'notaport')" "80"
+assert_contains "and is reported"                 "$(_port_probe 'notaport')" "event=port_invalid"
+assert_contains "so does a number out of range"   "$(_port_probe 99999)" "event=port_invalid"
+assert_contains "an empty value falls back too"   "$(_port_probe '')" "80"
+# Every place a port is taken has to go through it, or the next one leaks.
+_ha_ports="$(cat "$SCRIPT_DIR/../pihole-ha")"
+assert_not_contains "the node list parse does not take a port raw" \
+    "$_ha_ports" 'NODE_PORTS["${_rn%%:*}"]="${_rn##*:}"'
+assert_not_contains "nor does the environment override" \
+    "$_ha_ports" 'NODE_PORTS["$LOCAL_IP"]="$PIHOLE_WEB_PORT"'
+assert_eq "all three sites validate" "3" "$(grep -c 'sane_port' <<< "$_ha_ports")"
+
+# ============================================================
 # The PID-namespace dependency has to be documented, including its escape
 # ------------------------------------------------------------
 # "failed to join PID namespace: container <id> is not running" means the
