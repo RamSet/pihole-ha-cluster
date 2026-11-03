@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.24 — 2026-11-03
+- Probe for a stranded VIP on its own clock, and hand over only to a node that can serve
+
 ## v3.19.23 — 2026-11-03
 - Treat a port as a number, whatever the environment hands over
 
