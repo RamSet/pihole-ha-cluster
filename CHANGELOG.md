@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.26 — 2026-11-04
+- Make the stranded-VIP probe interval a knob
+
 ## v3.19.25 — 2026-11-04
 - Fix the probe rate limit I got backwards, and warn when two nodes serve DHCP
 
