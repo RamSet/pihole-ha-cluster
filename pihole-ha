@@ -1223,7 +1223,14 @@ vip_orphan_count=0
 # stream of "who-has <VIP>" from the standby, and it also parks the loop for up
 # to two seconds each time. Once per VIP_PROBE_EVERY is enough: three silences
 # still catches a stranded VIP inside a minute.
-VIP_PROBE_EVERY=10
+# How often a standby that has yielded checks whether anything still answers
+# for the VIP. Two ARP packets each time, so roughly 0.2 packets a second at
+# the default -- which is what makes a stranded VIP visible within about half a
+# minute. Set VIP_PROBE_EVERY in nodes.conf to trade detection speed for quiet;
+# 0 switches the check off entirely, and with it the ability to notice that
+# nobody is holding the address.
+VIP_PROBE_EVERY="${VIP_PROBE_EVERY:-10}"
+[[ "$VIP_PROBE_EVERY" =~ ^[0-9]+$ ]] || VIP_PROBE_EVERY=10
 vip_probe_next=0
 # Set when we took the VIP because nobody was holding it. Until the node we are
 # meant to defer to proves it can actually hold it, giving the address back
@@ -1431,7 +1438,7 @@ dns_only_vip_cycle() {
             # case (someone holds the VIP) never moved it, so the standby kept
             # probing every cycle. A reporter watched it do exactly that after
             # the rate limit supposedly landed.
-            if is_dns_healthy "$LOCAL_IP" && (( EPOCHSECONDS >= vip_probe_next )); then
+            if (( VIP_PROBE_EVERY > 0 )) && is_dns_healthy "$LOCAL_IP" && (( EPOCHSECONDS >= vip_probe_next )); then
                 vip_probe_next=$(( EPOCHSECONDS + VIP_PROBE_EVERY ))
                 if vip_is_answered; then
                     vip_orphan_count=0

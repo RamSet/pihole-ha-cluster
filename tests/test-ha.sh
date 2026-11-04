@@ -1032,6 +1032,17 @@ assert_contains "the tag is registered for muting" \
 # probe running every cycle; and the VIP dark for a minute after a switchover,
 # because the standby released it to a node whose port 53 was open while FTL
 # was still loading gravity.
+# The cadence is a trade between ARP noise and how fast a stranded VIP is
+# noticed, so it is a knob rather than a constant — and 0 turns the check off
+# for anyone who would rather have silence.
+_hasrc_probe="$(cat "$SCRIPT_DIR/../pihole-ha")"
+assert_contains "the probe interval can be set in nodes.conf" "$_hasrc_probe" 'VIP_PROBE_EVERY:-10'
+assert_contains "a junk value falls back to the default"      "$_hasrc_probe" 'VIP_PROBE_EVERY=10'
+assert_contains "zero disables the probe entirely" \
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha" dns_only_vip_cycle)" '(( VIP_PROBE_EVERY > 0 ))'
+assert_contains "and it is documented" \
+    "$(cat "$SCRIPT_DIR/../README.md")" "VIP_PROBE_EVERY"
+
 assert_contains "the stranded-VIP probe has its own slower clock" \
     "$(cat "$SCRIPT_DIR/../pihole-ha")" "VIP_PROBE_EVERY"
 assert_contains "and the cycle respects it" \
