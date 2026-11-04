@@ -995,6 +995,36 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# Two nodes serving DHCP must be said out loud
+# ------------------------------------------------------------
+# pihole-ha enables DHCP on one node and disables it on the rest, but a user
+# who switched it on by hand in every Pi-hole got leases from all of them —
+# clients with addresses and no working gateway, which is miserable to
+# diagnose from the client end (Discourse 86667 #180).
+_conflict_probe() {   # $1 = our dhcp state, $2.. = peers' states
+    P_SELF="$1" P_A="${2:-false}" P_B="${3:-false}" bash -c '
+        DHCP_HA=true; LOCAL_IP=10.0.0.1; ROLE=PRIMARY
+        NODES=(10.0.0.1 10.0.0.2 10.0.0.3)
+        declare -A peer_dhcp
+        peer_dhcp[10.0.0.1]="$P_SELF"; peer_dhcp[10.0.0.2]="$P_A"; peer_dhcp[10.0.0.3]="$P_B"
+        dhcp_conflict_warned=false
+        log_warn() { echo "WARN $*"; }; notify() { :; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha" warn_if_dhcp_conflict)"'
+        warn_if_dhcp_conflict
+        warn_if_dhcp_conflict      # second call: must not repeat
+    '
+}
+assert_contains "two servers at once is reported"   "$(_conflict_probe true true)" "event=dhcp_conflict"
+assert_contains "and the other node is named"       "$(_conflict_probe true true)" "10.0.0.2"
+assert_contains "both others are named"             "$(_conflict_probe true true true)" "10.0.0.3"
+assert_eq "it is said once, not every cycle" "1" \
+    "$(_conflict_probe true true | grep -c 'event=dhcp_conflict')"
+assert_eq "one server is normal and silent"  ""  "$(_conflict_probe true false false)"
+assert_eq "a standby with none is silent"    ""  "$(_conflict_probe false true false)"
+assert_contains "the tag is registered for muting" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-dash")" "dhcp_conflict"
+
+# ============================================================
 # Hand the VIP over when the heir can serve, and stop ARPing every cycle
 # ------------------------------------------------------------
 # Two things a reporter saw after the previous fixes (Discourse 86667 #178):
@@ -1006,6 +1036,13 @@ assert_contains "the stranded-VIP probe has its own slower clock" \
     "$(cat "$SCRIPT_DIR/../pihole-ha")" "VIP_PROBE_EVERY"
 assert_contains "and the cycle respects it" \
     "$(extract_fn "$SCRIPT_DIR/../pihole-ha" dns_only_vip_cycle)" 'EPOCHSECONDS >= vip_probe_next'
+# The clock must advance when a probe RUNS. Advancing it only when the probe
+# came back unanswered left the normal case probing every cycle, which is what
+# the reporter was still seeing after the rate limit "landed".
+_cycle_src="$(extract_fn "$SCRIPT_DIR/../pihole-ha" dns_only_vip_cycle)"
+_probe_block="${_cycle_src#*EPOCHSECONDS >= vip_probe_next}"
+assert_contains "the clock advances before the result is examined" \
+    "${_probe_block%%vip_is_answered*}" "vip_probe_next=\$(( EPOCHSECONDS + VIP_PROBE_EVERY ))"
 
 _answers_probe() {   # $1 = dig exit code, "nodig" for no dig at all
     P_RC="$1" bash -c '

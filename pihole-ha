@@ -1426,8 +1426,18 @@ dns_only_vip_cycle() {
             # We yielded to a higher-priority node. Check it actually took the
             # address: if nobody answers for it over several cycles, the node we
             # deferred to cannot claim it and the VIP is stranded.
-            if is_dns_healthy "$LOCAL_IP" && (( EPOCHSECONDS >= vip_probe_next )) && ! vip_is_answered; then
+            # The clock has to advance when we PROBE, not when the probe comes
+            # back unanswered -- putting it inside that branch meant the normal
+            # case (someone holds the VIP) never moved it, so the standby kept
+            # probing every cycle. A reporter watched it do exactly that after
+            # the rate limit supposedly landed.
+            if is_dns_healthy "$LOCAL_IP" && (( EPOCHSECONDS >= vip_probe_next )); then
                 vip_probe_next=$(( EPOCHSECONDS + VIP_PROBE_EVERY ))
+                if vip_is_answered; then
+                    vip_orphan_count=0
+                    write_status "DNS-only - standby"
+                    return
+                fi
                 (( vip_orphan_count++ )) || true
                 if (( vip_orphan_count >= VIP_ORPHAN_AFTER )); then
                     log_warn "event=vip_orphaned ip=$VIP checks=$vip_orphan_count reason=\"a higher-priority node answers DNS but nothing answers for the VIP — claiming it so the address is served\""
@@ -1440,7 +1450,9 @@ dns_only_vip_cycle() {
                 write_status "DNS-only - standby (VIP unanswered $vip_orphan_count/$VIP_ORPHAN_AFTER)"
                 return
             fi
-            vip_orphan_count=0
+            # Between probes: say nothing new and, crucially, leave the counter
+            # alone -- resetting it here would mean three consecutive silences
+            # could never accumulate.
             write_status "DNS-only - standby"
             return
         fi
@@ -1784,6 +1796,38 @@ reannounce_vip() {
     return 0
 }
 
+# Two nodes serving DHCP at once.
+#
+# pihole-ha enables DHCP on exactly one node and disables it on the rest, so
+# this should not happen -- but it does if someone switches it on by hand in
+# each Pi-hole, or brings a node up with dhcp.active already true before the
+# daemon has evaluated anything. The symptom is miserable to diagnose from the
+# client side: leases from two servers, clients with addresses but no working
+# gateway or DNS. A user lost an evening to it ("wifi but no internet") before
+# turning the whole thing off.
+#
+# We cannot safely switch the other node off from here -- that decision is the
+# election's -- but saying it out loud costs nothing.
+dhcp_conflict_warned=false
+warn_if_dhcp_conflict() {
+    [[ "$DHCP_HA" == "true" ]] || return 0
+    [[ "${peer_dhcp[$LOCAL_IP]:-}" == "true" ]] || { dhcp_conflict_warned=false; return 0; }
+    local ip others=""
+    for ip in "${NODES[@]}"; do
+        [[ "$ip" == "$LOCAL_IP" ]] && continue
+        [[ "${peer_dhcp[$ip]:-}" == "true" ]] && others+="${others:+, }$ip"
+    done
+    if [[ -z "$others" ]]; then
+        dhcp_conflict_warned=false
+        return 0
+    fi
+    [[ "$dhcp_conflict_warned" == "true" ]] && return 0
+    dhcp_conflict_warned=true
+    log_warn "event=dhcp_conflict others=\"$others\" reason=\"this node is serving DHCP and so is another — clients will take leases from both and may end up with the wrong gateway or DNS; pihole-ha enables DHCP on one node only, so turn it off in Pi-hole on the others and let failover manage it\""
+    NOTIFY_TAG=dhcp_conflict notify "<b><font color='#dd4b39'>Two DHCP Servers</font></b> <br> $ROLE ($LOCAL_IP) is serving DHCP and so is: $others <br> Turn it off in Pi-hole on the others and let failover manage it" &
+    return 0
+}
+
 # --- Main Loop ---
 log_info "event=startup ip=$LOCAL_IP priority=$PRIORITY interval=${CHECK_INTERVAL}s activate_after=$ACTIVATE_AFTER deactivate_after=$DEACTIVATE_AFTER"
 log_info "event=startup checks=\"ping dns:53 api dhcp\""
@@ -1818,6 +1862,7 @@ while true; do
     # renewal, NetworkManager. Cheap: returns immediately once it is already
     # pinned, which is the steady state.
     enforce_dns_pin
+    warn_if_dhcp_conflict     # two nodes handing out leases is worth saying
     reannounce_vip            # keep the LAN's ARP entry for the VIP fresh
     update_blocking_state     # does this node still actually block anything?
     reconcile_node_order      # adopt a newer priority order a peer holds
