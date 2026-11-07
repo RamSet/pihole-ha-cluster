@@ -995,6 +995,48 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# Telling FTL to reload has to actually reach it
+# ------------------------------------------------------------
+# On a live node `pgrep -x pihole-FTL` returns TWO pids. The Docker reload
+# collected them into one string and passed that to kill, which rejects it, so
+# the signal was never delivered -- while the caller logged "ftl=restarted".
+# A standby swapped gravity.db underneath an FTL that kept serving the old one
+# (it holds the file open), and the panel showed stale domain and list counts
+# until the container was restarted by hand (Discourse 86667 #189). Confirmed
+# against a live FTL: the old code returns failure and FTL's reload count does
+# not move; the fixed one moves it.
+_reload_probe() {   # $1 = pids pgrep reports, $2 = pids kill accepts
+    local log; log="$(mktemp)"
+    P_PIDS="$1" P_OK="$2" P_LOG="$log" bash -c '
+        PIHOLE_HA_PLATFORM=docker
+        pgrep() { [[ -n "$P_PIDS" ]] && printf "%s\n" $P_PIDS; }
+        kill() {
+            [[ "$1" == "-0" ]] && return 0
+            local target="${*: -1}"
+            echo "SIGNALLED $target" >> "$P_LOG"
+            [[ " $P_OK " == *" $target "* ]]
+        }
+        sleep() { :; }
+        '"$(extract_fn "$SCRIPT_DIR/../pihole-ha-platform" platform_ftl_restart)"'
+        platform_ftl_restart && echo RELOADED || echo FAILED
+    '
+    cat "$log" 2>/dev/null; rm -f "$log"
+}
+assert_contains "both FTL processes are signalled" "$(_reload_probe "1968043 1968051" "1968043 1968051")" "SIGNALLED 1968051"
+assert_contains "and the first one too"            "$(_reload_probe "1968043 1968051" "1968043 1968051")" "SIGNALLED 1968043"
+assert_contains "two pids is a success, not a failure" "$(_reload_probe "1968043 1968051" "1968043 1968051")" "RELOADED"
+assert_contains "a single pid still works"         "$(_reload_probe "194" "194")" "RELOADED"
+assert_contains "no FTL at all is a failure"       "$(_reload_probe "" "")" "FAILED"
+# One of them going away between pgrep and kill is normal, not a failure.
+assert_contains "one deliverable signal is enough" "$(_reload_probe "100 101" "101")" "RELOADED"
+assert_contains "none deliverable is a failure"    "$(_reload_probe "100 101" "")" "FAILED"
+# And a reload that did not happen must not be reported as success.
+_pull_reload="$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")"
+assert_contains "a failed reload is reported"      "$_pull_reload" "status=stale"
+assert_contains "and says what the node is serving" "$_pull_reload" "still serving the previous one"
+assert_contains "and the pull is marked failed so it retries" "$_pull_reload" 'APPLY_FAILED=true'
+
+# ============================================================
 # Two nodes serving DHCP must be said out loud
 # ------------------------------------------------------------
 # pihole-ha enables DHCP on one node and disables it on the rest, but a user

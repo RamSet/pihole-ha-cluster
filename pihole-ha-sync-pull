@@ -594,9 +594,17 @@ if [[ "$COMP_GRAVITY" == "true" && -f "$STAGING_DIR/gravity.db" ]]; then
             sync /etc/pihole/gravity.db.tmp 2>/dev/null || true
             chown pihole:pihole /etc/pihole/gravity.db.tmp 2>/dev/null || true
             if mv -f /etc/pihole/gravity.db.tmp /etc/pihole/gravity.db; then
-                platform_ftl_restart
-                GRAVITY_RESTARTED=true
-                log_info "event=apply component=gravity status=ok ftl=restarted"
+                # FTL holds gravity.db open, so a swapped file is invisible to
+                # it until it reopens. If telling it fails, the node is serving
+                # the old blocklist and must say so rather than report success.
+                if platform_ftl_restart; then
+                    GRAVITY_RESTARTED=true
+                    log_info "event=apply component=gravity status=ok ftl=restarted"
+                else
+                    GRAVITY_RESTARTED=false
+                    APPLY_FAILED=true
+                    log_error "event=apply component=gravity status=stale reason=\"the new blocklist is on disk but FTL could not be told to reload it — it is still serving the previous one; restarting pihole-FTL (or the container) will pick it up\""
+                fi
                 APPLIED_SOMETHING=true
             else
                 log_error "event=apply component=gravity status=failed reason=\"could not replace gravity.db\""

@@ -534,12 +534,24 @@ platform_ftl_restart() {
         # same PID, container untouched. Settings that genuinely need a full
         # restart (listening ports, cache size) are picked up the next time the
         # container restarts on its own.
-        local pid
-        pid="$(pgrep -x pihole-FTL 2>/dev/null)" || return 1
-        kill -HUP "$pid" 2>/dev/null || return 1
+        # FTL is not always a single process -- on a live node pgrep returns
+        # two. This used to collect them into one string and hand that to kill,
+        # which rejects it, so the reload was never delivered at all while the
+        # caller logged "ftl=restarted". A standby then swapped gravity.db
+        # underneath an FTL that went on serving the old one, and the panel
+        # showed stale domain and list counts until the container was restarted
+        # by hand (Discourse 86667 #189).
+        local -a pids=()
+        mapfile -t pids < <(pgrep -x pihole-FTL 2>/dev/null)
+        (( ${#pids[@]} )) || return 1
+        local pid delivered=false
+        for pid in "${pids[@]}"; do
+            kill -HUP "$pid" 2>/dev/null && delivered=true
+        done
+        [[ "$delivered" == "true" ]] || return 1
         sleep 2
-        # Still the same live process? Then the reload landed.
-        kill -0 "$pid" 2>/dev/null && return 0
+        # Still alive? Then the reload landed rather than killing it.
+        kill -0 "${pids[0]}" 2>/dev/null && return 0
         return 1
     else
         systemctl restart pihole-FTL
