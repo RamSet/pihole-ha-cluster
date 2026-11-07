@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.27 — 2026-11-06
+- Deliver the FTL reload, instead of reporting one that never happened
+
 ## v3.19.26 — 2026-11-04
 - Make the stranded-VIP probe interval a knob
 
