@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.29 — 2026-11-10
+- Give the swapped gravity.db the ownership FTL needs
+
 ## v3.19.28 — 2026-11-09
 - Let the sync speak in the container log
 
