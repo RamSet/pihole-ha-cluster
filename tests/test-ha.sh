@@ -995,6 +995,24 @@ assert_contains "the dashboard uses the peer's recorded port" \
     "$_dash_src" '${_NODE_PORTS[$ip]:-80}/api/auth'
 
 # ============================================================
+# The container supervisor must not swallow the sync's output
+# ------------------------------------------------------------
+# On Docker the build and the pull were started with their output sent to
+# /dev/null, so build_start, build_complete, "skip reason=no changes" and
+# every error vanished. A user reported a change that never reached his
+# standby and had nothing in the container log to show for it — and neither
+# did I (Discourse 86667 #191). systemd users have had these lines all along.
+_sup="$(cat "$SCRIPT_DIR/../docker/docker-entrypoint.sh")"
+assert_not_contains "the build's output is not discarded" "$_sup" 'pihole-ha-sync &>/dev/null'
+assert_not_contains "nor the pull's"                      "$_sup" 'pihole-ha-sync-pull &>/dev/null'
+assert_contains "the build still runs in the background"  "$_sup" '/usr/local/bin/pihole-ha-sync &'
+assert_contains "and so does the pull"                    "$_sup" '/usr/local/bin/pihole-ha-sync-pull &'
+# A comment edit really does move the publisher's change hash — verified on a
+# live node — so detection was never the problem here; the silence was.
+assert_contains "the change hash covers the whole gravity database" \
+    "$(extract_fn "$SCRIPT_DIR/../pihole-ha-sync" current_hash)" "md5sum /etc/pihole/gravity.db"
+
+# ============================================================
 # Telling FTL to reload has to actually reach it
 # ------------------------------------------------------------
 # On a live node `pgrep -x pihole-FTL` returns TWO pids. The Docker reload

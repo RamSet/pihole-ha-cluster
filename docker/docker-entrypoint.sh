@@ -337,12 +337,18 @@ while true; do
     fi
     NOW="$(date +%s)"
     if (( NOW - LAST_SYNC >= SYNC_INTERVAL )); then
+        # Let them speak. Discarding their output meant that on Docker the
+        # entire sync was silent: no build_start, no build_complete, no
+        # "skip reason=no changes", and no errors either -- the only trace was
+        # the trigger line above. A user watching his container log for a sync
+        # that never happened had nothing to go on, and neither did I
+        # (Discourse 86667 #191). systemd users have had these lines all along.
         if [[ -f /run/pihole-ha/sync-enabled ]]; then
             log_info "event=sync_build_trigger"
-            /usr/local/bin/pihole-ha-sync &>/dev/null &
+            /usr/local/bin/pihole-ha-sync &
         elif [[ -f /run/pihole-ha/sync-pull-enabled ]]; then
             log_info "event=sync_pull_trigger"
-            /usr/local/bin/pihole-ha-sync-pull &>/dev/null &
+            /usr/local/bin/pihole-ha-sync-pull &
         fi
         LAST_SYNC="$NOW"
     fi
