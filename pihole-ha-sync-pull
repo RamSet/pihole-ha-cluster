@@ -521,7 +521,10 @@ if [[ "$COMP_NOTIFY" == "true" && -f "$STAGING_DIR/notify.conf" ]]; then
         # user, so a root-only notify.conf silently disables new-device
         # notifications — install.sh sets 640 for exactly that reason, and this
         # apply path was clamping it back to 600 on every sync.
-        chown root:pihole /etc/pihole-ha/notify.conf 2>/dev/null || true
+        # Group, numerically, for the same reason gravity.db needs it: the
+        # sidecar cannot resolve "pihole", and a root:root notify.conf reads as
+        # zero settings to new-dhcp-device, which runs as FTL's user.
+        platform_chown_notify_conf /etc/pihole-ha/notify.conf || true
         chmod 640 /etc/pihole-ha/notify.conf 2>/dev/null || true
         log_info "event=apply component=notify status=ok"
         APPLIED_SOMETHING=true
@@ -551,6 +554,25 @@ if [[ "$COMP_SYNCCONF" == "true" && -f "$STAGING_DIR/sync.conf" ]]; then
         APPLIED_SOMETHING=true
     else
         log_info "event=apply component=syncconf status=unchanged"
+    fi
+fi
+
+# Repair a gravity.db that an earlier version of this script left root-owned.
+#
+# The ownership bug fixed above did its damage at install time, and the install
+# only runs when the blocklist changes -- so a node that already took a bad swap
+# would sit there with blocking off until the next change happened to arrive.
+# This costs one stat per cycle and puts those nodes right on their own.
+if [[ -f /etc/pihole/gravity.db ]]; then
+    _own_now="$(stat -c '%u:%g' /etc/pihole/gravity.db 2>/dev/null)"
+    _own_want="$(platform_pihole_owner)" || _own_want=""
+    if [[ -n "$_own_now" && -n "$_own_want" && "$_own_now" != "$_own_want" ]]; then
+        if platform_chown_checked "$_own_want" /etc/pihole/gravity.db; then
+            log_warn "event=repair component=gravity status=ok reason=\"gravity.db was owned $_own_now, which FTL cannot open; set to $_own_want\""
+            platform_ftl_restart >/dev/null 2>&1 || true
+        else
+            log_error "event=repair component=gravity status=failed owner=$_own_now want=$_own_want reason=\"gravity.db is not owned by the user FTL runs as and could not be corrected\""
+        fi
     fi
 fi
 
@@ -592,8 +614,23 @@ if [[ "$COMP_GRAVITY" == "true" && -f "$STAGING_DIR/gravity.db" ]]; then
             APPLY_FAILED=true
         else
             sync /etc/pihole/gravity.db.tmp 2>/dev/null || true
-            chown pihole:pihole /etc/pihole/gravity.db.tmp 2>/dev/null || true
-            if mv -f /etc/pihole/gravity.db.tmp /etc/pihole/gravity.db; then
+            # Ownership, numerically, from a file FTL writes itself -- and
+            # checked. `chown pihole:pihole` cannot work in the Alpine sidecar
+            # (no pihole user there), and because its failure was ignored the
+            # swap promoted a root-owned gravity.db that FTL could not open:
+            # blocking off on the standby, "database_error" in the web UI, and
+            # a pull that logged status=ok. A blocklist FTL cannot read is worse
+            # than yesterday's, so this refuses rather than installs.
+            _g_own="$(platform_pihole_owner)" || _g_own=""
+            _g_mode="$(stat -c '%a' /etc/pihole/gravity.db 2>/dev/null)"
+            [[ "$_g_mode" =~ ^[0-7]{3,4}$ ]] || _g_mode=640
+            if [[ -z "$_g_own" ]] \
+               || ! platform_chown_checked "$_g_own" /etc/pihole/gravity.db.tmp \
+               || ! chmod "$_g_mode" /etc/pihole/gravity.db.tmp 2>/dev/null; then
+                log_error "event=apply component=gravity status=failed reason=\"could not give the new blocklist the ownership FTL needs (${_g_own:-owner unknown}) — keeping the existing blocklist\""
+                rm -f /etc/pihole/gravity.db.tmp
+                APPLY_FAILED=true
+            elif mv -f /etc/pihole/gravity.db.tmp /etc/pihole/gravity.db; then
                 # FTL holds gravity.db open, so a swapped file is invisible to
                 # it until it reopens. If telling it fails, the node is serving
                 # the old blocklist and must say so rather than report success.

@@ -986,11 +986,11 @@ if [[ "${1:-}" == "--handle" ]]; then
                 fi
             else
                 # notify.conf holds PO_TOKEN. Truncation via `>` keeps an existing
-                # file's mode, so create it at 0640 root:pihole first — otherwise the
+                # file's mode, so create it at 0640 root-owned first — otherwise the
                 # token lands world-readable at the default umask. 0640 not 0600: the
                 # DHCP hook runs as the pihole user and must still read it.
                 [[ -f "$_NOTIFY_CONF" ]] || ( umask 027; : > "$_NOTIFY_CONF" )
-                chown root:pihole "$_NOTIFY_CONF" 2>/dev/null || true
+                platform_chown_notify_conf "$_NOTIFY_CONF" || true
                 chmod 640 "$_NOTIFY_CONF" 2>/dev/null || true
                 cat > "$_NOTIFY_CONF" <<NEOF
 # Pushover notifications
@@ -1060,11 +1060,11 @@ NEOF
             fi
             mkdir -p /etc/pihole-ha
             # notify.conf holds PO_TOKEN. Truncation via `>` keeps an existing
-            # file's mode, so create it at 0640 root:pihole first — otherwise the
+            # file's mode, so create it at 0640 root-owned first — otherwise the
             # token lands world-readable at the default umask. 0640 not 0600: the
             # DHCP hook runs as the pihole user and must still read it.
             [[ -f "$_NOTIFY_CONF" ]] || ( umask 027; : > "$_NOTIFY_CONF" )
-            chown root:pihole "$_NOTIFY_CONF" 2>/dev/null || true
+            platform_chown_notify_conf "$_NOTIFY_CONF" || true
             chmod 640 "$_NOTIFY_CONF" 2>/dev/null || true
             cat > "$_NOTIFY_CONF" <<NEOF
 # Pushover notifications
@@ -1107,11 +1107,11 @@ NEOF
             else
                 mkdir -p /etc/pihole-ha
                 # notify.conf holds PO_TOKEN. Truncation via `>` keeps an existing
-                # file's mode, so create it at 0640 root:pihole first — otherwise the
+                # file's mode, so create it at 0640 root-owned first — otherwise the
                 # token lands world-readable at the default umask. 0640 not 0600: the
                 # DHCP hook runs as the pihole user and must still read it.
                 [[ -f "$_NOTIFY_CONF" ]] || ( umask 027; : > "$_NOTIFY_CONF" )
-                chown root:pihole "$_NOTIFY_CONF" 2>/dev/null || true
+                platform_chown_notify_conf "$_NOTIFY_CONF" || true
                 chmod 640 "$_NOTIFY_CONF" 2>/dev/null || true
                 cat > "$_NOTIFY_CONF" <<NEOF
 # Pushover notifications

@@ -3121,6 +3121,129 @@ assert_contains "the copy is flushed before the rename"               "$_pullsrc
 assert_contains "a failed rename is caught"                           "$_pullsrc2" "could not replace gravity.db"
 assert_contains "and any of those failures mark the run failed"       "$_pullsrc2" "APPLY_FAILED=true"
 
+# ============================================================
+echo
+echo "=== gravity.db ownership: the sidecar cannot name the pihole user ==="
+
+# `chown pihole:pihole` in the sidecar fails -- Alpine has no pihole user -- and
+# the failure was swallowed by `|| true`, so the swap promoted a root-owned
+# gravity.db that FTL could not open. Reproduced against a live
+# pihole/pihole:latest container: "gravityDB_open() - SQL error: unable to open
+# database file", then "Cannot read gravity database at /etc/pihole/gravity.db -
+# file does not exist or is not readable" every second, /api/groups returning
+# database_error, and the web UI showing negative counts in Group management --
+# while the pull logged component=gravity status=ok.
+
+# The class, not the one call site: nothing in the shipped scripts may chown by
+# name, because the name does not exist where half of them run.
+_namechown="$(grep -hnE '^[^#]*chown +[A-Za-z]' \
+    "$SCRIPT_DIR/../pihole-ha-sync-pull" \
+    "$SCRIPT_DIR/../pihole-ha-sync" \
+    "$SCRIPT_DIR/../pihole-ha-platform" \
+    "$SCRIPT_DIR/../pihole-ha" \
+    "$SCRIPT_DIR/../pihole-ha-dash" \
+    "$SCRIPT_DIR/../new-dhcp-device" \
+    "$SCRIPT_DIR/../docker/docker-entrypoint.sh" 2>/dev/null)"
+assert_eq "nothing chowns by user name" "" "$_namechown"
+
+# notify.conf has the same problem for the same reason: it is created root-owned
+# and 0640, and the DHCP hook that reads it runs as FTL's user, so a root:root
+# file reads as zero settings and notifications stop without a word.
+assert_eq "every notify.conf owner is set through the one helper" "3" \
+    "$(grep -c 'platform_chown_notify_conf "\$_NOTIFY_CONF"' "$SCRIPT_DIR/../pihole-ha-dash")"
+assert_contains "the pull sets it the same way" "$_pullsrc2" \
+    "platform_chown_notify_conf /etc/pihole-ha/notify.conf"
+
+# platform_pihole_owner, against scripted stat answers: no root needed, and
+# every branch is reachable (the real files on a dev box are all one owner).
+_FAKE_TOML="1000:1000"; _FAKE_GRAV="1000:1000"; _FAKE_DIR="1000:1000"
+stat() {
+    local v
+    case "${3:-}" in
+        */pihole.toml) v="$_FAKE_TOML" ;;
+        */gravity.db)  v="$_FAKE_GRAV" ;;
+        /etc/pihole)   v="$_FAKE_DIR"  ;;
+        *) return 1 ;;
+    esac
+    [[ "$v" == "MISSING" ]] && return 1
+    printf '%s' "$v"
+}
+
+_FAKE_TOML="1000:1000"; _FAKE_GRAV="0:0"; _FAKE_DIR="1000:1000"
+assert_eq "the owner comes from pihole.toml, which FTL writes itself" \
+    "1000:1000" "$(platform_pihole_owner)"
+
+# This case IS a node broken by the old bug: gravity.db root-owned, everything
+# else intact. Taking the owner from the file we are replacing would copy the
+# fault forward and leave blocking off for good.
+_FAKE_TOML="MISSING"; _FAKE_GRAV="0:0"; _FAKE_DIR="998:1002"
+assert_eq "a root-owned gravity.db never decides the owner" \
+    "998:1002" "$(platform_pihole_owner)"
+
+# A package install and a container disagree about the uid (998 vs 1000), and a
+# container started with PIHOLE_UID set agrees with neither -- so the answer is
+# read off the node, never assumed.
+_FAKE_TOML="998:1002"; _FAKE_GRAV="998:1002"; _FAKE_DIR="998:1002"
+assert_eq "a package install's uid is honoured too" \
+    "998:1002" "$(platform_pihole_owner)"
+
+# Some builds really do run FTL as root. Refusing root would break their sync
+# for no reason, so root is the last resort rather than a rejected answer.
+_FAKE_TOML="0:0"; _FAKE_GRAV="0:0"; _FAKE_DIR="0:0"
+assert_eq "an FTL that genuinely runs as root still gets an answer" \
+    "0:0" "$(platform_pihole_owner)"
+
+# Names are what broke this. If stat ever answers with one, it is not an owner.
+_FAKE_TOML="pihole:pihole"; _FAKE_GRAV="MISSING"; _FAKE_DIR="1000:1000"
+assert_eq "a non-numeric answer is not mistaken for an owner" \
+    "1000:1000" "$(platform_pihole_owner)"
+
+_FAKE_TOML="MISSING"; _FAKE_GRAV="MISSING"; _FAKE_DIR="MISSING"
+assert_false "no Pi-hole config at all: no answer, so the caller refuses" \
+    platform_pihole_owner
+
+# platform_chown_checked: a chown that did nothing must not read as success.
+_chownlog="$(mktemp)"
+chown() { printf '%s\n' "$*" >> "$_chownlog"; return "${_FAKE_CHOWN_RC:-0}"; }
+_FAKE_AFTER="1000:1000"
+stat() { printf '%s' "$_FAKE_AFTER"; }
+
+: > "$_chownlog"
+assert_false "a name is refused before chown is even called" \
+    platform_chown_checked "pihole:pihole" /tmp/x
+assert_eq "and chown is not called with it" "" "$(cat "$_chownlog")"
+
+: > "$_chownlog"
+_FAKE_CHOWN_RC=0; _FAKE_AFTER="0:0"
+assert_false "a chown that silently changed nothing fails" \
+    platform_chown_checked "1000:1000" /tmp/x
+
+_FAKE_CHOWN_RC=1; _FAKE_AFTER="1000:1000"
+assert_false "a chown that errors fails" \
+    platform_chown_checked "1000:1000" /tmp/x
+
+_FAKE_CHOWN_RC=0; _FAKE_AFTER="1000:1000"
+assert_true "a chown that took effect passes" \
+    platform_chown_checked "1000:1000" /tmp/x
+
+unset -f stat chown
+unset _FAKE_CHOWN_RC _FAKE_AFTER _FAKE_TOML _FAKE_GRAV _FAKE_DIR
+rm -f "$_chownlog"
+
+# The install side: a blocklist FTL cannot read is worse than yesterday's.
+assert_contains "the install resolves the owner numerically"        "$_pullsrc2" '_g_own="$(platform_pihole_owner)"'
+assert_contains "and checks the chown instead of ignoring it"       "$_pullsrc2" 'platform_chown_checked "$_g_own" /etc/pihole/gravity.db.tmp'
+assert_contains "the mode of the file being replaced is preserved"  "$_pullsrc2" "_g_mode=\"\$(stat -c '%a' /etc/pihole/gravity.db 2>/dev/null)\""
+assert_contains "an unreadable blocklist is refused, not installed" "$_pullsrc2" "could not give the new blocklist the ownership FTL needs"
+
+# A node already broken this way would wait for the next blocklist change --
+# which may never come -- so the pull repairs it on sight.
+_repairsrc="$(awk '/^# Repair a gravity.db that an earlier version/,/^# Check if gravity.db changed/' "$SCRIPT_DIR/../pihole-ha-sync-pull")"
+assert_contains "a root-owned gravity.db is repaired on the next pull" "$_repairsrc" "event=repair component=gravity status=ok"
+assert_contains "the repair is checked too"                           "$_repairsrc" 'platform_chown_checked "$_own_want" /etc/pihole/gravity.db'
+assert_contains "and FTL is told to reopen it"                        "$_repairsrc" "platform_ftl_restart"
+assert_contains "a repair that cannot be made is reported"            "$_repairsrc" "event=repair component=gravity status=failed"
+
 # Adlist INSERTs ran before the wholesale gravity swap: discarded, and they
 # dirtied the DB before OLD_MD5, forcing a full copy + FTL restart every cycle.
 assert_contains "adlists are skipped when gravity is being replaced" "$_pullsrc2" \

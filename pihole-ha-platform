@@ -85,6 +85,67 @@ gravity_is_sane() {
     return 0
 }
 
+# The numeric uid:gid that owns the files FTL writes on THIS node.
+#
+# `chown pihole:pihole` is wrong twice over. The sidecar is Alpine and has no
+# pihole user at all, so the name does not resolve and the chown fails; the
+# failure was swallowed, the swapped gravity.db stayed root-owned mode 640, and
+# FTL -- uid 1000 in the pihole container, 998 on a package install -- could no
+# longer open its own blocklist:
+#
+#   gravityDB_open() - SQL error: unable to open database file
+#   Cannot read gravity database at /etc/pihole/gravity.db - file does not
+#   exist or is not readable
+#
+# Blocking off, "database_error" from /api/groups, negative counts in Group
+# management, and a pull that reported status=ok while doing it.
+#
+# So resolve the owner numerically from a file FTL writes itself, rather than
+# from a name this container may not know. pihole.toml is rewritten by FTL on
+# every start, so its owner IS FTL's uid -- including on containers started with
+# a non-default PIHOLE_UID. gravity.db is only a fallback because a node already
+# broken this way has a root-owned one; preferring pihole.toml is what lets the
+# next pull repair it. Deployments where FTL genuinely runs as root answer 0:0,
+# which is correct for them -- that is why root is a last resort and not a
+# rejected answer.
+platform_pihole_owner() {
+    local p own fallback=""
+    for p in /etc/pihole/pihole.toml /etc/pihole/gravity.db /etc/pihole; do
+        own="$(stat -c '%u:%g' "$p" 2>/dev/null)" || continue
+        [[ "$own" =~ ^[0-9]+:[0-9]+$ ]] || continue
+        if [[ "$own" == "0:0" ]]; then
+            [[ -n "$fallback" ]] || fallback="$own"
+            continue
+        fi
+        printf '%s' "$own"
+        return 0
+    done
+    [[ -n "$fallback" ]] || return 1
+    printf '%s' "$fallback"
+}
+
+# chown that reports the truth. Takes a numeric uid:gid, applies it, and then
+# reads the file back: a chown that cannot resolve its target, or that no-ops
+# because we are not root, must not pass for success -- that is exactly how a
+# file FTL cannot read got promoted over a working one.
+platform_chown_checked() {
+    local spec="$1" file="$2"
+    [[ "$spec" =~ ^[0-9]+:[0-9]+$ ]] || return 1
+    chown "$spec" "$file" 2>/dev/null || return 1
+    [[ "$(stat -c '%u:%g' "$file" 2>/dev/null)" == "$spec" ]]
+}
+
+# notify.conf holds the Pushover token, so it stays root-owned and 0640 -- but
+# the DHCP hook that reads it runs as FTL's user, so the GROUP has to be FTL's
+# group. By name that is "pihole", which the sidecar cannot resolve any more
+# than it can resolve the owner, and a root:root notify.conf reads as zero
+# settings: notifications quietly stop instead of failing.
+platform_chown_notify_conf() {
+    local f="${1:-/etc/pihole-ha/notify.conf}" own
+    own="$(platform_pihole_owner)" || return 1
+    platform_chown_checked "0:${own#*:}" "$f"
+}
+
 # Is this node actually blocking right now?
 #
 # ping, port 53, the API and DHCP all pass on a Pi-hole whose blocklist has been
