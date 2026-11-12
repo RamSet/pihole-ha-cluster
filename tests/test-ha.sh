@@ -877,6 +877,71 @@ assert_contains "the failure handler receives the xhr"               "$_js" "sho
 assert_not_contains "the static fallback text drops the 8887 claim" \
     "$(cat "$SCRIPT_DIR/../ha.lp")" "Cannot reach the local HA service on port 8887"
 
+# ------------------------------------------------------------
+# ...and when the :8887 API is the thing that failed, say THAT, instead of
+# leaving the controls looking like they are still loading.
+#
+# ha-api proxies :8887 for every action except the status file, so one dead API
+# kills every control at once. Reported from a three-node cluster on v3.19.29:
+# the HA failover toggle and the VIP toggle did nothing at all, the DHCP master
+# override said "set-master failed", the sync toggles said "toggle failed", and
+# Cluster Members / Failover Priority sat on "Loading..." forever -- five
+# symptoms, one cause, and nothing on the page naming it.
+_lp="$(cat "$SCRIPT_DIR/../ha-api.lp")"
+
+# curl already knows which failure it was. Each of these is a different thing
+# for the operator to go and do, so each has to survive to the page.
+assert_contains "a refused connection names both deployments' causes" "$_lp" "cannot connect to the pihole-ha API on"
+assert_contains "and tells a Docker user what to fix"                 "$_lp" "network_mode: service:pihole"
+assert_contains "a timeout is reported as a timeout"                  "$_lp" "did not answer within"
+assert_contains "a missing curl inside the container is named"        "$_lp" "curl is not available inside the Pi-hole container"
+assert_contains "an empty reply is not reported as a refusal"         "$_lp" "answered with nothing"
+assert_contains "and an unmapped curl exit carries its number"        "$_lp" "curl exit "
+
+# The reason is useless if the call sites throw it away: every proxied action
+# must pass it on. Verified against the real interpreter (Lua 5.5, pihole-FTL
+# lua) with a real curl: refused -> exit 7 message, PATH without curl -> 127
+# message, a served 200 -> the body alone with no sentinel left in it.
+_curl_sites="$(grep -c 'curl_local(' "$SCRIPT_DIR/../ha-api.lp")"
+_err_sites="$(grep -c 'content or err or' "$SCRIPT_DIR/../ha-api.lp")"
+assert_true "every proxied action carries the reason to the page" \
+    [ "$_err_sites" -ge 20 ]
+assert_eq "no action swallows it" "" \
+    "$(grep -n "mg.write(content or '" "$SCRIPT_DIR/../ha-api.lp")"
+assert_contains "the exit status is carried back in the stream"  "$_lp" "ha-exit:%s"
+assert_contains "and stripped off before the body is returned"   "$_lp" 'result:gsub("\n?%-%-ha%-exit:%d+%s*$", "")'
+assert_contains "the manifest fetch from the primary reports too" "$_lp" 'curl_reason(code or "?", primary'
+
+# Every panel that reads its state from :8887 has to show the reason when that
+# read fails -- the five that were dead on G241's cluster, by name.
+for _v in sync:renderSync master:renderMaster prio:renderPriority vip:renderVip ha:renderHa; do
+    _var="${_v%%:*}Err"; _ren="${_v##*:}"
+    assert_eq "$_var is set on both failure paths" "2" \
+        "$(grep -cE "$_var = .*apiReason" "$SCRIPT_DIR/../ha.js")"
+    # The renderer's early return is what used to leave "Loading..." in place.
+    _block="$(sed -n "/function $_ren()/,/^    }/p" "$SCRIPT_DIR/../ha.js")"
+    assert_contains "$_ren shows the reason instead of a pending read" \
+        "$_block" "showPanelError"
+done
+
+# A toggle that cannot act must not look like one that did nothing.
+assert_contains "the VIP toggle reports why it failed"      "$_js" 'showPanelError($("#vip-result"), apiReason(data))'
+assert_contains "the HA toggle reports why it failed"       "$_js" 'showPanelError($("#ha-result"), apiReason(data))'
+assert_contains "and both have somewhere to report it"      "$(cat "$SCRIPT_DIR/../ha.lp")" 'id="vip-result"'
+assert_contains "the HA panel too"                          "$(cat "$SCRIPT_DIR/../ha.lp")" 'id="ha-result"'
+# The reason is attacker-adjacent text from a config file; it goes through the
+# escaper like everything else the panel prints.
+assert_contains "the reason is HTML-escaped"                "$_js" "escapeHtml(reason"
+# These spans also hold the result of a click ("Saved", "Sync started"), so a
+# poll clears only its own message and leaves that alone.
+assert_contains "a recovered panel clears only its own error" "$_js" 'clearPanelError($("#master-result"))'
+assert_contains "and a click result is not eaten by a poll"   "$_js" '$el.find(".ha-api-error").remove()'
+
+# Timestamps: 24-hour, asked for on the forum. "3:50:16 PM" on an ops page is a
+# needless second of parsing for half the thread.
+assert_contains "the clock is pinned to 24-hour"            "$_js" "{ hour12: false }"
+assert_not_contains "and no bare toLocaleString is left"    "$(sed -n '/function fmtTime/,/^    }/p' "$SCRIPT_DIR/../ha.js")" "return isNaN(d.getTime()) ? ts : d.toLocaleString();"
+
 echo
 echo "=== A peer we cannot authenticate to must say so ==="
 # ------------------------------------------------------------

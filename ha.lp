@@ -314,6 +314,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                         </tr>
                     </tbody>
                 </table>
+                <span id="ha-result" style="margin-left:10px"></span>
             </div>
         </div>
     </div>
@@ -453,6 +454,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                         </tr>
                     </tbody>
                 </table>
+                <span id="vip-result" style="margin-left:10px"></span>
                 <div id="vip-details" style="padding:0 10px<? if not ha_vip_enabled then ?>;display:none<? end ?>">
                     <p style="margin:4px 0"><strong>VIP Address:</strong> <?=ha_vip?></p>
                 </div>

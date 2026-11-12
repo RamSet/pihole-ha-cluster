@@ -57,6 +57,43 @@ local function get_sid()
     return nil
 end
 
+local function json_error(msg)
+    return '{"error":"' .. tostring(msg):gsub("\\", "\\\\"):gsub('"', '\\"') .. '"}'
+end
+
+-- Turn curl's exit status into something an operator can act on.
+--
+-- Everything on this page except the status file goes through curl_local, so
+-- when the :8887 API is not answering, EVERY control fails at once -- and all
+-- each one used to say was "toggle failed" / "unreachable", with no hint that
+-- they share a cause or what that cause is. Reported from a three-node cluster
+-- where the failover toggle, the DHCP master override, the VIP toggle and the
+-- sync toggles were all dead and the member list sat on "Loading..." forever.
+-- curl already knows which failure it was; the fix is to stop throwing it away.
+local function curl_reason(code, where, timeout)
+    if code == "7" then
+        return "cannot connect to the pihole-ha API on " .. where .. ". " ..
+               "On a package install, pihole-ha-dash is not running. In Docker, " ..
+               "the sidecar must share the Pi-hole container's network " ..
+               "(network_mode: service:pihole, or pid/network on the host)."
+    elseif code == "28" then
+        return "the pihole-ha API on " .. where .. " did not answer within " ..
+               tostring(timeout) .. "s."
+    elseif code == "52" or code == "56" then
+        return "the pihole-ha API on " .. where .. " accepted the connection " ..
+               "and then sent nothing back -- check the sidecar's log for a " ..
+               "crashed pihole-ha-dash."
+    elseif code == "127" then
+        return "curl is not available inside the Pi-hole container, so this " ..
+               "panel cannot reach the pihole-ha API at all."
+    elseif code == "0" then
+        return "the pihole-ha API on " .. where .. " answered with nothing."
+    end
+    return "the pihole-ha API on " .. where .. " could not be read (curl exit " ..
+           tostring(code) .. ")."
+end
+
+-- Returns the response body, or nil plus a JSON error naming the cause.
 local function curl_local(endpoint, timeout)
     -- Forward the caller's session so the :8887 backend authorizes writes on
     -- password-protected Pi-holes. Harmless on endpoints that don't require it.
@@ -65,13 +102,21 @@ local function curl_local(endpoint, timeout)
         local sep = endpoint:find("?", 1, true) and "&" or "?"
         endpoint = endpoint .. sep .. "sid=" .. url_encode(sid)
     end
-    local handle = io.popen("curl -s --max-time " .. (timeout or 4) ..
-        " 'http://127.0.0.1:8887" .. endpoint .. "' 2>/dev/null")
-    if not handle then return nil end
-    local result = handle:read("*a")
+    timeout = timeout or 4
+    -- The exit status is carried back in the stream itself: io.popen's close()
+    -- does not report it portably across the Lua builds Pi-hole ships.
+    local handle = io.popen("curl -s --max-time " .. timeout ..
+        " 'http://127.0.0.1:8887" .. endpoint .. "' 2>/dev/null" ..
+        "; printf '\\n--ha-exit:%s' $?")
+    if not handle then
+        return nil, json_error("the panel could not run curl inside the Pi-hole container.")
+    end
+    local result = handle:read("*a") or ""
     handle:close()
-    if result and #result > 0 then return result end
-    return nil
+    local code = result:match("%-%-ha%-exit:(%d+)%s*$")
+    local body = (result:gsub("\n?%-%-ha%-exit:%d+%s*$", ""))
+    if body and #body > 0 then return body end
+    return nil, json_error(curl_reason(code or "?", "127.0.0.1:8887", timeout))
 end
 
 local function read_nodes_conf()
@@ -109,12 +154,20 @@ end
 
 local function curl_primary_manifest()
     local primary = read_sync_primary()
-    local handle = io.popen("curl -s --max-time 4 http://" .. primary .. ":8887/api/sync/manifest 2>/dev/null")
-    if not handle then return nil end
-    local result = handle:read("*a")
+    if not primary or #primary == 0 then
+        return nil, json_error("no sync primary is configured on this node.")
+    end
+    local handle = io.popen("curl -s --max-time 4 'http://" .. primary ..
+        ":8887/api/sync/manifest' 2>/dev/null; printf '\\n--ha-exit:%s' $?")
+    if not handle then
+        return nil, json_error("the panel could not run curl inside the Pi-hole container.")
+    end
+    local result = handle:read("*a") or ""
     handle:close()
-    if result and #result > 0 then return result end
-    return nil
+    local code = result:match("%-%-ha%-exit:(%d+)%s*$")
+    local body = (result:gsub("\n?%-%-ha%-exit:%d+%s*$", ""))
+    if body and #body > 0 then return body end
+    return nil, json_error(curl_reason(code or "?", primary .. ":8887", 4))
 end
 
 local action = get_param("action") or ""
@@ -122,52 +175,52 @@ local action = get_param("action") or ""
 if action == "status" then
     -- Read status file directly (fast, no HTTP call needed)
     local content = read_file("/run/pihole-ha/status.json")
-    mg.write(content or '{"error":"no status file"}')
+    mg.write(content or err or '{"error":"no status file"}')
 
 elseif action == "version" then
-    local content = curl_local("/api/version")
-    mg.write(content or '{"local":"unknown","latest":"","update_available":false}')
+    local content, err = curl_local("/api/version")
+    mg.write(content or err or '{"local":"unknown","latest":"","update_available":false}')
 
 elseif action == "sync-config" then
     -- Proxy to local dash API (handles config parsing)
-    local content = curl_local("/api/sync/config")
-    mg.write(content or '{"error":"unreachable"}')
+    local content, err = curl_local("/api/sync/config")
+    mg.write(content or err or '{"error":"unreachable"}')
 
 elseif action == "sync-manifest" then
     -- Always fetch from sync primary since only it builds payloads
-    local content = curl_primary_manifest()
-    mg.write(content or '{"error":"no manifest"}')
+    local content, err = curl_primary_manifest()
+    mg.write(content or err or '{"error":"no manifest"}')
 
 elseif action == "toggle" then
     local key = get_param("key") or ""
     -- Validate key is alphanumeric only
     if key:match("^%a+$") then
-        local content = curl_local("/api/sync/toggle/" .. key)
-        mg.write(content or '{"error":"toggle failed"}')
+        local content, err = curl_local("/api/sync/toggle/" .. key)
+        mg.write(content or err or '{"error":"toggle failed"}')
     else
         mg.write('{"error":"invalid key"}')
     end
 
 elseif action == "sync-now" then
-    local content = curl_local("/api/sync/now")
-    mg.write(content or '{"error":"sync failed"}')
+    local content, err = curl_local("/api/sync/now")
+    mg.write(content or err or '{"error":"sync failed"}')
 
 elseif action == "set-interval" then
     local minutes = get_param("minutes") or ""
     if minutes:match("^%d+$") then
-        local content = curl_local("/api/sync/interval?minutes=" .. minutes)
-        mg.write(content or '{"error":"interval set failed"}')
+        local content, err = curl_local("/api/sync/interval?minutes=" .. minutes)
+        mg.write(content or err or '{"error":"interval set failed"}')
     else
         mg.write('{"error":"invalid interval"}')
     end
 
 elseif action == "notify-config" then
-    local content = curl_local("/api/notify/config")
-    mg.write(content or '{"error":"unreachable"}')
+    local content, err = curl_local("/api/notify/config")
+    mg.write(content or err or '{"error":"unreachable"}')
 
 elseif action == "notify-toggle" then
-    local content = curl_local("/api/notify/toggle")
-    mg.write(content or '{"error":"toggle failed"}')
+    local content, err = curl_local("/api/notify/toggle")
+    mg.write(content or err or '{"error":"toggle failed"}')
 
 elseif action == "notify-save" then
     local enabled = get_param("enabled") or "false"
@@ -177,66 +230,66 @@ elseif action == "notify-save" then
     local dhcp_enabled = get_param("dhcp_enabled") or "true"
     local dhcp_macs = get_param("dhcp_macs") or ""
     local dhcp_hosts = get_param("dhcp_hosts") or ""
-    local content = curl_local("/api/notify/save?enabled=" .. url_encode(enabled) .. "&user=" .. url_encode(user) .. "&token=" .. url_encode(token) .. "&title=" .. url_encode(title) .. "&dhcp_enabled=" .. url_encode(dhcp_enabled) .. "&dhcp_macs=" .. url_encode(dhcp_macs) .. "&dhcp_hosts=" .. url_encode(dhcp_hosts))
-    mg.write(content or '{"error":"save failed"}')
+    local content, err = curl_local("/api/notify/save?enabled=" .. url_encode(enabled) .. "&user=" .. url_encode(user) .. "&token=" .. url_encode(token) .. "&title=" .. url_encode(title) .. "&dhcp_enabled=" .. url_encode(dhcp_enabled) .. "&dhcp_macs=" .. url_encode(dhcp_macs) .. "&dhcp_hosts=" .. url_encode(dhcp_hosts))
+    mg.write(content or err or '{"error":"save failed"}')
 
 elseif action == "notify-dhcp-hosts" then
-    local content = curl_local("/api/dhcp/hosts")
-    mg.write(content or '{"error":"unreachable"}')
+    local content, err = curl_local("/api/dhcp/hosts")
+    mg.write(content or err or '{"error":"unreachable"}')
 
 elseif action == "notify-test" then
-    local content = curl_local("/api/notify/test")
-    mg.write(content or '{"error":"test failed"}')
+    local content, err = curl_local("/api/notify/test")
+    mg.write(content or err or '{"error":"test failed"}')
 
 elseif action == "master-config" then
-    local content = curl_local("/api/dhcp/master-config")
-    mg.write(content or '{"error":"unreachable"}')
+    local content, err = curl_local("/api/dhcp/master-config")
+    mg.write(content or err or '{"error":"unreachable"}')
 
 elseif action == "set-master" then
     local ip = get_param("ip") or ""
     if ip == "auto" or ip:match("^%d+%.%d+%.%d+%.%d+$") then
-        local content = curl_local("/api/dhcp/master?ip=" .. ip)
-        mg.write(content or '{"error":"set-master failed"}')
+        local content, err = curl_local("/api/dhcp/master?ip=" .. ip)
+        mg.write(content or err or '{"error":"set-master failed"}')
     else
         mg.write('{"error":"invalid value"}')
     end
 
 elseif action == "ha-config" then
-    local content = curl_local("/api/ha/config")
-    mg.write(content or '{"error":"unreachable"}')
+    local content, err = curl_local("/api/ha/config")
+    mg.write(content or err or '{"error":"unreachable"}')
 
 elseif action == "ha-toggle" then
-    local content = curl_local("/api/ha/toggle")
-    mg.write(content or '{"error":"toggle failed"}')
+    local content, err = curl_local("/api/ha/toggle")
+    mg.write(content or err or '{"error":"toggle failed"}')
 
 elseif action == "priority-config" then
-    local content = curl_local("/api/priority/config")
-    mg.write(content or '{"error":"unreachable"}')
+    local content, err = curl_local("/api/priority/config")
+    mg.write(content or err or '{"error":"unreachable"}')
 
 elseif action == "set-priority" then
     local nodes = get_param("nodes") or ""
     -- Validate: only digits, dots, and commas
     if nodes:match("^[%d%.,]+$") then
-        local content = curl_local("/api/priority/set?nodes=" .. nodes)
-        mg.write(content or '{"error":"set-priority failed"}')
+        local content, err = curl_local("/api/priority/set?nodes=" .. nodes)
+        mg.write(content or err or '{"error":"set-priority failed"}')
     else
         mg.write('{"error":"invalid node list"}')
     end
 
 elseif action == "vip-config" then
-    local content = curl_local("/api/vip/config")
-    mg.write(content or '{"error":"unreachable"}')
+    local content, err = curl_local("/api/vip/config")
+    mg.write(content or err or '{"error":"unreachable"}')
 
 elseif action == "vip-toggle" then
-    local content = curl_local("/api/vip/toggle")
-    mg.write(content or '{"error":"toggle failed"}')
+    local content, err = curl_local("/api/vip/toggle")
+    mg.write(content or err or '{"error":"toggle failed"}')
 
 elseif action == "leave" then
     local ip = get_param("ip") or ""
     if ip:match("^%d+%.%d+%.%d+%.%d+$") then
         -- Rewrites config and restarts the daemon on every member; 4s is tight.
-        local content = curl_local("/api/nodes/leave?node=" .. ip, 15)
-        mg.write(content or '{"error":"leave failed"}')
+        local content, err = curl_local("/api/nodes/leave?node=" .. ip, 15)
+        mg.write(content or err or '{"error":"leave failed"}')
     else
         mg.write('{"error":"invalid IP"}')
     end
@@ -245,8 +298,8 @@ elseif action == "join" then
     local ip = get_param("ip") or ""
     -- Accepts IP or IP:PORT (Pi-hole web port of the joining node).
     if ip:match("^%d+%.%d+%.%d+%.%d+$") or ip:match("^%d+%.%d+%.%d+%.%d+:%d+$") then
-        local content = curl_local("/api/nodes/join?node=" .. ip, 15)
-        mg.write(content or '{"error":"join failed"}')
+        local content, err = curl_local("/api/nodes/join?node=" .. ip, 15)
+        mg.write(content or err or '{"error":"join failed"}')
     else
         mg.write('{"error":"invalid IP"}')
     end
@@ -255,8 +308,8 @@ elseif action == "promote" then
     local ip = get_param("ip") or ""
     -- Validate IP format (digits and dots only)
     if ip:match("^%d+%.%d+%.%d+%.%d+$") then
-        local content = curl_local("/api/sync/promote?ip=" .. ip)
-        mg.write(content or '{"error":"promote failed"}')
+        local content, err = curl_local("/api/sync/promote?ip=" .. ip)
+        mg.write(content or err or '{"error":"promote failed"}')
     else
         mg.write('{"error":"invalid IP"}')
     end
@@ -270,8 +323,8 @@ elseif action == "set-auth" then
         -- _validate_sid (5s) < this (10s) < the browser's ajax (15s). If an outer
         -- budget is the smaller one it fires first, and the specific reason the
         -- inner layer worked out is thrown away in favour of a bare timeout.
-        local content = curl_local("/api/auth/set?ip=" .. url_encode(ip) .. "&password=" .. url_encode(password), 10)
-        mg.write(content or '{"error":"auth save failed"}')
+        local content, err = curl_local("/api/auth/set?ip=" .. url_encode(ip) .. "&password=" .. url_encode(password), 10)
+        mg.write(content or err or '{"error":"auth save failed"}')
     else
         mg.write('{"error":"invalid IP"}')
     end

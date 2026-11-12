@@ -33,11 +33,15 @@ $(function () {
     var statusData = null;
     var prevReach = {};        // per-node last-seen reachability (for redshift/blueshift)
     var syncCfg = null;
+    var syncErr = null;
     var syncManifest = null;
     var notifyCfg = null;
     var masterCfg = null;
+    var masterErr = null;
     var vipCfg = null;
+    var vipErr = null;
     var haCfg = null;
+    var haErr = null;
     var authPending = {};  // ip -> Date.now() of the last auth save (bounds the spinner)
     // Long enough for the daemon to reload auth.conf on its next CHECK_INTERVAL
     // round and finish a password hash, short enough that a wrong password does
@@ -144,8 +148,12 @@ $(function () {
         })
         .done(function (data) {
             syncCfg = (data && !data.error) ? data : null;
+            syncErr = syncCfg ? null : apiReason(data);
         })
-        .fail(function () { syncCfg = null; })
+        .fail(function (xhr, textStatus) {
+            syncCfg = null;
+            syncErr = apiReason(null, xhr, textStatus);
+        })
         .always(renderSync);
 
         $.ajax({
@@ -165,10 +173,55 @@ $(function () {
     // Render a node timestamp (UTC "...Z") in the viewer's local time, so the
     // display is correct regardless of the node's own timezone. Falls back to
     // the raw string for anything unparseable (e.g. legacy naive timestamps).
+    // 24-hour, by request: "11/12/2026, 3:50:16 PM" is ambiguous at a glance on
+    // an ops page, and half the thread reads clocks the other way. The date part
+    // still follows the browser's locale; only the clock is pinned.
     function fmtTime(ts) {
         if (!ts) return "—";
         var d = new Date(ts);
-        return isNaN(d.getTime()) ? ts : d.toLocaleString();
+        if (isNaN(d.getTime())) return ts;
+        try {
+            return d.toLocaleString(undefined, { hour12: false });
+        } catch (e) {
+            return d.toLocaleString();
+        }
+    }
+
+    // Why the last read of the pihole-ha API failed.
+    //
+    // Everything on this page except the status file is proxied by ha-api to the
+    // pihole-ha API on 127.0.0.1:8887, so when that API is not answering, every
+    // control fails at the same moment -- and the panel used to show that by
+    // sitting on "Loading..." and letting the toggles do nothing. Reported from a
+    // three-node cluster where the failover toggle, the DHCP master override, the
+    // member list, the VIP toggle and the sync toggles were all dead and nothing
+    // on the page said why. A failed read must not look like a pending one, and a
+    // control that cannot act must say what stopped it.
+    function apiReason(data, xhr, textStatus) {
+        if (data && data.error) return String(data.error);
+        if (textStatus === "parsererror") {
+            return "Pi-hole answered the panel with something other than data " +
+                   "— almost always its login page. Reload this page and log in again.";
+        }
+        if (xhr && xhr.status) {
+            return "Pi-hole's web server returned HTTP " + xhr.status +
+                   " for the ha-api page.";
+        }
+        return "the request to ha-api did not complete.";
+    }
+
+    function showPanelError($el, reason) {
+        if (!$el || !$el.length) return;
+        $el.find(".ha-api-error").remove();
+        $el.append('<span class="ha-api-error" style="color:#dd4b39">' +
+                   '<i class="fa fa-exclamation-triangle"></i> ' +
+                   escapeHtml(reason || "no data from the pihole-ha API.") + '</span>');
+    }
+
+    // Clears only our own message: these spans are also where a click's own
+    // result lands ("Saved", "Sync started"), and a poll must not eat that.
+    function clearPanelError($el) {
+        if ($el && $el.length) $el.find(".ha-api-error").remove();
     }
 
     // reason === null means the request itself failed; anything else is an
@@ -503,6 +556,13 @@ $(function () {
     function renderSync() {
         // Panel is always visible - server-side Lua pre-populates initial state.
         // JS only updates when API data is available.
+        if (!syncCfg) {
+            // The toggles below are drawn from the config file on disk, so they
+            // look live while every click fails. Say so once, here.
+            showPanelError($("#sync-result"), syncErr);
+        } else {
+            clearPanelError($("#sync-result"));
+        }
         if (syncCfg) {
             $("#toggle-enabled").toggleClass("on", syncCfg.enabled);
             $("#toggle-gravity").toggleClass("on", syncCfg.gravity);
@@ -703,15 +763,24 @@ $(function () {
         })
         .done(function (data) {
             masterCfg = (data && !data.error) ? data : null;
+            masterErr = masterCfg ? null : apiReason(data);
         })
-        .fail(function () { masterCfg = null; })
+        .fail(function (xhr, textStatus) {
+            masterCfg = null;
+            masterErr = apiReason(null, xhr, textStatus);
+        })
         .always(renderMaster);
     }
 
     // ---- Render: Master panel ----
 
     function renderMaster() {
-        if (!masterCfg) return;
+        if (!masterCfg) {
+            $("#master-status").text("unavailable");
+            showPanelError($("#master-result"), masterErr);
+            return;
+        }
+        clearPanelError($("#master-result"));
         var cur = masterCfg.dhcp_master || "auto";
 
         // Update button states
@@ -769,6 +838,7 @@ $(function () {
     // ---- Priority polling ----
 
     var prioCfg = null;
+    var prioErr = null;
     var PRIO_ROLES = ["PRIMARY", "SECONDARY", "TERTIARY"];
 
     pollPriority();
@@ -782,13 +852,21 @@ $(function () {
         })
         .done(function (data) {
             prioCfg = (data && !data.error) ? data : null;
+            prioErr = prioCfg ? null : apiReason(data);
         })
-        .fail(function () { prioCfg = null; })
+        .fail(function (xhr, textStatus) {
+            prioCfg = null;
+            prioErr = apiReason(null, xhr, textStatus);
+        })
         .always(renderPriority);
     }
 
     function renderPriority() {
-        if (!prioCfg || !prioCfg.nodes) return;
+        if (!prioCfg || !prioCfg.nodes) {
+            $("#priority-status").text("unavailable");
+            showPanelError($("#priority-rows"), prioErr);
+            return;
+        }
         var nodes = prioCfg.nodes.split(",");
 
         // Update status badge
@@ -979,15 +1057,25 @@ $(function () {
         })
         .done(function (data) {
             vipCfg = (data && !data.error) ? data : null;
+            vipErr = vipCfg ? null : apiReason(data);
         })
-        .fail(function () { vipCfg = null; })
+        .fail(function (xhr, textStatus) {
+            vipCfg = null;
+            vipErr = apiReason(null, xhr, textStatus);
+        })
         .always(renderVip);
     }
 
     // ---- Render: VIP panel ----
 
     function renderVip() {
-        if (!vipCfg) return;
+        if (!vipCfg) {
+            $("#vip-status").text("unavailable");
+            $("#toggle-vip").addClass("disabled");
+            showPanelError($("#vip-result"), vipErr);
+            return;
+        }
+        clearPanelError($("#vip-result"));
         var enabled = vipCfg.vip_enabled;
         var isMaster = vipCfg.is_master;
         $("#toggle-vip").toggleClass("on", enabled);
@@ -1021,10 +1109,12 @@ $(function () {
                 renderVip();
             } else {
                 renderVip();  // revert toggle visual
+                showPanelError($("#vip-result"), apiReason(data));
             }
         })
-        .fail(function () {
+        .fail(function (xhr, textStatus) {
             renderVip();
+            showPanelError($("#vip-result"), apiReason(null, xhr, textStatus));
         });
     };
 
@@ -1266,8 +1356,12 @@ $(function () {
         })
         .done(function (data) {
             haCfg = (data && !data.error) ? data : null;
+            haErr = haCfg ? null : apiReason(data);
         })
-        .fail(function () { haCfg = null; })
+        .fail(function (xhr, textStatus) {
+            haCfg = null;
+            haErr = apiReason(null, xhr, textStatus);
+        })
         .always(renderHa);
     }
 
@@ -1303,7 +1397,12 @@ $(function () {
     // ---- Render: HA panel ----
 
     function renderHa() {
-        if (!haCfg) return;
+        if (!haCfg) {
+            $("#ha-status").text("unavailable");
+            showPanelError($("#ha-result"), haErr);
+            return;
+        }
+        clearPanelError($("#ha-result"));
         var enabled = haCfg.ha_enabled;
         $("#toggle-ha").toggleClass("on", enabled);
         var $badge = $("#ha-status");
@@ -1328,7 +1427,16 @@ $(function () {
             if (data && !data.error) {
                 if (haCfg) $.extend(haCfg, data);
                 renderHa();
+            } else {
+                // Silence here is what "the toggle does nothing" looks like from
+                // the browser: the switch springs back and no cause is given.
+                renderHa();
+                showPanelError($("#ha-result"), apiReason(data));
             }
+        })
+        .fail(function (xhr, textStatus) {
+            renderHa();
+            showPanelError($("#ha-result"), apiReason(null, xhr, textStatus));
         });
     };
 
