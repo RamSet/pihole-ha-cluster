@@ -68,6 +68,14 @@ $(function () {
     setInterval(pollHa, 5000);
 
     // ---- Event bindings (CSP-safe, no inline onclick) ----
+    // Clock format. Redraw from the state already in hand so the change is
+    // visible at once instead of on the next poll, up to 15s later.
+    $("#ha-clock-fmt").val(clockPref());
+    $(document).on("change", "#ha-clock-fmt", function () {
+        setClockPref($(this).val());
+        pollStatus();
+        renderSync();
+    });
     $(document).on("click", "#toggle-ha", function () { window.haHaToggle(); });
     $(document).on("click", "#toggle-vip", function () { window.haVipToggle(); });
     $(document).on("click", "#toggle-enabled", function () { window.haToggle("enabled"); });
@@ -170,21 +178,43 @@ $(function () {
 
     // ---- Render: Overview cards ----
 
+    // Clock format for the timestamps on this page: the viewer's own locale by
+    // default, with 24-hour or 12-hour pinnable per browser.
+    //
+    // A browser reports a region, not a clock preference -- an en-US locale
+    // says AM/PM whatever the desktop clock is set to, and Chrome does not read
+    // the OS 12/24-hour switch -- so following the locale alone leaves someone
+    // who wants "22:25:45" while watching a failover no way to ask for it.
+    // Hence the override, stored in the browser rather than on the node: it is
+    // a property of who is looking, not of the cluster.
+    var CLOCK_KEY = "pihole-ha-clock";
+
+    function clockPref() {
+        try {
+            var v = localStorage.getItem(CLOCK_KEY);
+            if (v === "12" || v === "24") return v;
+        } catch (e) { /* private window or storage blocked: follow the locale */ }
+        return "auto";
+    }
+
+    function setClockPref(v) {
+        try { localStorage.setItem(CLOCK_KEY, v); } catch (e) { /* not fatal */ }
+    }
+
     // Render a node timestamp (UTC "...Z") in the viewer's local time, so the
     // display is correct regardless of the node's own timezone. Falls back to
     // the raw string for anything unparseable (e.g. legacy naive timestamps).
-    // 24-hour, by request: "11/12/2026, 3:50:16 PM" is ambiguous at a glance on
-    // an ops page, and half the thread reads clocks the other way. The date part
-    // still follows the browser's locale; only the clock is pinned.
+    // The date always follows the locale; only the clock is pinned.
     function fmtTime(ts) {
         if (!ts) return "—";
         var d = new Date(ts);
         if (isNaN(d.getTime())) return ts;
+        var pref = clockPref();
         try {
-            return d.toLocaleString(undefined, { hour12: false });
-        } catch (e) {
-            return d.toLocaleString();
-        }
+            if (pref === "24") return d.toLocaleString(undefined, { hour12: false });
+            if (pref === "12") return d.toLocaleString(undefined, { hour12: true });
+        } catch (e) { /* no Intl option support: locale default below */ }
+        return d.toLocaleString();
     }
 
     // Why the last read of the pihole-ha API failed.

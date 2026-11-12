@@ -246,6 +246,11 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
         <div class="pull-right">
             <span id="ha-equilibrium"></span>
             <span id="ha-ts-wrap"><span class="label label-default" id="ha-timestamp"></span></span>
+            <select class="form-control input-sm" id="ha-clock-fmt" title="Clock format for the times on this page (remembered in this browser)" style="width:auto;display:inline-block;vertical-align:middle">
+                <option value="auto">Clock: locale</option>
+                <option value="24">Clock: 24h</option>
+                <option value="12">Clock: 12h</option>
+            </select>
         </div>
     </div>
 </div>

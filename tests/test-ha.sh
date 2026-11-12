@@ -937,10 +937,37 @@ assert_contains "the reason is HTML-escaped"                "$_js" "escapeHtml(r
 assert_contains "a recovered panel clears only its own error" "$_js" 'clearPanelError($("#master-result"))'
 assert_contains "and a click result is not eaten by a poll"   "$_js" '$el.find(".ha-api-error").remove()'
 
-# Timestamps: 24-hour, asked for on the forum. "3:50:16 PM" on an ops page is a
-# needless second of parsing for half the thread.
-assert_contains "the clock is pinned to 24-hour"            "$_js" "{ hour12: false }"
-assert_not_contains "and no bare toLocaleString is left"    "$(sed -n '/function fmtTime/,/^    }/p' "$SCRIPT_DIR/../ha.js")" "return isNaN(d.getTime()) ? ts : d.toLocaleString();"
+# Timestamps. The clock follows the viewer's locale, with a per-browser
+# override: a browser reports a region, not a clock preference -- an en-US
+# locale prints "3:50:16 PM" however the desktop clock is set, and Chrome does
+# not read the OS 12/24-hour switch -- so the locale alone gives a viewer who
+# wants 24-hour on a failover page no way to ask for it. Asked for on the forum.
+_fmt="$(sed -n '/function fmtTime/,/^    }/p' "$SCRIPT_DIR/../ha.js")"
+assert_contains "the clock follows the locale by default"   "$_fmt" "return d.toLocaleString();"
+assert_contains "24-hour can be pinned"                     "$_fmt" 'pref === "24") return d.toLocaleString(undefined, { hour12: false })'
+assert_contains "12-hour can be pinned"                     "$_fmt" 'pref === "12") return d.toLocaleString(undefined, { hour12: true })'
+assert_contains "and every timestamp reads the choice"      "$_fmt" "clockPref()"
+assert_contains "the choice survives a reload"              "$_js" "localStorage.setItem(CLOCK_KEY"
+# localStorage throws in a private window and can be blocked outright; a clock
+# that disappears there would be a worse bug than the one being fixed.
+_pref="$(sed -n '/function clockPref/,/^    }/p' "$SCRIPT_DIR/../ha.js")"
+assert_contains "blocked storage falls back to the locale"  "$_pref" 'return "auto";'
+assert_contains "a read is guarded"                         "$_pref" "catch (e)"
+assert_contains "and only the two pins are honored"         "$_pref" 'if (v === "12" || v === "24") return v;'
+assert_contains "a blocked write is not fatal either"       "$(sed -n '/function setClockPref/,/^    }/p' "$SCRIPT_DIR/../ha.js")" "catch (e)"
+# A preference with nothing to set it with is not a preference.
+_lp_clock="$(cat "$SCRIPT_DIR/../ha.lp")"
+assert_contains "the panel offers the control"              "$_lp_clock" 'id="ha-clock-fmt"'
+for _o in auto 24 12; do
+    assert_contains "clock option $_o is offered"           "$_lp_clock" "<option value=\"$_o\">"
+done
+assert_contains "the control opens on the current choice"   "$_js" '$("#ha-clock-fmt").val(clockPref())'
+# Status redraws every 5s and sync every 15s; waiting that long to see the
+# format change looks like the control did nothing.
+_clock_ch="$(sed -n '/on("change", "#ha-clock-fmt"/,/^    });/p' "$SCRIPT_DIR/../ha.js")"
+assert_contains "a change is stored"                        "$_clock_ch" "setClockPref("
+assert_contains "and redraws the status clock at once"      "$_clock_ch" "pollStatus();"
+assert_contains "and the sync timestamps with it"           "$_clock_ch" "renderSync();"
 
 echo
 echo "=== A peer we cannot authenticate to must say so ==="
