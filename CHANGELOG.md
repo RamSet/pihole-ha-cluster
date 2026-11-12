@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.31 — 2026-11-12
+- Let the viewer choose the clock instead of pinning it
+
 ## v3.19.30 — 2026-11-12
 - Say why a control failed instead of leaving it looking busy
 
