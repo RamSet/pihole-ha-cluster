@@ -1044,10 +1044,12 @@ fi
 if [[ "$_dhcp_mode" != "dns" ]]; then
 if [[ "$vip_enabled" == "true" && -n "$vip" ]]; then
     printf "  %b Configuring DHCP options (DNS=%s)..." "${INFO}" "$vip"
+    # No dhcp-option=54: dnsmasq sends its own server identifier and would send
+    # this one too, giving clients that ask for option 54 two Server-IDs in one
+    # offer and a "wrong server-ID" NAK loop. See the note in pihole-ha.
     cat > /etc/dnsmasq.d/09-pihole-ha.conf <<DNSCONF
 # pihole-ha: DHCP options for clients
 dhcp-option=6,$vip
-dhcp-option=54,$vip
 DNSCONF
 else
     dns_list=""

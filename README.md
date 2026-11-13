@@ -72,7 +72,7 @@ At install it checks whether Pi-hole DHCP is active, probes the LAN for another 
 
 All nodes run the same software. Priority order determines who serves DHCP when in automatic mode.
 
-**VIP enabled**: The VIP (`/32`) is added to the active node's interface and removed when it deactivates, with gratuitous ARP to update switch/router tables. Clients receive only the VIP as their DNS server (`dhcp-option=6`) and DHCP server identifier (`dhcp-option=54`), so lease renewals always reach the active node.
+**VIP enabled**: The VIP (`/32`) is added to the active node's interface and removed when it deactivates, with gratuitous ARP to update switch/router tables. Clients receive only the VIP as their DNS server (`dhcp-option=6`), so DNS keeps working through a failover without the client noticing. The DHCP server identifier is left to dnsmasq, which advertises the node that issued the lease: when that node goes away, renewals time out and the client rebinds by broadcast, which the surviving node answers.
 
 **VIP disabled**: No floating IP is managed. Clients receive all node IPs as DNS servers (`dhcp-option=6`), providing redundancy without a VIP. Clients use whichever node answered their DHCP request as the server identifier.
 
@@ -199,7 +199,7 @@ The core daemon runs on every node (systemd service or Docker supervisor). Every
    - Deactivation: All nodes need 3 consecutive checks (60s)
 5. **Manages the VIP** (if `VIP_ENABLED=true`) — adds it on activation with gratuitous ARP, removes it on deactivation
 6. **Updates DHCP options** — writes `/etc/dnsmasq.d/09-pihole-ha.conf`:
-   - VIP enabled: `dhcp-option=6,<VIP>` + `dhcp-option=54,<VIP>` (single DNS + server-id)
+   - VIP enabled: `dhcp-option=6,<VIP>` (single DNS endpoint)
    - VIP disabled: `dhcp-option=6,<node1>,<node2>,<node3>` (all nodes as DNS)
 7. **Writes status JSON** to `/run/pihole-ha/status.json` for the dashboard
 
@@ -258,11 +258,11 @@ The VIP is an optional floating IP address, controlled by `VIP_ENABLED` in `node
 
 | `VIP_ENABLED` | DHCP options written to `09-pihole-ha.conf` | Behavior |
 |---------------|----------------------------------------------|----------|
-| `true` | `dhcp-option=6,<VIP>` + `dhcp-option=54,<VIP>` | Clients see one stable DNS endpoint. DHCP renewals always target the VIP, which follows the active node. |
+| `true` | `dhcp-option=6,<VIP>` | Clients see one stable DNS endpoint. Renewals go to the node that issued the lease; if it is gone, the client rebinds by broadcast and the surviving node answers. |
 | `false` | `dhcp-option=6,<node1>,<node2>,<node3>` | Clients see all node IPs as DNS. No VIP is managed. Clients renew against whichever node answered. |
 
 - `dhcp-option=6` = DNS servers advertised to clients (RFC 2132)
-- `dhcp-option=54` = DHCP Server Identifier — tells clients which server to contact for renewals/releases
+- `dhcp-option=54` (DHCP Server Identifier) is deliberately **not** written. dnsmasq always sends its own, and a configured one is sent in addition to it whenever a client asks for option 54 — two Server-IDs in one offer. A client that takes the second echoes the VIP in its request and dnsmasq answers "wrong server-ID", looping the client. The VIP cannot be a server identifier dnsmasq will accept.
 
 VIP can be toggled from the web UI (dashboard or `/admin/ha`). The toggle propagates to all nodes automatically via the `/api/vip/toggle` endpoint. The daemon live-reloads `VIP_ENABLED` every check cycle (10s) — no restart needed.
 

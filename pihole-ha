@@ -411,14 +411,27 @@ if [[ "$CONFIG_VERSION" -ne "$EXPECTED_CONFIG_VERSION" ]]; then
 fi
 
 # Manage dnsmasq DHCP options advertised to clients
-# VIP enabled:  DNS=VIP only, DHCP server-id=VIP
-# VIP disabled: DNS=all node IPs, no server-id override
+# VIP enabled:  DNS=VIP only
+# VIP disabled: DNS=all node IPs
+#
+# Never dhcp-option=54. dnsmasq always sends its own server identifier, built
+# from the address of the interface the DHCP context came from, and sends a
+# configured one *as well* whenever the client asks for option 54 in its
+# parameter request list -- two Server-IDs in one DHCPOFFER. A client that takes
+# the second one (the VIP) echoes it in its DHCPREQUEST, and dnsmasq refuses
+# that with "wrong server-ID": the VIP is not context->local, the escape hatch
+# that would accept any local interface address needs tftp_ok (TFTP is off), and
+# Pi-hole sets dhcp-authoritative, so the client gets a NAK instead of silence
+# and loops. Reproduced on a live node: with 54 in the request list the offer
+# carried both the node IP and the VIP, without it exactly one. Reported for
+# PlayStation consoles, which ask for option 54 (GitHub #10).
 DNSMASQ_HA="/etc/dnsmasq.d/09-pihole-ha.conf"
 build_dns_option() {
     local lines=""
     if [[ "$VIP_ENABLED" == "true" && -n "$VIP" ]]; then
-        # VIP mode: single VIP as DNS + DHCP server identifier
-        lines="dhcp-option=6,$VIP"$'\n'"dhcp-option=54,$VIP"
+        # VIP mode: the VIP is the single DNS endpoint. The server identifier is
+        # dnsmasq's to set -- see the note above.
+        lines="dhcp-option=6,$VIP"
     else
         # No VIP: all node IPs as DNS, no server-id override
         local dns_list=""

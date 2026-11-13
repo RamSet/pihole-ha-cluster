@@ -1006,6 +1006,50 @@ assert_contains "and redraws the status clock at once"      "$_clock_ch" "pollSt
 assert_contains "and the sync timestamps with it"           "$_clock_ch" "renderSync();"
 
 echo
+echo "=== The DHCP options we advertise must be ones dnsmasq will honour ==="
+# ------------------------------------------------------------
+# dhcp-option=54 (server identifier) must never be written.
+#
+# dnsmasq always sends its own server identifier, built from the address the
+# DHCP context came from, and sends a configured one *as well* whenever the
+# client asks for option 54 in its parameter request list. The client then gets
+# two Server-IDs in one DHCPOFFER; one that takes the second (the VIP) echoes it
+# in its DHCPREQUEST and dnsmasq answers "wrong server-ID" -- the VIP is not
+# context->local, the escape hatch that would accept any local interface address
+# needs tftp_ok (TFTP is off), and Pi-hole sets dhcp-authoritative, so the
+# client is NAKed rather than ignored and loops. GitHub #10, reported for
+# PlayStation consoles, which ask for option 54.
+#
+# Measured against a live DHCP master before the fix: a DISCOVER whose request
+# list included 54 was answered with Server-IDs [node, VIP]; without it, [node].
+assert_eq "no writer advertises a server identifier" "" \
+    "$(grep -hnE '^[^#]*dhcp-option=54' "$SCRIPT_DIR/../pihole-ha" "$SCRIPT_DIR/../install.sh")"
+assert_contains "the installer still advertises the VIP as DNS" \
+    "$(cat "$SCRIPT_DIR/../install.sh")" 'dhcp-option=6,$vip'
+
+eval "$(extract_fn "$HA_SRC" build_dns_option)"
+VIP_ENABLED="true"; VIP="10.0.0.9"; NODES=(10.0.0.1 10.0.0.2)
+assert_eq "VIP mode advertises the VIP as DNS and nothing else" \
+    "dhcp-option=6,10.0.0.9" "$(build_dns_option)"
+VIP_ENABLED="false"
+assert_eq "without a VIP every node is advertised as DNS" \
+    "dhcp-option=6,10.0.0.1,10.0.0.2" "$(build_dns_option)"
+# A VIP that is configured but blank must not produce "dhcp-option=6," either.
+VIP_ENABLED="true"; VIP=""
+assert_eq "a blank VIP falls back to the node list" \
+    "dhcp-option=6,10.0.0.1,10.0.0.2" "$(build_dns_option)"
+
+# Every existing install carries the bad line in its drop-in. The daemon has to
+# notice the file no longer matches what it wants and rewrite it, or the fix
+# never reaches anyone who upgrades.
+_dns_opt_fn="$(extract_fn "$HA_SRC" ensure_dns_option)"
+assert_contains "a stale drop-in is rewritten on upgrade" "$_dns_opt_fn" '"$(cat "$DNSMASQ_HA")" == "$full"'
+assert_contains "and FTL is restarted so clients see it"  "$_dns_opt_fn" "platform_ftl_restart"
+assert_contains "but not on a DNS-only node"              "$_dns_opt_fn" '[[ "$DHCP_HA" != "true" ]] && return 0'
+unset -f build_dns_option
+unset VIP_ENABLED VIP NODES
+
+echo
 echo "=== A peer we cannot authenticate to must say so ==="
 # ------------------------------------------------------------
 # A peer that fails authentication is treated as DOWN, so every node elects
