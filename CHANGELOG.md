@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.33 — 2026-11-12
+- Stop advertising the VIP as the DHCP server identifier
+
 ## v3.19.32 — 2026-11-12
 - Report a failed spawn as one, not as a missing curl
 
