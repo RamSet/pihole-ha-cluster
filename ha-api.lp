@@ -70,6 +70,31 @@ end
 -- where the failover toggle, the DHCP master override, the VIP toggle and the
 -- sync toggles were all dead and the member list sat on "Loading..." forever.
 -- curl already knows which failure it was; the fix is to stop throwing it away.
+-- Why pihole-FTL could not start the helper process at all.
+--
+-- io.popen returns nil plus "<the whole command>: <strerror>" when fork or the
+-- pipe fails -- a process limit, not a missing curl. The command carries the
+-- caller's session id, so only a short, quote-free strerror tail is ever shown:
+-- these messages get pasted into forum posts.
+local function spawn_errtext(err)
+    if type(err) ~= "string" then return nil end
+    local tail = err:match(":%s*([^:]+)%s*$")
+    if not tail then return nil end
+    tail = tail:gsub("^%s+", ""):gsub("%s+$", "")
+    if #tail == 0 or #tail > 80 then return nil end
+    if tail:find("[\"'<>]") or tail:find("sid=") or tail:find("http") then return nil end
+    return tail
+end
+
+local function spawn_reason(err)
+    local why = spawn_errtext(err)
+    return "pihole-FTL could not start curl to reach the pihole-ha API" ..
+           (why and (" (" .. why .. ")") or "") ..
+           ". The API itself may be fine: this is pihole-FTL unable to spawn a " ..
+           "process, which usually means it is at a limit (open files, " ..
+           "processes or memory)."
+end
+
 local function curl_reason(code, where, timeout)
     if code == "7" then
         return "cannot connect to the pihole-ha API on " .. where .. ". " ..
@@ -84,13 +109,41 @@ local function curl_reason(code, where, timeout)
                "and then sent nothing back -- check the sidecar's log for a " ..
                "crashed pihole-ha-dash."
     elseif code == "127" then
-        return "curl is not available inside the Pi-hole container, so this " ..
-               "panel cannot reach the pihole-ha API at all."
+        return "curl is not installed where pihole-FTL runs (in Docker, that " ..
+               "is inside the Pi-hole container), so this panel cannot reach " ..
+               "the pihole-ha API at all."
     elseif code == "0" then
         return "the pihole-ha API on " .. where .. " answered with nothing."
     end
     return "the pihole-ha API on " .. where .. " could not be read (curl exit " ..
            tostring(code) .. ")."
+end
+
+-- One curl, carrying back either the body or the reason it failed.
+--
+-- The exit status comes back in the stream itself: io.popen's close() does not
+-- report it portably across the Lua builds Pi-hole ships. A spawn that fails
+-- outright is reported as such instead of as a missing curl -- three bare-metal
+-- nodes on the forum hit that, intermittently, and the page blamed curl.
+local function curl_fetch(url, timeout, where)
+    local cmd = "curl -s --max-time " .. timeout .. " '" .. url ..
+                "' 2>/dev/null; printf '\\n--ha-exit:%s' $?"
+    local handle, perr = io.popen(cmd)
+    if not handle then
+        -- A spawn refused on a momentary burst of pipes or processes usually
+        -- succeeds immediately after, so one retry keeps a flicker off a page
+        -- that polls six endpoints every few seconds.
+        handle, perr = io.popen(cmd)
+    end
+    if not handle then
+        return nil, json_error(spawn_reason(perr))
+    end
+    local result = handle:read("*a") or ""
+    handle:close()
+    local code = result:match("%-%-ha%-exit:(%d+)%s*$")
+    local body = (result:gsub("\n?%-%-ha%-exit:%d+%s*$", ""))
+    if body and #body > 0 then return body end
+    return nil, json_error(curl_reason(code or "?", where, timeout))
 end
 
 -- Returns the response body, or nil plus a JSON error naming the cause.
@@ -103,20 +156,7 @@ local function curl_local(endpoint, timeout)
         endpoint = endpoint .. sep .. "sid=" .. url_encode(sid)
     end
     timeout = timeout or 4
-    -- The exit status is carried back in the stream itself: io.popen's close()
-    -- does not report it portably across the Lua builds Pi-hole ships.
-    local handle = io.popen("curl -s --max-time " .. timeout ..
-        " 'http://127.0.0.1:8887" .. endpoint .. "' 2>/dev/null" ..
-        "; printf '\\n--ha-exit:%s' $?")
-    if not handle then
-        return nil, json_error("the panel could not run curl inside the Pi-hole container.")
-    end
-    local result = handle:read("*a") or ""
-    handle:close()
-    local code = result:match("%-%-ha%-exit:(%d+)%s*$")
-    local body = (result:gsub("\n?%-%-ha%-exit:%d+%s*$", ""))
-    if body and #body > 0 then return body end
-    return nil, json_error(curl_reason(code or "?", "127.0.0.1:8887", timeout))
+    return curl_fetch("http://127.0.0.1:8887" .. endpoint, timeout, "127.0.0.1:8887")
 end
 
 local function read_nodes_conf()
@@ -157,17 +197,8 @@ local function curl_primary_manifest()
     if not primary or #primary == 0 then
         return nil, json_error("no sync primary is configured on this node.")
     end
-    local handle = io.popen("curl -s --max-time 4 'http://" .. primary ..
-        ":8887/api/sync/manifest' 2>/dev/null; printf '\\n--ha-exit:%s' $?")
-    if not handle then
-        return nil, json_error("the panel could not run curl inside the Pi-hole container.")
-    end
-    local result = handle:read("*a") or ""
-    handle:close()
-    local code = result:match("%-%-ha%-exit:(%d+)%s*$")
-    local body = (result:gsub("\n?%-%-ha%-exit:%d+%s*$", ""))
-    if body and #body > 0 then return body end
-    return nil, json_error(curl_reason(code or "?", primary .. ":8887", 4))
+    return curl_fetch("http://" .. primary .. ":8887/api/sync/manifest", 4,
+                      primary .. ":8887")
 end
 
 local action = get_param("action") or ""

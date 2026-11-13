@@ -894,7 +894,7 @@ _lp="$(cat "$SCRIPT_DIR/../ha-api.lp")"
 assert_contains "a refused connection names both deployments' causes" "$_lp" "cannot connect to the pihole-ha API on"
 assert_contains "and tells a Docker user what to fix"                 "$_lp" "network_mode: service:pihole"
 assert_contains "a timeout is reported as a timeout"                  "$_lp" "did not answer within"
-assert_contains "a missing curl inside the container is named"        "$_lp" "curl is not available inside the Pi-hole container"
+assert_contains "a missing curl names where FTL runs, not a container" "$_lp" "curl is not installed where pihole-FTL runs"
 assert_contains "an empty reply is not reported as a refusal"         "$_lp" "answered with nothing"
 assert_contains "and an unmapped curl exit carries its number"        "$_lp" "curl exit "
 
@@ -910,7 +910,43 @@ assert_eq "no action swallows it" "" \
     "$(grep -n "mg.write(content or '" "$SCRIPT_DIR/../ha-api.lp")"
 assert_contains "the exit status is carried back in the stream"  "$_lp" "ha-exit:%s"
 assert_contains "and stripped off before the body is returned"   "$_lp" 'result:gsub("\n?%-%-ha%-exit:%d+%s*$", "")'
-assert_contains "the manifest fetch from the primary reports too" "$_lp" 'curl_reason(code or "?", primary'
+assert_contains "the manifest fetch from the primary reports too" "$_lp" 'curl_fetch("http://" .. primary'
+
+# ------------------------------------------------------------
+# A failed spawn is not a missing curl.
+#
+# io.popen returns nil plus "<command>: <strerror>" when pihole-FTL cannot fork
+# or open a pipe. That reason was thrown away and every such failure was printed
+# as "the panel could not run curl inside the Pi-hole container" -- which three
+# bare-metal nodes on the forum then saw, flickering across the page, while curl
+# was installed and the API was answering normally. Verified against the real
+# interpreter (pihole-FTL lua, v6.7) by holding 1021 fds: io.popen returns nil,
+# the reason extracts as "No file descriptors available", and a retry once the
+# fds are free succeeds.
+assert_eq "no failure is reported as an unrunnable curl" "" \
+    "$(grep -n "could not run curl" "$SCRIPT_DIR/../ha-api.lp")"
+assert_contains "a refused spawn is named as one"        "$_lp" "could not start curl to reach the pihole-ha API"
+assert_contains "and does not blame the API for it"      "$_lp" "The API itself may be fine"
+assert_contains "the C library's reason is kept"         "$_lp" "local handle, perr = io.popen(cmd)"
+assert_contains "and reported"                           "$_lp" "json_error(spawn_reason(perr))"
+assert_contains "a momentary refusal is retried once"    "$_lp" "handle, perr = io.popen(cmd)"
+assert_eq "the retry is the only second spawn" "2" "$(grep -cE 'io\.popen\(' "$SCRIPT_DIR/../ha-api.lp")"
+# Both callers share the one spawn path, so a fix here cannot miss one.
+for _fn in curl_local curl_primary_manifest; do
+    _blk="$(sed -n "/^local function $_fn/,/^end/p" "$SCRIPT_DIR/../ha-api.lp")"
+    assert_contains "$_fn goes through the shared fetch" "$_blk" "curl_fetch("
+    assert_not_contains "$_fn does not spawn on its own" "$_blk" "io.popen"
+done
+
+# The command string carries the caller's session id, and these messages get
+# pasted into forum posts. Only a short, quote-free strerror tail is shown.
+_spawn="$(sed -n '/^local function spawn_errtext/,/^end/p' "$SCRIPT_DIR/../ha-api.lp")"
+assert_contains "only the reason after the last colon is taken" "$_spawn" 'err:match(":%s*([^:]+)%s*$")'
+assert_contains "a session id is never printed"                 "$_spawn" 'tail:find("sid=")'
+assert_contains "nor the URL it was in"                         "$_spawn" 'tail:find("http")'
+assert_contains "nor anything that could break out of the JSON" "$_spawn" '<>'
+assert_contains "and the length is bounded"                     "$_spawn" "#tail > 80"
+assert_contains "an unparseable reason degrades to no reason"    "$_spawn" "return nil"
 
 # Every panel that reads its state from :8887 has to show the reason when that
 # read fails -- the five that were dead on G241's cluster, by name.
