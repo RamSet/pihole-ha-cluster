@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.32 — 2026-11-12
+- Report a failed spawn as one, not as a missing curl
+
 ## v3.19.31 — 2026-11-12
 - Let the viewer choose the clock instead of pinning it
 
