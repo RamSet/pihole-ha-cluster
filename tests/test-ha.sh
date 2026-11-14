@@ -948,6 +948,47 @@ assert_contains "nor anything that could break out of the JSON" "$_spawn" '<>'
 assert_contains "and the length is bounded"                     "$_spawn" "#tail > 80"
 assert_contains "an unparseable reason degrades to no reason"    "$_spawn" "return nil"
 
+# ------------------------------------------------------------
+# The API is not always on this page's loopback.
+#
+# This page runs inside pihole-FTL; the API runs in the pihole-ha sidecar. With
+# the shipped compose (both on the host network) one loopback serves both -- but
+# a Pi-hole container on a bridge network has a loopback of its own with nothing
+# on it, so every control fails with "cannot connect" while curl on the host
+# answers fine. Reported from a three-node bridge-networked cluster that had
+# just upgraded, and reproduced in a bridge container: 127.0.0.1:8887 gives curl
+# exit 7 while the host's own LAN address serves the same request. What the two
+# always share is /run/pihole-ha, and the sidecar's status file there names an
+# address that does work. Verified in the live interpreter (pihole-FTL lua on a
+# node): loopback refused -> the body comes back from the node IP; both refused
+# -> the message below; loopback answering -> no second request at all.
+_cl="$(sed -n '/^local function curl_local/,/^end/p' "$SCRIPT_DIR/../ha-api.lp")"
+assert_contains "loopback is still tried first"                   "$_cl" 'curl_fetch("http://127.0.0.1:8887" .. endpoint'
+assert_contains "a working loopback returns before any fallback"  "$_cl" "if body then return body end"
+assert_contains "only a refused connection is retried elsewhere"  "$_cl" 'if code ~= "7" then return nil, err end'
+assert_contains "the second address comes from the status file"   "$_cl" "local host = node_api_host()"
+assert_contains "and nothing is retried without one"              "$_cl" "if not host then return nil, err end"
+assert_contains "the retry goes to this node's own API"           "$_cl" 'curl_fetch("http://" .. host .. ":8887" .. endpoint'
+# That gate can only fire if the exit status survives the fetch.
+assert_contains "the fetch hands its exit status back"            "$_lp" 'curl_reason(code or "?", where, timeout)), code'
+# Two refusals are not a namespace split, so the message must not send the
+# operator back to a compose file that is already right.
+_un="$(sed -n '/^local function unreachable_reason/,/^end/p' "$SCRIPT_DIR/../ha-api.lp")"
+assert_contains "both addresses are named when both refuse"       "$_un" '127.0.0.1:8887 or '
+assert_contains "a package install is told what to check"         "$_un" "systemctl status pihole-ha-dash"
+assert_contains "a Docker install too"                            "$_un" "sidecar container is running"
+assert_not_contains "and neither is blamed on the network mode"   "$_un" "network_mode"
+# The address lands in a shell'd curl URL, so the pattern has to be the guard.
+_nh="$(sed -n '/^local function node_api_host/,/^end/p' "$SCRIPT_DIR/../ha-api.lp")"
+assert_contains "the node address is read from the status file"   "$_nh" '/run/pihole-ha/status.json'
+assert_contains "and taken from this node's own entry, not a peer's" "$_nh" '"node"%s*:%s*{(.-)}'
+assert_contains "nothing but an IPv4 address is accepted"         "$_nh" '"(%d+%.%d+%.%d+%.%d+)"'
+assert_contains "and loopback there means no fallback at all"     "$_nh" 'ip == "127.0.0.1"'
+# Class guard: one place builds a loopback URL, so every proxied action gets the
+# fallback and none can grow its own.
+assert_eq "no action reaches loopback on its own" "1" \
+    "$(grep -c 'http://127' "$SCRIPT_DIR/../ha-api.lp")"
+
 # Every panel that reads its state from :8887 has to show the reason when that
 # read fails -- the five that were dead on G241's cluster, by name.
 for _v in sync:renderSync master:renderMaster prio:renderPriority vip:renderVip ha:renderHa; do

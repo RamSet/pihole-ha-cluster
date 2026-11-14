@@ -200,11 +200,19 @@ address, so a VIP the sidecar adds to the host NIC is answered by it.
 the process can see, which is right on a host-mode sidecar and wrong anywhere
 else, so set it explicitly if the daemon logs `Unknown IP`.
 
-Two caveats. Peers reach this node's Pi-hole API on the **published** port, so
-list it in `PIHOLE_HA_NODES` as `IP:PORT`. And DHCP failover with a relay such
+Three caveats. Peers reach this node's Pi-hole API on the **published** port, so
+list it in `PIHOLE_HA_NODES` as `IP:PORT`. DHCP failover with a relay such
 as `dhcp-helper` in front of a bridged Pi-hole is untested here — the toggling
 of `dhcp.active` is just FTL config and should work, but nobody has reported
 back on it.
+
+And the HA panel runs inside your Pi-hole container, where `127.0.0.1:8887` is
+that container's own loopback with nothing listening on it. From v3.19.34 the
+panel falls back to the node address in the sidecar's status file, so the
+controls work unchanged — as long as the host firewall lets the bridge network
+reach the host's LAN address on port 8887. Before v3.19.34 every control on the
+page failed with `cannot connect to the pihole-ha API on 127.0.0.1:8887` while
+`curl` on the host answered normally.
 
 Don't run `docker-install.sh` for this: it rewrites your Pi-hole service to
 host networking, which is the thing you are avoiding. Add the sidecar service

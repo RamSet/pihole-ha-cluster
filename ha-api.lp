@@ -143,7 +143,39 @@ local function curl_fetch(url, timeout, where)
     local code = result:match("%-%-ha%-exit:(%d+)%s*$")
     local body = (result:gsub("\n?%-%-ha%-exit:%d+%s*$", ""))
     if body and #body > 0 then return body end
-    return nil, json_error(curl_reason(code or "?", where, timeout))
+    return nil, json_error(curl_reason(code or "?", where, timeout)), code
+end
+
+-- Nothing is listening in either place, so this is not a namespace split and
+-- the only cause left is a dash that is not running.
+local function unreachable_reason(host)
+    return "cannot connect to the pihole-ha API, on 127.0.0.1:8887 or " ..
+           host .. ":8887. pihole-ha-dash is not answering on either: on a " ..
+           "package install check 'systemctl status pihole-ha-dash', in " ..
+           "Docker check that the pihole-ha sidecar container is running."
+end
+
+-- The address this node's own :8887 API answers on, when loopback is not it.
+--
+-- This page runs inside pihole-FTL; the API runs in the pihole-ha sidecar. The
+-- shipped compose puts both on the host network, so one loopback serves both --
+-- but a Pi-hole container on a bridge network has a loopback of its own with
+-- nothing on it, and then every control on the page fails with "cannot connect"
+-- while curl on the host answers fine (reported from a three-node cluster on
+-- bridge networking; reproduced in a bridge container: loopback gives curl exit
+-- 7, the host's own LAN address answers). What the two always share is
+-- /run/pihole-ha, and the sidecar's status file there names an address that
+-- does work, since the dash binds 0.0.0.0. Only IPv4 is matched, which is all
+-- nodes.conf accepts, and the pattern admits nothing but digits and dots, so
+-- the value is safe to interpolate into the shell'd curl URL.
+local function node_api_host()
+    local content = read_file("/run/pihole-ha/status.json")
+    if not content then return nil end
+    local node = content:match('"node"%s*:%s*{(.-)}')
+    if not node then return nil end
+    local ip = node:match('"ip"%s*:%s*"(%d+%.%d+%.%d+%.%d+)"')
+    if not ip or ip == "127.0.0.1" then return nil end
+    return ip
 end
 
 -- Returns the response body, or nil plus a JSON error naming the cause.
@@ -156,7 +188,20 @@ local function curl_local(endpoint, timeout)
         endpoint = endpoint .. sep .. "sid=" .. url_encode(sid)
     end
     timeout = timeout or 4
-    return curl_fetch("http://127.0.0.1:8887" .. endpoint, timeout, "127.0.0.1:8887")
+    local body, err, code = curl_fetch("http://127.0.0.1:8887" .. endpoint,
+                                       timeout, "127.0.0.1:8887")
+    if body then return body end
+    -- Only a refused connection is retried elsewhere: a timeout or a dropped
+    -- connection means something IS listening on loopback, and asking a second
+    -- address about a dash that is mid-crash would only mislabel the fault.
+    if code ~= "7" then return nil, err end
+    local host = node_api_host()
+    if not host then return nil, err end
+    local body2, err2, code2 = curl_fetch("http://" .. host .. ":8887" .. endpoint,
+                                          timeout, host .. ":8887")
+    if body2 then return body2 end
+    if code2 == "7" then return nil, json_error(unreachable_reason(host)) end
+    return nil, err2
 end
 
 local function read_nodes_conf()
