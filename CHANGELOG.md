@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.38 — 2026-11-15
+- Take what the forks got right: a clean port, an owed reload, DHCP env
+
 ## v3.19.37 — 2026-11-15
 - Repair a config directory an older installer locked to 0700
 
