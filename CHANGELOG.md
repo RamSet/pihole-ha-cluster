@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.39 — 2026-11-15
+- Leave the DHCP Master box out of a DNS-only cluster
+
 ## v3.19.38 — 2026-11-15
 - Take what the forks got right: a clean port, an owed reload, DHCP env
 
