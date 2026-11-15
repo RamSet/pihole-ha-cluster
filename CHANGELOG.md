@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.37 — 2026-11-15
+- Repair a config directory an older installer locked to 0700
+
 ## v3.19.36 — 2026-11-15
 - Stop a saved peer password from locking the panel out of its own config
 
