@@ -3610,8 +3610,10 @@ echo "=== Saving a peer password must not lock the panel out ==="
 _ins="$(cat "$SCRIPT_DIR/../install.sh")"
 assert_eq "nothing re-modes the config directory" "" \
     "$(grep -nE 'install .*-d .*/etc/pihole-ha' "$SCRIPT_DIR/../install.sh" "$SCRIPT_DIR/../pihole-ha-dash" "$SCRIPT_DIR/../pihole-ha")"
-assert_eq "and nothing chmods it either" "" \
-    "$(grep -nE 'chmod [0-7]+ /etc/pihole-ha( |$)' "$SCRIPT_DIR/../install.sh" "$SCRIPT_DIR/../pihole-ha-dash" "$SCRIPT_DIR/../pihole-ha")"
+# One chmod of the directory exists, and it is the repair below, which only
+# ever loosens the one state an older installer left behind.
+_dirmodes="$(grep -hoE 'chmod [0-7]+ /etc/pihole-ha( |$)' "$SCRIPT_DIR/../install.sh" "$SCRIPT_DIR/../pihole-ha-dash" "$SCRIPT_DIR/../pihole-ha" | sed 's/ *$//' | sort -u)"
+assert_eq "the only mode it is ever given is the shipped one" "chmod 755 /etc/pihole-ha" "$_dirmodes"
 assert_contains "the installer only creates it"   "$_ins" "mkdir -p /etc/pihole-ha"
 # The stored secret, and the temp file it is built in on the way there.
 assert_contains "auth.conf ends up owner-only"    "$_ins" "chmod 600 /etc/pihole-ha/auth.conf 2>/dev/null"
@@ -3622,6 +3624,14 @@ assert_eq "both of the dash's save paths do the same" "2" \
 # never echoed back out of an endpoint.
 assert_eq "no endpoint prints a stored password" "" \
     "$(grep -nE '(echo|printf).*\$\{?PASS_' "$SCRIPT_DIR/../pihole-ha-dash")"
+
+# A node already in that state will not fix itself by being updated unless the
+# update says so, and updating is exactly what it will be asked to do.
+_upd="${_ins#*--update}"
+_upd="${_upd%%--- 2. Check Pi-hole installed*}"
+assert_contains "an update repairs a directory locked to 0700" "$_upd" "chmod 755 /etc/pihole-ha"
+assert_contains "and only that exact state"                    "$_upd" '"700 root:root"'
+assert_contains "and says it did"                              "$_upd" "Repaired /etc/pihole-ha"
 
 # ============================================================
 echo

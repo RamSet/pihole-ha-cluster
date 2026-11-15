@@ -404,6 +404,17 @@ if [[ "${1:-}" == "--update" ]]; then
     # would keep tens of megabytes of tmpfs occupied forever after upgrading.
     mkdir -p /var/lib/pihole-ha && chmod 755 /var/lib/pihole-ha
     rm -f /run/pihole-ha/sync-payload.tar.gz /run/pihole-ha/sync-manifest.json 2>/dev/null || true
+    # Repair a config directory an older installer locked to 0700 when a peer
+    # password was saved ("install -d -m 0700" re-modes an existing directory).
+    # pihole-FTL runs as the pihole user and the panel's ha-api.lp reads
+    # nodes.conf and sync.conf from here itself, so those nodes answer "no sync
+    # primary is configured on this node" in Config Sync until this is undone --
+    # and updating is what they will reach for. Only the exact damaged state is
+    # touched, so a deliberately tightened 0750 root:pihole is left alone.
+    if [[ "$(stat -c '%a %U:%G' /etc/pihole-ha 2>/dev/null)" == "700 root:root" ]]; then
+        chmod 755 /etc/pihole-ha 2>/dev/null || true
+        printf "  %b Repaired /etc/pihole-ha (0700 -> 0755): the HA panel reads it as the pihole user\n" "${TICK}"
+    fi
     # re-inject the admin panel with the refreshed files
     [[ -x /usr/local/bin/pihole-ha-inject ]] && /usr/local/bin/pihole-ha-inject >/dev/null 2>&1 || true
     # restart the running services so the new code takes effect
