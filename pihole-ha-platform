@@ -296,15 +296,19 @@ ftl_to_json() {
 # and say when something was thrown away.
 sane_port() {
     local raw="$1" fallback="${2:-80}" digits
+    # Every caller captures this function's stdout as the port, and the logger
+    # writes to stdout -- so the warning has to go to stderr, or the one input
+    # this function exists to rescue ("8080  # the host port") comes back as a
+    # log line, a newline and then the port. (Found in alex-007's fork.)
     digits="${raw%%[!0-9]*}"
     if [[ -n "$digits" ]] && (( 10#$digits >= 1 && 10#$digits <= 65535 )); then
         [[ "$digits" != "$raw" ]] && command -v log_warn >/dev/null 2>&1 && \
-            log_warn "event=port_trimmed raw=\"$raw\" using=$digits reason=\"everything after the number was ignored — an inline comment in a .env file is the usual cause\""
+            log_warn "event=port_trimmed raw=\"$raw\" using=$digits reason=\"everything after the number was ignored — an inline comment in a .env file is the usual cause\"" >&2
         printf '%s' "$digits"
         return 0
     fi
     command -v log_warn >/dev/null 2>&1 && \
-        log_warn "event=port_invalid raw=\"$raw\" using=$fallback reason=\"not a usable TCP port\""
+        log_warn "event=port_invalid raw=\"$raw\" using=$fallback reason=\"not a usable TCP port\"" >&2
     printf '%s' "$fallback"
 }
 
@@ -569,14 +573,53 @@ platform_ftl_is_active() {
 # stand DHCP down, and a bare call that silently no-ops when pihole-FTL isn't
 # on PATH would leave a node serving DHCP when it was told to stop.
 # Returns non-zero if pihole-FTL is unavailable so callers can report it.
+# The value the RUNNING pihole-FTL was started with for dhcp.active, when it is
+# forced through its environment (FTLCONF_dhcp_active). Prints true/false and
+# returns 0 if forced; returns 1 otherwise.
+#
+# A forced key cannot be changed, and from a Docker sidecar that failure is
+# invisible: the sidecar's own pihole-FTL process does not have the variable,
+# so "--config dhcp.active false" writes the file, prints "false", exits 0 and
+# reads back "false" -- while the server in the Pi-hole container, which does
+# have it, goes on answering DHCP. Reproduced on FTL v6.8: the port-67 listener
+# was still there 12s after a "successful" stand-down. Every node configured
+# that way serves DHCP for good, which is a LAN with several DHCP servers and
+# pihole-ha reporting one. The running process's environment is the only place
+# the truth is. A package or LXC install can read it (root, same namespace). A
+# Docker sidecar cannot -- another container's process is off limits without
+# CAP_SYS_PTRACE -- so there the Pi-hole container's own entrypoint wrapper
+# (pihole-ha-inject-docker.sh) drops the variable before FTL ever starts, and
+# this simply finds nothing.
+platform_dhcp_env_forced() {
+    local pid v
+    for pid in $(pgrep -x pihole-FTL 2>/dev/null); do
+        v="$( { tr '\0' '\n' < "/proc/$pid/environ"; } 2>/dev/null \
+             | sed -n 's/^[Ff][Tt][Ll][Cc][Oo][Nn][Ff]_[Dd][Hh][Cc][Pp]_[Aa][Cc][Tt][Ii][Vv][Ee]=//p' | head -1)"
+        [[ -n "$v" ]] || continue
+        v="${v,,}"
+        [[ "$v" == "true" || "$v" == "false" ]] || continue
+        printf '%s' "$v"
+        return 0
+    done
+    return 1
+}
+
 platform_get_dhcp() {
     command -v pihole-FTL >/dev/null 2>&1 || { echo "false"; return 1; }
+    # A forced value is what the server is doing, whatever the file says.
+    platform_dhcp_env_forced && { echo; return 0; }
     pihole-FTL --config dhcp.active 2>/dev/null || { echo "false"; return 1; }
 }
 
 platform_set_dhcp() {
-    local want="$1"
+    local want="$1" forced
     command -v pihole-FTL >/dev/null 2>&1 || return 1
+    if forced="$(platform_dhcp_env_forced)"; then
+        [[ "$forced" == "$want" ]] && return 0
+        command -v log_error >/dev/null 2>&1 && \
+            log_error "event=dhcp_env_forced want=$want forced=$forced reason=\"Pi-hole was started with FTLCONF_dhcp_active=$forced, so its DHCP server cannot be switched and pihole-ha cannot manage it — remove FTLCONF_dhcp_active from the Pi-hole container's environment and recreate the container\"" >&2
+        return 1
+    fi
     pihole-FTL --config dhcp.active "$want" >/dev/null 2>&1
 }
 
@@ -606,13 +649,22 @@ platform_ftl_restart() {
         mapfile -t pids < <(pgrep -x pihole-FTL 2>/dev/null)
         (( ${#pids[@]} )) || return 1
         local pid delivered=false
+        local -a signalled=()
         for pid in "${pids[@]}"; do
-            kill -HUP "$pid" 2>/dev/null && delivered=true
+            if kill -HUP "$pid" 2>/dev/null; then
+                delivered=true
+                signalled+=("$pid")
+            fi
         done
         [[ "$delivered" == "true" ]] || return 1
         sleep 2
-        # Still alive? Then the reload landed rather than killing it.
-        kill -0 "${pids[0]}" 2>/dev/null && return 0
+        # Still alive? Then the reload landed rather than killing it. Checked
+        # against the processes that took the signal, not whichever pgrep listed
+        # first: a failure here is now remembered and retried by sync-pull, so a
+        # short-lived first entry must not read as a reload that never landed.
+        for pid in "${signalled[@]}"; do
+            kill -0 "$pid" 2>/dev/null && return 0
+        done
         return 1
     else
         systemctl restart pihole-FTL

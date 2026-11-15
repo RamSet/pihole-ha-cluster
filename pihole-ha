@@ -1851,6 +1851,12 @@ warn_if_dhcp_conflict() {
 # --- Main Loop ---
 log_info "event=startup ip=$LOCAL_IP priority=$PRIORITY interval=${CHECK_INTERVAL}s activate_after=$ACTIVATE_AFTER deactivate_after=$DEACTIVATE_AFTER"
 log_info "event=startup checks=\"ping dns:53 api dhcp\""
+# Say it once, at the top of the log, rather than only when a failover needs it:
+# a Pi-hole whose DHCP switch is fixed by its environment cannot be stood down
+# or brought up by anything this daemon does.
+if [[ "$DHCP_HA" == "true" ]] && _dhcp_forced="$(platform_dhcp_env_forced)"; then
+    log_error "event=dhcp_env_forced forced=$_dhcp_forced reason=\"this Pi-hole was started with FTLCONF_dhcp_active=$_dhcp_forced, so its DHCP server cannot be switched and DHCP failover cannot work on this node — remove FTLCONF_dhcp_active from the Pi-hole container's environment and recreate the container; pihole-ha turns DHCP on and off itself\""
+fi
 if [[ "$HA_ENABLED" != "true" ]]; then
     # Announcing "PRIMARY DHCP Monitor Started" here reads as though this node
     # just took charge of DHCP, which is the opposite of what HA-off means.

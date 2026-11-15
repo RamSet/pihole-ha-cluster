@@ -1359,14 +1359,21 @@ _port_probe() { bash -c '
     source "'"$SCRIPT_DIR"'/../pihole-ha-platform"
     log_warn() { echo "WARN $*"; }
     sane_port "$1" "${2:-80}"' _ "$1" "${2:-}"; }
-assert_contains "a plain port is used as-is"      "$(_port_probe 8080)" "8080"
-assert_not_contains "and says nothing about it"   "$(_port_probe 8080)" "WARN"
-assert_contains "a trailing comment is trimmed"   "$(_port_probe '80   # the host port')" "80"
-assert_contains "and the trimming is reported"    "$(_port_probe '80   # the host port')" "event=port_trimmed"
-assert_contains "something that is not a port falls back" "$(_port_probe 'notaport')" "80"
-assert_contains "and is reported"                 "$(_port_probe 'notaport')" "event=port_invalid"
-assert_contains "so does a number out of range"   "$(_port_probe 99999)" "event=port_invalid"
-assert_contains "an empty value falls back too"   "$(_port_probe '')" "80"
+# What the caller captures (stdout) and what is logged (stderr) are asserted
+# separately, and the value by equality. These used to be "contains" checks on
+# the two mixed together, which is how a port that came back as a log line, a
+# newline and then the number passed every one of them.
+_port_warn() { _port_probe "$@" 2>&1 >/dev/null; }
+_port_val()  { _port_probe "$@" 2>/dev/null; }
+assert_eq "a plain port is used as-is"            "8080" "$(_port_val 8080)"
+assert_eq "and says nothing about it"             ""     "$(_port_warn 8080)"
+assert_eq "a trailing comment is trimmed"         "80"   "$(_port_val '80   # the host port')"
+assert_contains "and the trimming is reported"    "$(_port_warn '80   # the host port')" "event=port_trimmed"
+assert_eq "something that is not a port falls back" "80" "$(_port_val 'notaport')"
+assert_contains "and is reported"                 "$(_port_warn 'notaport')" "event=port_invalid"
+assert_eq "so does a number out of range"         "80"   "$(_port_val 99999)"
+assert_contains "which is reported too"           "$(_port_warn 99999)" "event=port_invalid"
+assert_eq "an empty value falls back too"         "80"   "$(_port_val '')"
 # Every place a port is taken has to go through it, or the next one leaks.
 _ha_ports="$(cat "$SCRIPT_DIR/../pihole-ha")"
 assert_not_contains "the node list parse does not take a port raw" \
@@ -3650,6 +3657,107 @@ assert_contains "and lists where the data is"         "$_dash" '"/api/status"'
 assert_contains "an unknown path is still a 404"      "$_dash" '404 Not Found" "text/plain"; echo "Not Found"'
 assert_not_contains "the docs no longer promise a dashboard there" \
     "$(cat "$SCRIPT_DIR/../docker/README.md")" '**Dashboard:** `http://<node-ip>:8887/`'
+
+# ============================================================
+echo
+echo "=== Found in the forks: a port that swallows its own warning ==="
+# ------------------------------------------------------------
+# sane_port exists to rescue a port with junk after it ("8080  # the host port"
+# from a .env file). Every caller captures its stdout, and the logger wrote to
+# stdout too, so that exact input came back as a log line, a newline and then
+# the port. The value and the warning are asserted separately in the port
+# section above; this is the guard that the warning cannot drift back.
+assert_eq "both warnings in sane_port go to stderr" "2" \
+    "$(sed -n '/^sane_port()/,/^}/p' "$SCRIPT_DIR/../pihole-ha-platform" | grep -c 'log_warn "event=port_.*" >&2$')"
+assert_eq "and none goes to stdout" "0" \
+    "$(sed -n '/^sane_port()/,/^}/p' "$SCRIPT_DIR/../pihole-ha-platform" | grep -c 'log_warn "event=port_.*"$')"
+
+# ============================================================
+echo
+echo "=== Found in the forks: a reload FTL never got is still owed ==="
+# ------------------------------------------------------------
+# gravity.db is swapped in and then FTL is told to reopen it. When the telling
+# failed the hash was left unrecorded "to retry next cycle" -- but the next
+# cycle finds the new file already in place, calls it unchanged, never reloads
+# and records the hash, leaving FTL on the old list for good. The restart after
+# settings was not checked at all.
+_sp="$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")"
+_rl="$(sed -n '/^reload_ftl_for_sync()/,/^}/p' "$SCRIPT_DIR/../pihole-ha-sync-pull")"
+assert_contains "the debt is written down before the attempt" "$_rl" ': > "$FTL_RELOAD_PENDING"'
+assert_contains "a failed reload leaves it standing"          "$_rl" "platform_ftl_restart || return 1"
+assert_contains "and only a delivered one clears it"          "$_rl" 'rm -f "$FTL_RELOAD_PENDING"'
+assert_true "the write precedes the reload, the clear follows it" \
+    [ "$(printf '%s\n' "$_rl" | grep -n ': > ' | cut -d: -f1)" -lt "$(printf '%s\n' "$_rl" | grep -n 'platform_ftl_restart' | cut -d: -f1)" ]
+# It has to be collected before the "already up to date" exit, or a node whose
+# config has not changed since would never get to it.
+_ln_debt="$(grep -n '^if \[\[ -f "\$FTL_RELOAD_PENDING" \]\]' "$SCRIPT_DIR/../pihole-ha-sync-pull" | cut -d: -f1)"
+_ln_hash="$(grep -n '^LOCAL_HASH=' "$SCRIPT_DIR/../pihole-ha-sync-pull" | head -1 | cut -d: -f1)"
+assert_true "an owed reload is collected before the up-to-date exit" [ "${_ln_debt:-99999}" -lt "${_ln_hash:-0}" ]
+assert_contains "it does not survive a reboot, which starts a fresh FTL" "$_sp" 'FTL_RELOAD_PENDING="$SYNC_DIR/ftl-reload-pending"'
+# Class guard: no reload in this script may bypass the bookkeeping, except the
+# one recovery path that already ignores its result on purpose.
+assert_eq "every reload that matters goes through it (two applies and the retry)" "3" \
+    "$(grep -c 'if reload_ftl_for_sync; then' "$SCRIPT_DIR/../pihole-ha-sync-pull")"
+assert_eq "none is fired and forgotten" "" \
+    "$(grep -nE '^\s*platform_ftl_restart\s*$' "$SCRIPT_DIR/../pihole-ha-sync-pull")"
+# A reload that "failed" because pgrep's first entry was short-lived would now
+# be retried forever, so liveness is judged on what actually took the signal.
+_fr="$(sed -n '/^platform_ftl_restart()/,/^}/p' "$SCRIPT_DIR/../pihole-ha-platform")"
+assert_contains "liveness is checked on the signalled processes" "$_fr" 'for pid in "${signalled[@]}"; do'
+assert_not_contains "not on whichever was listed first"          "$_fr" 'kill -0 "${pids[0]}"'
+
+# ============================================================
+echo
+echo "=== DHCP settings in the Pi-hole container's environment ==="
+# ------------------------------------------------------------
+# The sidecar drives DHCP with its own pihole-FTL process, which has none of the
+# Pi-hole container's FTLCONF_dhcp_* variables. Measured on FTL v6.8 in real
+# containers: with FTLCONF_dhcp_active=true the sidecar's stand-down "succeeds"
+# while the port-67 listener stays up; with the range given only as
+# FTLCONF_dhcp_start/end/router, activation fails with "DHCP start address is
+# not valid". After the wrapper: 0 forced variables, the sidecar reads the
+# range, and the listener follows true and false. With failover off, the same
+# container shows the original behaviour, which is the control.
+_wrap="$SCRIPT_DIR/../docker/pihole-ha-inject-docker.sh"
+_wb="$(sed -n '/^_ha_conf="\${PIHOLE_HA_NODES_CONF/,/^fi$/p' "$_wrap")"
+_run_wrap() {   # $1 = nodes.conf contents; prints what the stub was asked and what is left in the environment
+    local _conf _calls; _conf="$(mktemp)"; _calls="$(mktemp)"; printf '%b' "$1" > "$_conf"
+    (
+        export PIHOLE_HA_NODES_CONF="$_conf"
+        export FTLCONF_dhcp_active=true FTLCONF_dhcp_start=10.0.0.100 FTLCONF_dhcp_hosts='a;b' FTLCONF_dns_port=53
+        # The wrapper discards the CLI's output, so the stub records to a file.
+        pihole-FTL() { [[ "$2" == "dhcp.hosts" ]] && return 1; echo "set:$2=$3" >> "$_calls"; }
+        eval "$_wb" 2>&1
+        cat "$_calls"
+        echo "left:$(compgen -e | grep -i '^FTLCONF_' | sort | tr '\n' ' ')"
+    )
+    rm -f "$_conf" "$_calls"
+}
+_on="$(_run_wrap 'HA_ENABLED=true\nDHCP_HA=true\n')"
+assert_contains "a scalar setting is moved into pihole.toml"      "$_on" "set:dhcp.start=10.0.0.100"
+assert_not_contains "the switch itself is never written"          "$_on" "set:dhcp.active"
+assert_contains "the switch is dropped and the operator is told"  "$_on" "ignoring FTLCONF_dhcp_active=true"
+assert_contains "what could not be moved is put back, not lost"   "$_on" "left:FTLCONF_dhcp_hosts FTLCONF_dns_port "
+assert_contains "and that is said too"                            "$_on" "could not move FTLCONF_dhcp_hosts"
+_off="$(_run_wrap 'HA_ENABLED=true\nDHCP_HA=false\n')"
+assert_eq "a DNS-only install is left exactly as configured" \
+    "left:FTLCONF_dhcp_active FTLCONF_dhcp_hosts FTLCONF_dhcp_start FTLCONF_dns_port " "$_off"
+_hoff="$(_run_wrap 'HA_ENABLED=false\nDHCP_HA=true\n')"
+assert_contains "so is a cluster with HA switched off" "$_hoff" "left:FTLCONF_dhcp_active"
+assert_contains "quoted values in nodes.conf are read" \
+    "$(_run_wrap 'HA_ENABLED="true"\nDHCP_HA="true"\n')" "ignoring FTLCONF_dhcp_active"
+assert_true "it runs before FTL is started" \
+    [ "$(grep -n '^_ha_conf=' "$_wrap" | cut -d: -f1)" -lt "$(grep -n '^exec "\$_real_entrypoint"' "$_wrap" | cut -d: -f1)" ]
+# Package and LXC installs can read the running server's environment directly.
+_ef="$(sed -n '/^platform_dhcp_env_forced()/,/^}/p' "$SCRIPT_DIR/../pihole-ha-platform")"
+assert_contains "the running server's environment is what is read" "$_ef" '/proc/$pid/environ'
+assert_contains "an unreadable one is silence, not noise"          "$_ef" '} 2>/dev/null'
+_sd="$(sed -n '/^platform_set_dhcp()/,/^}/p' "$SCRIPT_DIR/../pihole-ha-platform")"
+assert_contains "a forced switch is reported as a failure"   "$_sd" "event=dhcp_env_forced"
+assert_contains "and never as a success"                     "$_sd" "return 1"
+assert_contains "the reading follows the server, not the file" \
+    "$(sed -n '/^platform_get_dhcp()/,/^}/p' "$SCRIPT_DIR/../pihole-ha-platform")" "platform_dhcp_env_forced &&"
+assert_contains "the daemon says so at startup" "$(cat "$SCRIPT_DIR/../pihole-ha")" 'if [[ "$DHCP_HA" == "true" ]] && _dhcp_forced="$(platform_dhcp_env_forced)"; then'
 
 # ============================================================
 

@@ -63,6 +63,48 @@ inject_ha() {
     echo "pihole-ha-inject: sidebar patched — HA Cluster menu added"
 }
 
+# Under DHCP failover, DHCP settings must not live in this container's environment.
+#
+# FTLCONF_dhcp_* is the natural way to configure DHCP in a compose file, and
+# under pihole-ha it is a trap, because the sidecar drives DHCP with its own
+# pihole-FTL process, which has none of those variables. Measured on FTL v6.8:
+#
+#   FTLCONF_dhcp_active=true     the sidecar's "--config dhcp.active false"
+#       writes the file, prints false and exits 0, while the server in this
+#       container -- where the key is forced -- goes on answering: the port-67
+#       listener was still up 12s after a "successful" stand-down. Set on every
+#       node, that is every node serving DHCP with pihole-ha reporting one.
+#   FTLCONF_dhcp_start/end/router   the sidecar's "--config dhcp.active true"
+#       fails with "DHCP start address is not valid", because the range exists
+#       only in this container's environment. That node can never take over.
+#
+# The sidecar cannot read this environment (another container's process), so
+# this wrapper, which runs here before FTL, is the only place to act. The switch
+# itself is pihole-ha's to throw, so it is dropped. Everything else is moved
+# into pihole.toml, where both containers see the same value; the compose file
+# stays the source of truth because this runs on every start. DNS-only installs
+# do not manage DHCP and are left exactly as configured.
+_ha_conf="${PIHOLE_HA_NODES_CONF:-/etc/pihole-ha/nodes.conf}"
+_ha_conf_val() { sed -n "s/^$1=[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}[[:space:]]*\$/\1/p" "$_ha_conf" 2>/dev/null | tail -1; }
+if [[ -r "$_ha_conf" && "$(_ha_conf_val DHCP_HA)" == "true" && "$(_ha_conf_val HA_ENABLED)" != "false" ]]; then
+    while IFS= read -r _ha_var; do
+        [[ -n "$_ha_var" ]] || continue
+        _ha_val="${!_ha_var}"
+        _ha_key="${_ha_var#*_}"; _ha_key="dhcp.${_ha_key#*_}"
+        unset "$_ha_var"
+        if [[ "${_ha_key,,}" == "dhcp.active" ]]; then
+            echo "pihole-ha-inject: ignoring ${_ha_var}=${_ha_val} — with DHCP failover on, pihole-ha switches DHCP itself, and a forced value would leave this node serving (or silent) whatever the cluster decided; remove it from the compose file"
+        elif pihole-FTL --config "$_ha_key" "$_ha_val" >/dev/null 2>&1; then
+            echo "pihole-ha-inject: moved ${_ha_var} into pihole.toml as ${_ha_key} so the pihole-ha sidecar sees it too"
+        else
+            # Not a key this FTL accepts from the command line (a list, or a
+            # misspelling): put it back rather than lose the setting.
+            export "$_ha_var=$_ha_val"
+            echo "pihole-ha-inject: could not move ${_ha_var} into pihole.toml — leaving it in the environment, where the pihole-ha sidecar cannot see it"
+        fi
+    done < <(compgen -e | grep -i '^FTLCONF_dhcp_')
+fi
+
 # Run injection in background so Pi-hole starts immediately
 inject_ha &
 

@@ -71,6 +71,32 @@ SYNC_CONF="/etc/pihole-ha/sync.conf"
 
 mkdir -p "$SYNC_DIR" "$SYNC_BLOB_DIR"
 
+# A reload FTL still owes this node.
+#
+# gravity.db is swapped into place and THEN FTL is told to reopen it. When that
+# second step failed, the hash was left unrecorded "so the next cycle retries"
+# -- but the next cycle finds the new file already on disk, calls the blocklist
+# unchanged, never reloads, and records the hash: FTL goes on serving the old
+# list with nothing left that will ever tell it. The same held for the restart
+# after settings and host records, whose result was not checked at all. The debt
+# is therefore written down before the reload is attempted and cleared only when
+# one lands, and it is collected first thing on every run, before the "already
+# up to date" exit. It lives in /run on purpose: a reboot starts a fresh FTL and
+# owes nothing. (The gap was found in alex-007's fork.)
+FTL_RELOAD_PENDING="$SYNC_DIR/ftl-reload-pending"
+reload_ftl_for_sync() {
+    : > "$FTL_RELOAD_PENDING" 2>/dev/null || true
+    platform_ftl_restart || return 1
+    rm -f "$FTL_RELOAD_PENDING"
+}
+if [[ -f "$FTL_RELOAD_PENDING" ]]; then
+    if reload_ftl_for_sync; then
+        log_info "event=ftl_reload status=ok reason=\"delivered a reload an earlier pull could not\""
+    else
+        log_error "event=ftl_reload status=failed reason=\"FTL still has not reloaded what an earlier pull installed — it is serving the previous blocklist or settings; will retry next cycle\""
+    fi
+fi
+
 # Determine this node's index and role
 MY_IDX=-1
 for (( i=0; i<NODE_COUNT; i++ )); do
@@ -634,7 +660,7 @@ if [[ "$COMP_GRAVITY" == "true" && -f "$STAGING_DIR/gravity.db" ]]; then
                 # FTL holds gravity.db open, so a swapped file is invisible to
                 # it until it reopens. If telling it fails, the node is serving
                 # the old blocklist and must say so rather than report success.
-                if platform_ftl_restart; then
+                if reload_ftl_for_sync; then
                     GRAVITY_RESTARTED=true
                     log_info "event=apply component=gravity status=ok ftl=restarted"
                 else
@@ -684,8 +710,11 @@ apply_array_key true dns.upstreams dns-upstreams.json dns_upstreams
 # settings are applied AFTER that restart, so a fresh restart is still
 # needed to pick them up.
 if [[ "$SETTINGS_APPLIED" == "true" || "$HOSTS_APPLIED" == "true" ]]; then
-    platform_ftl_restart
-    log_info "event=ftl_restart reason=\"settings/hosts applied\""
+    if reload_ftl_for_sync; then
+        log_info "event=ftl_restart reason=\"settings/hosts applied\""
+    else
+        log_error "event=ftl_restart status=failed reason=\"settings/hosts were applied but FTL could not be told to reload — it is still running the previous values; will retry next cycle\""
+    fi
 fi
 
 # Cleanup
