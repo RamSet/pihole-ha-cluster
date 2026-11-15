@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.35 — 2026-11-15
+- Ask pihole-FTL for one process at a time, and require the second node
+
 ## v3.19.34 — 2026-11-14
 - Reach this node's API at its own address when loopback has nothing on it
 
