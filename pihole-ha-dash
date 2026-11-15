@@ -1456,6 +1456,16 @@ NEOF
             _cfg_nodes+="]"
             printf '{"nodes":%s,"gateway":"%s","pihole_port":%s,"dhcp_ha":"%s"}\n' "$_cfg_nodes" "$_GATEWAY" "$_PIHOLE_PORT" "$_DHCP_HA"
             ;;
+        /|/api)
+            # Curling this port is how people check whether the sidecar is up,
+            # and answering "Not Found" to that reads as a broken service: it
+            # has sent at least one person debugging a dash that was healthy.
+            # There is no UI here (that is the Pi-hole admin tab), so say what
+            # this is and where to look instead.
+            _ver_self="$(cat "$VERSION_FILE" 2>/dev/null | tr -d '[:space:]')"
+            send_headers "200 OK" "application/json"
+            printf '{"service":"pihole-ha-dash","version":"%s","ui":"Pi-hole admin > HA","api":["/api/status","/api/version","/api/config","/api/ha/config","/api/sync/config"]}\n' "${_ver_self:-unknown}"
+            ;;
         /favicon.ico)
             send_headers "204 No Content" "text/plain"
             ;;

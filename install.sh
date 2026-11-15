@@ -627,6 +627,44 @@ for i in "${!discovered_nodes[@]}"; do
 done
 _add_node "$local_ip" "$_local_web_port"
 
+# Ask for one node's IP, re-asking instead of ending the install.
+#
+# A cluster needs at least two nodes, so node 2 is required -- but it was
+# prompted as "[skip]" and taking that offer exited the installer, as did a
+# single typo in an address. Node 3 is genuinely optional and still says skip.
+# Sets _NODE_IP. Returns 1 when an optional node is skipped; a required node
+# with no answer and no terminal left to ask again is fatal, as before.
+_prompt_node_ip() {
+    local n="$1" required="$2" default="$3" label
+    _NODE_IP=""
+    while :; do
+        label="skip"
+        [[ "$required" == "true" ]] && label="required"
+        [[ -n "$default" ]] && label="$default"
+        if ! read -erp "  Node $n IP [$label]: " _NODE_IP; then
+            _NODE_IP="$default"
+            if [[ -z "$_NODE_IP" ]]; then
+                [[ "$required" != "true" ]] && return 1
+                printf "\n  %b %bNode %s IP is required — a cluster needs at least two nodes%b\n" \
+                    "${CROSS}" "${COL_RED}" "$n" "${COL_NC}"
+                exit 1
+            fi
+        fi
+        _NODE_IP="${_NODE_IP:-$default}"
+        if [[ -z "$_NODE_IP" ]]; then
+            [[ "$required" != "true" ]] && return 1
+            printf "  %b %bNode %s IP is required — a cluster needs at least two nodes%b\n" \
+                "${CROSS}" "${COL_YELLOW}" "$n" "${COL_NC}"
+            continue
+        fi
+        if ! is_valid_ip "$_NODE_IP"; then
+            printf "  %b %bNot an IP address: %s%b\n" "${CROSS}" "${COL_YELLOW}" "$_NODE_IP" "${COL_NC}"
+            continue
+        fi
+        return 0
+    done
+}
+
 if [[ ${#all_nodes[@]} -gt 1 ]]; then
     # Show auto-filled list and confirm
     printf "\\n"
@@ -656,20 +694,10 @@ if [[ ${#all_nodes[@]} -gt 1 ]]; then
             [[ $n -eq 1 ]] && local_default="$local_ip"
             required="true"
             [[ $n -eq 3 ]] && required="false"
-            if [[ -n "$local_default" ]]; then
-                read -erp "  Node $n IP [$local_default]: " _ip
-                _ip="${_ip:-$local_default}"
-            else
-                read -erp "  Node $n IP [skip]: " _ip
-            fi
-            [[ -z "$_ip" ]] && { [[ "$required" == "true" ]] && { printf "  %b %bNode %s IP is required%b\\n" "${CROSS}" "${COL_RED}" "$n" "${COL_NC}"; exit 1; }; continue; }
-            if ! is_valid_ip "$_ip"; then
-                printf "  %b %bInvalid IP: %s%b\\n" "${CROSS}" "${COL_RED}" "$_ip" "${COL_NC}"
-                exit 1
-            fi
+            _prompt_node_ip "$n" "$required" "$local_default" || continue
             read -erp "  Node $n Pi-hole web port [80]: " _port
             _port="${_port:-80}"
-            _add_node "$_ip" "$_port"
+            _add_node "$_NODE_IP" "$_port"
         done
     fi
 else
@@ -680,15 +708,10 @@ else
     for n in 2 3; do
         required="true"
         [[ $n -eq 3 ]] && required="false"
-        read -erp "  Node $n IP [skip]: " _ip
-        [[ -z "$_ip" ]] && { [[ "$required" == "true" ]] && { printf "  %b %bNode 2 IP is required%b\\n" "${CROSS}" "${COL_RED}" "${COL_NC}"; exit 1; }; continue; }
-        if ! is_valid_ip "$_ip"; then
-            printf "  %b %bInvalid IP: %s%b\\n" "${CROSS}" "${COL_RED}" "$_ip" "${COL_NC}"
-            exit 1
-        fi
+        _prompt_node_ip "$n" "$required" "" || continue
         read -erp "  Node $n Pi-hole web port [80]: " _port
         _port="${_port:-80}"
-        _add_node "$_ip" "$_port"
+        _add_node "$_NODE_IP" "$_port"
     done
 fi
 

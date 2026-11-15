@@ -337,7 +337,7 @@ Same value on both — the node whose IP comes first in the list is primary.
 
 ## Management
 
-- **Dashboard:** `http://<node-ip>:8887/`
+- **Service check:** `curl http://<node-ip>:8887/` — identifies the sidecar and lists its endpoints (the UI is the **HA** tab in Pi-hole's admin, not this port)
 - **Status API:** `curl http://<node-ip>:8887/api/status`
 - **Logs:** `docker compose logs -f pihole-ha`
 

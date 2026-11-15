@@ -23,6 +23,66 @@ $(function () {
 
     var API = "ha-api";
 
+    // ---- One API call at a time ----
+    //
+    // Every call below is served by ha-api.lp, which reaches the :8887 API by
+    // spawning curl -- and pihole-FTL cannot spawn reliably from two of its web
+    // threads at once. Measured on a live node with an otherwise empty Lua page
+    // whose only work is io.popen("echo ok"): 500 requests one after another,
+    // zero failures; the same page two at a time starts returning "Bad file
+    // descriptor", and six at a time (which is what this page used to do on
+    // every tick) fails about one request in fifty. Retrying inside the page
+    // does not close it -- four attempts still leave a residue failing
+    // outright -- so the fix is to stop asking FTL to spawn concurrently.
+    //
+    // Reads are coalesced: a poll already waiting in the queue will come back
+    // just as fresh, so an identical one is handed the same promise instead of
+    // being queued behind it. Everything not in this list is a write and always
+    // goes, including two clicks on the same control.
+    var READ_ACTIONS = ["status", "version", "sync-config", "sync-manifest",
+                        "master-config", "priority-config", "vip-config",
+                        "notify-config", "notify-dhcp-hosts", "ha-config"];
+    var apiQueue = [];
+    var apiBusy = false;
+
+    function isReadAction(url) {
+        var m = /[?&]action=([a-z-]+)/.exec(url || "");
+        return !!m && READ_ACTIONS.indexOf(m[1]) !== -1;
+    }
+
+    function haAjax(opts) {
+        if (isReadAction(opts.url)) {
+            for (var i = 0; i < apiQueue.length; i++) {
+                if (apiQueue[i].opts.url === opts.url) return apiQueue[i].d.promise();
+            }
+        }
+        // A request that never finished would wedge the queue for good. ha-api
+        // gives up on its own curl after 4s, so this is only a backstop.
+        if (!opts.timeout) opts.timeout = 15000;
+        var job = { opts: opts, d: $.Deferred() };
+        apiQueue.push(job);
+        apiPump();
+        return job.d.promise();
+    }
+
+    function apiPump() {
+        if (apiBusy || !apiQueue.length) return;
+        apiBusy = true;
+        var job = apiQueue.shift();
+        $.ajax(job.opts)
+            .done(function () { job.d.resolveWith(this, arguments); })
+            .fail(function () { job.d.rejectWith(this, arguments); })
+            .always(function () { apiBusy = false; apiPump(); });
+    }
+
+    // A hidden tab has nothing to show, and its polls are indistinguishable
+    // from a second admin's at the far end: they are what turns one open page
+    // into concurrent spawns. Polling resumes with a full refresh when the tab
+    // comes back. document.hidden is treated as visible where it is missing.
+    function whenVisible(fn) {
+        return function () { if (document.hidden !== true) fn(); };
+    }
+
     // Escape untrusted values before inserting into HTML (text or double-quoted attribute).
     function escapeHtml(s) {
         return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -59,13 +119,22 @@ $(function () {
     pollHa();
     pollVersion();  // once on load; the backend caches the upstream check daily
 
-    // Periodic polling
-    setInterval(pollStatus, 5000);
-    setInterval(pollSync, 15000);
-    setInterval(pollNotify, 15000);
-    setInterval(pollMaster, 5000);
-    setInterval(pollVip, 10000);
-    setInterval(pollHa, 5000);
+    // Periodic polling, paused while the tab is hidden
+    setInterval(whenVisible(pollStatus), 5000);
+    setInterval(whenVisible(pollSync), 15000);
+    setInterval(whenVisible(pollNotify), 15000);
+    setInterval(whenVisible(pollMaster), 5000);
+    setInterval(whenVisible(pollVip), 10000);
+    setInterval(whenVisible(pollHa), 5000);
+    $(document).on("visibilitychange", function () {
+        if (document.hidden === true) return;
+        pollStatus();
+        pollSync();
+        pollNotify();
+        pollMaster();
+        pollVip();
+        pollHa();
+    });
 
     // ---- Event bindings (CSP-safe, no inline onclick) ----
     // Clock format. Redraw from the state already in hand so the change is
@@ -115,7 +184,7 @@ $(function () {
     // ---- Status polling ----
 
     function pollStatus() {
-        $.ajax({
+        haAjax({
             url: API + "?action=status",
             timeout: 4000,
             dataType: "json"
@@ -149,7 +218,7 @@ $(function () {
     // so we never miss an update due to $.when() race conditions
 
     function pollSync() {
-        $.ajax({
+        haAjax({
             url: API + "?action=sync-config",
             timeout: 4000,
             dataType: "json"
@@ -164,7 +233,7 @@ $(function () {
         })
         .always(renderSync);
 
-        $.ajax({
+        haAjax({
             url: API + "?action=sync-manifest",
             timeout: 4000,
             dataType: "json"
@@ -666,7 +735,7 @@ $(function () {
     // ---- Toggle handler ----
 
     window.haToggle = function (key) {
-        $.ajax({
+        haAjax({
             url: API + "?action=toggle&key=" + encodeURIComponent(key),
             timeout: 4000,
             dataType: "json"
@@ -699,7 +768,7 @@ $(function () {
         $btn.prop("disabled", true);
         $res.text("Syncing...").show();
 
-        $.ajax({
+        haAjax({
             url: API + "?action=sync-now",
             timeout: 10000,
             dataType: "json"
@@ -726,7 +795,7 @@ $(function () {
     window.haSyncInterval = function (minutes) {
         var $res = $("#interval-result");
         $res.text("Saving...").show();
-        $.ajax({
+        haAjax({
             url: API + "?action=set-interval&minutes=" + encodeURIComponent(minutes),
             timeout: 6000,
             dataType: "json"
@@ -758,7 +827,7 @@ $(function () {
         $(".ha-promote-group .btn").prop("disabled", true);
         $res.html('<i class="fa fa-spinner fa-spin"></i> Promoting...').show();
 
-        $.ajax({
+        haAjax({
             url: API + "?action=promote&ip=" + encodeURIComponent(ip),
             timeout: 10000,
             dataType: "json"
@@ -786,7 +855,7 @@ $(function () {
     // ---- Master polling ----
 
     function pollMaster() {
-        $.ajax({
+        haAjax({
             url: API + "?action=master-config",
             timeout: 4000,
             dataType: "json"
@@ -841,7 +910,7 @@ $(function () {
         $(".ha-promote-group .btn", "#master-panel").prop("disabled", true);
         $res.html('<i class="fa fa-spinner fa-spin"></i> Setting...').show();
 
-        $.ajax({
+        haAjax({
             url: API + "?action=set-master&ip=" + encodeURIComponent(ip),
             timeout: 10000,
             dataType: "json"
@@ -872,10 +941,10 @@ $(function () {
     var PRIO_ROLES = ["PRIMARY", "SECONDARY", "TERTIARY"];
 
     pollPriority();
-    setInterval(pollPriority, 5000);
+    setInterval(whenVisible(pollPriority), 5000);
 
     function pollPriority() {
-        $.ajax({
+        haAjax({
             url: API + "?action=priority-config",
             timeout: 4000,
             dataType: "json"
@@ -955,7 +1024,7 @@ $(function () {
         $(".prio-up, .prio-down, .prio-remove").prop("disabled", true);
         $res.html('<i class="fa fa-spinner fa-spin"></i> Removing ' + ip + '...').show();
 
-        $.ajax({
+        haAjax({
             url: API + "?action=leave&ip=" + encodeURIComponent(ip),
             timeout: 20000,
             dataType: "json"
@@ -996,7 +1065,7 @@ $(function () {
         $("#join-btn").prop("disabled", true);
         $res.html('<i class="fa fa-spinner fa-spin"></i> Adding ' + ip + '...').show();
 
-        $.ajax({
+        haAjax({
             url: API + "?action=join&ip=" + encodeURIComponent(ip),
             timeout: 20000,
             dataType: "json"
@@ -1054,7 +1123,7 @@ $(function () {
         $(".prio-up, .prio-down").prop("disabled", true);
         $res.html('<i class="fa fa-spinner fa-spin"></i> Updating...').show();
 
-        $.ajax({
+        haAjax({
             url: API + "?action=set-priority&nodes=" + encodeURIComponent(newOrder),
             timeout: 10000,
             dataType: "json"
@@ -1080,7 +1149,7 @@ $(function () {
     // ---- VIP polling ----
 
     function pollVip() {
-        $.ajax({
+        haAjax({
             url: API + "?action=vip-config",
             timeout: 4000,
             dataType: "json"
@@ -1128,7 +1197,7 @@ $(function () {
             renderVip();
             return;
         }
-        $.ajax({
+        haAjax({
             url: API + "?action=vip-toggle",
             timeout: 5000,
             dataType: "json"
@@ -1151,7 +1220,7 @@ $(function () {
     // ---- Notify polling ----
 
     function pollNotify() {
-        $.ajax({
+        haAjax({
             url: API + "?action=notify-config",
             timeout: 4000,
             dataType: "json"
@@ -1179,7 +1248,7 @@ $(function () {
     }
 
     function loadDhcpHostPicker() {
-        $.ajax({
+        haAjax({
             url: API + "?action=notify-dhcp-hosts",
             timeout: 5000,
             dataType: "json"
@@ -1278,7 +1347,7 @@ $(function () {
     // ---- Notify toggle handler ----
 
     window.haNotifyToggle = function () {
-        $.ajax({
+        haAjax({
             url: API + "?action=notify-toggle",
             timeout: 4000,
             dataType: "json"
@@ -1318,7 +1387,7 @@ $(function () {
             setTimeout(function () { $res.fadeOut(function () { $res.text("").show(); }); }, 3000);
             return;
         }
-        $.ajax({
+        haAjax({
             url: API + "?action=notify-save" +
                 "&enabled=" + enabled +
                 "&user=" + encodeURIComponent(user) +
@@ -1355,7 +1424,7 @@ $(function () {
         var $res = $("#notify-result");
         $btn.prop("disabled", true);
         $res.html('<i class="fa fa-spinner fa-spin"></i> Sending...');
-        $.ajax({
+        haAjax({
             url: API + "?action=notify-test",
             timeout: 10000,
             dataType: "json"
@@ -1379,7 +1448,7 @@ $(function () {
     // ---- HA polling ----
 
     function pollHa() {
-        $.ajax({
+        haAjax({
             url: API + "?action=ha-config",
             timeout: 4000,
             dataType: "json"
@@ -1397,7 +1466,7 @@ $(function () {
 
     // ---- Version / update indicator ----
     function pollVersion() {
-        $.ajax({
+        haAjax({
             url: API + "?action=version",
             timeout: 6000,
             dataType: "json"
@@ -1448,7 +1517,7 @@ $(function () {
     // ---- HA toggle handler ----
 
     window.haHaToggle = function () {
-        $.ajax({
+        haAjax({
             url: API + "?action=ha-toggle",
             timeout: 5000,
             dataType: "json"
@@ -1484,7 +1553,7 @@ $(function () {
             '<i class="fa fa-spinner fa-spin"></i> Authenticating\u2026</span>'
         );
         delete saveError[ip];
-        $.ajax({
+        haAjax({
             url: API + "?action=set-auth&ip=" + encodeURIComponent(ip) + "&password=" + encodeURIComponent(pw),
             // Must exceed the Lua page's 10s, which must exceed _validate_sid's 5s.
             timeout: 15000,

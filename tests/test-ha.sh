@@ -3518,6 +3518,103 @@ assert_contains "a defaulted yes with no address carries on" \
 assert_contains "an explicit yes with no address still stops" "$_vip_addr" 'exit 1'
 
 # ============================================================
+echo
+echo "=== The panel asks pihole-FTL for one process at a time ==="
+# ------------------------------------------------------------
+# ha-api.lp reaches the :8887 API by spawning curl, and pihole-FTL cannot spawn
+# reliably from two of its web threads at once. Measured on a live node with a
+# Lua page whose only work was io.popen("echo ok"): 500 requests one after
+# another -> 0 failures; two at a time -> failures start; six at a time (what
+# this page used to do on every tick) -> about one request in fifty comes back
+# "Bad file descriptor", and four attempts in a row still leave a residue. Two
+# reporters saw that text across their panels. The page cannot fix FTL, so it
+# stops creating the condition: one request in flight at a time, and none at
+# all from a hidden tab. Verified in a browser against a live node: 35 requests
+# over 30s with a peak concurrency of 1, zero errors on the page; hidden for
+# 16s -> 0 requests; shown again -> a full refresh.
+_js="$(cat "$SCRIPT_DIR/../ha.js")"
+assert_eq "no call site talks to the API directly" "0" \
+    "$(grep -c '\$\.ajax({' "$SCRIPT_DIR/../ha.js")"
+assert_eq "every one of them goes through the queue" "24" \
+    "$(grep -c 'haAjax({' "$SCRIPT_DIR/../ha.js")"
+assert_eq "and the queue is the only thing that calls jQuery" "1" \
+    "$(grep -c '\$\.ajax(' "$SCRIPT_DIR/../ha.js")"
+_pump="$(sed -n '/function apiPump()/,/^    }/p' "$SCRIPT_DIR/../ha.js")"
+assert_contains "a second request waits for the first"   "$_pump" "if (apiBusy || !apiQueue.length) return;"
+assert_contains "the queue moves on when one finishes"   "$_pump" "apiBusy = false; apiPump();"
+assert_contains "a failed request releases it too"       "$_pump" ".always("
+assert_contains "the caller still gets its own answer"   "$_pump" "job.d.resolveWith(this, arguments)"
+assert_contains "and its own failure"                    "$_pump" "job.d.rejectWith(this, arguments)"
+_haj="$(sed -n '/function haAjax(opts)/,/^    }/p' "$SCRIPT_DIR/../ha.js")"
+assert_contains "a poll already queued is not queued twice" "$_haj" "return apiQueue[i].d.promise();"
+assert_contains "and the caller that was folded in is answered" "$_haj" "isReadAction(opts.url)"
+# A request with no timeout would hold the queue shut for good.
+assert_contains "every queued request has a deadline"    "$_haj" "opts.timeout = 15000"
+# Only reads may be folded together; two clicks on a control are two clicks.
+assert_contains "the read list is closed and explicit"   "$_js" 'var READ_ACTIONS = ["status", "version", "sync-config", "sync-manifest",'
+for _w in ha-toggle vip-toggle set-master set-priority sync-now toggle promote join leave notify-save notify-test set-auth set-interval; do
+    assert_not_contains "$_w is never coalesced" "$(sed -n '/var READ_ACTIONS/,/];/p' "$SCRIPT_DIR/../ha.js")" "\"$_w\""
+done
+# Polling from a hidden tab is indistinguishable from a second admin's.
+assert_eq "every poll is gated on the tab being visible" "7" \
+    "$(grep -c 'setInterval(whenVisible(' "$SCRIPT_DIR/../ha.js")"
+assert_eq "none kept polling unconditionally" "" \
+    "$(grep -nE 'setInterval\(poll[A-Za-z]+,' "$SCRIPT_DIR/../ha.js")"
+assert_contains "a tab coming back refreshes at once"    "$_js" '$(document).on("visibilitychange", function () {'
+assert_contains "a browser without the flag keeps polling" "$_js" "document.hidden !== true"
+
+# ============================================================
+echo
+echo "=== A cluster needs two nodes, so the installer asks for two ==="
+# ------------------------------------------------------------
+# Node 2 was prompted as "[skip]" and taking that offer ran exit 1 -- the one
+# thing the label promised was safe. A typo in an address did the same. Node 3
+# is genuinely optional. Reported on the forum as a nit; it is the second
+# question of a first install, so it is worth getting right.
+_ins="$(cat "$SCRIPT_DIR/../install.sh")"
+assert_contains "a required node says so in the prompt"  "$_ins" 'label="required"'
+assert_contains "an optional one still offers skip"      "$_ins" 'label="skip"'
+assert_contains "and a known address is still the default" "$_ins" 'label="$default"'
+assert_eq "no node prompt offers to skip a required one" "" \
+    "$(grep -n 'IP \[skip\]' "$SCRIPT_DIR/../install.sh")"
+assert_eq "both entry paths ask the same way" "2" \
+    "$(grep -c '_prompt_node_ip "$n"' "$SCRIPT_DIR/../install.sh")"
+
+# The behaviour, against the real function: a typo must not end the install.
+CROSS="x" COL_RED="" COL_YELLOW="" COL_NC=""
+eval "$(extract_fn "$SCRIPT_DIR/../install.sh" _prompt_node_ip)"
+_NODE_IP=""
+# The function runs in the pipeline's own subshell, so what it set is printed
+# from in there; its exit status is read from outside it.
+_out="$(printf '\nnot-an-ip\n10.0.0.2\n' | { _prompt_node_ip 2 true "" >/dev/null; printf '%s' "$_NODE_IP"; })"
+assert_eq "an empty answer and a typo both re-ask" "10.0.0.2" "$_out"
+_out="$(printf '\n' | { _prompt_node_ip 3 false "" >/dev/null; printf 'rc=%s' "$?"; })"
+assert_eq "a third node can still be skipped" "rc=1" "$_out"
+_out="$(printf '\n' | { _prompt_node_ip 1 true "10.0.0.1" >/dev/null; printf '%s' "$_NODE_IP"; })"
+assert_eq "a defaulted node takes the default on Enter" "10.0.0.1" "$_out"
+# No terminal left to re-ask with: fatal for a required node, as it always was.
+_out="$( { printf '' | _prompt_node_ip 2 true "" >/dev/null 2>&1; printf 'rc=%s' "$?"; } )"
+assert_eq "a piped install with no answer still stops" "rc=1" "$_out"
+
+# ============================================================
+echo
+echo "=== Curling the dash port says what the dash is ==="
+# ------------------------------------------------------------
+# The port serves JSON only -- the UI is Pi-hole's admin tab -- but a bare
+# curl at it answered "Not Found", which reads as a broken service. Reported
+# by someone checking whether the sidecar was alive, and the Docker notes
+# called that URL a dashboard.
+_dash="$(cat "$SCRIPT_DIR/../pihole-ha-dash")"
+assert_contains "the root answers instead of 404ing"  "$_dash" '        /|/api)'
+assert_contains "it names the service"                "$_dash" '"service":"pihole-ha-dash"'
+assert_contains "and its version"                     "$_dash" '"version":"%s"'
+assert_contains "it points at the real UI"            "$_dash" '"ui":"Pi-hole admin > HA"'
+assert_contains "and lists where the data is"         "$_dash" '"/api/status"'
+assert_contains "an unknown path is still a 404"      "$_dash" '404 Not Found" "text/plain"; echo "Not Found"'
+assert_not_contains "the docs no longer promise a dashboard there" \
+    "$(cat "$SCRIPT_DIR/../docker/README.md")" '**Dashboard:** `http://<node-ip>:8887/`'
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh pihole-ha-cluster-key pihole-ha-cli; do
