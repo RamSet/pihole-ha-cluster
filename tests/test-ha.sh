@@ -3760,6 +3760,34 @@ assert_contains "the reading follows the server, not the file" \
 assert_contains "the daemon says so at startup" "$(cat "$SCRIPT_DIR/../pihole-ha")" 'if [[ "$DHCP_HA" == "true" ]] && _dhcp_forced="$(platform_dhcp_env_forced)"; then'
 
 # ============================================================
+echo
+echo "=== A DNS-only cluster is not offered a DHCP master ==="
+# ------------------------------------------------------------
+# With DHCP_HA=false the router hands out leases and pihole-ha never switches
+# DHCP anywhere, so the DHCP Master box was a row of buttons that controlled
+# nothing -- asked for by someone running exactly that. Verified on a live node:
+# the page renders the row display:none from a DNS-only nodes.conf and without
+# it from a managed one; and in a browser, with only the status file's dhcp_ha
+# changed underneath an open page: hidden with no master polls, shown with its
+# three buttons when it turns true, hidden again when it turns false.
+_lpg="$(cat "$SCRIPT_DIR/../ha.lp")"
+_js="$(cat "$SCRIPT_DIR/../ha.js")"
+assert_contains "the page reads the mode from nodes.conf"      "$_lpg" 'elseif k == "DHCP_HA" then ha_dhcp_managed ='
+assert_contains "unset means managed, as the daemon defaults"  "$_lpg" "local ha_dhcp_managed = true"
+assert_contains "only an explicit false leaves the box out"    "$_lpg" '~= "false")'
+assert_contains "the row is rendered already hidden, no flash" "$_lpg" '<div class="row" id="master-row"<? if not ha_dhcp_managed then ?> style="display:none"<? end ?>>'
+_adm="$(sed -n '/function applyDhcpMode()/,/^    }/p' "$SCRIPT_DIR/../ha.js")"
+assert_contains "the status file keeps it honest afterwards"   "$_adm" '$("#master-row").toggle(dhcpManaged);'
+assert_contains "an absent or odd value changes nothing"       "$_adm" 'typeof statusData.dhcp_ha !== "boolean"'
+assert_contains "a cluster that starts managing DHCP gets its box filled at once" "$_adm" "if (dhcpManaged) pollMaster();"
+assert_contains "every status reply is consulted"              "$_js" "statusData = data;
+                applyDhcpMode();"
+assert_contains "a hidden box is not polled for"               "$(sed -n '/    function pollMaster()/,/^    }/p' "$SCRIPT_DIR/../ha.js")" "if (!dhcpManaged) return;"
+# The flag is read by the first polls, so it has to exist before them.
+assert_true "the mode is known before the first poll" \
+    [ "$(grep -n 'var dhcpManaged = ' "$SCRIPT_DIR/../ha.js" | cut -d: -f1)" -lt "$(grep -n '^    pollMaster();' "$SCRIPT_DIR/../ha.js" | head -1 | cut -d: -f1)" ]
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh pihole-ha-cluster-key pihole-ha-cli; do

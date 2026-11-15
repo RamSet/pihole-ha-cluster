@@ -26,6 +26,10 @@ end
 -- Read nodes.conf for dynamic node list
 local ha_nodes, ha_gateway, ha_vip = {}, "", ""
 local ha_vip_enabled = true
+-- DHCP_HA=false is a DNS-only cluster: something else (the router) hands out
+-- leases, so there is no DHCP master to choose and the box that chooses one is
+-- left out. Unset means managed, the same default the daemon applies.
+local ha_dhcp_managed = true
 local ncf = io.open("/etc/pihole-ha/nodes.conf", "r")
 if ncf then
     for line in ncf:lines() do
@@ -33,6 +37,7 @@ if ncf then
         if k == "GATEWAY" then ha_gateway = v
         elseif k == "VIP" then ha_vip = v
         elseif k == "VIP_ENABLED" then ha_vip_enabled = (v == "true")
+        elseif k == "DHCP_HA" then ha_dhcp_managed = (v:gsub("[\"'%s]", "") ~= "false")
         elseif k == "HA_NODES" then
             for entry in v:gmatch("[^,]+") do
                 local ip = entry:match("^([^:]+)")
@@ -325,8 +330,8 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
     </div>
 </div>
 
-<!-- Row 1b: DHCP Master Override -->
-<div class="row">
+<!-- Row 1b: DHCP Master Override (not shown on a DNS-only cluster) -->
+<div class="row" id="master-row"<? if not ha_dhcp_managed then ?> style="display:none"<? end ?>>
     <div class="col-md-12">
         <div class="box box-success" id="master-panel">
             <div class="box-header with-border">

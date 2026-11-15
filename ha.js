@@ -110,6 +110,10 @@ $(function () {
     var AUTH_SPIN_MS = 30000;
     var saveError = {};  // ip -> why the last password save was refused
 
+    // Whether this cluster manages DHCP, as the page was rendered (see
+    // applyDhcpMode). Set before the first polls, which consult it.
+    var dhcpManaged = $("#master-row").css("display") !== "none";
+
     // Initial polls
     pollStatus();
     pollSync();
@@ -181,6 +185,22 @@ $(function () {
         $(document).on("click", "#promote-" + ipId, function () { window.haPromote(n.ip); });
     });
 
+    // ---- DNS-only clusters have no DHCP master ----
+    //
+    // With DHCP_HA=false the router (or something else) hands out leases and
+    // pihole-ha never switches DHCP anywhere, so the DHCP Master box is a row
+    // of buttons that control nothing -- asked for by someone running exactly
+    // that. The page is rendered with the box already left out, from nodes.conf;
+    // the status file then keeps it honest if the mode changes while the page
+    // is open. Its poll is skipped too, which is one fewer request every 5s.
+    function applyDhcpMode() {
+        if (!statusData || typeof statusData.dhcp_ha !== "boolean") return;
+        if (statusData.dhcp_ha === dhcpManaged) return;
+        dhcpManaged = statusData.dhcp_ha;
+        $("#master-row").toggle(dhcpManaged);
+        if (dhcpManaged) pollMaster();
+    }
+
     // ---- Status polling ----
 
     function pollStatus() {
@@ -192,6 +212,7 @@ $(function () {
         .done(function (data) {
             if (data && !data.error) {
                 statusData = data;
+                applyDhcpMode();
                 $("#ha-error").hide();
             } else {
                 // The dashboard answered, so the connection is fine -- saying
@@ -855,6 +876,7 @@ $(function () {
     // ---- Master polling ----
 
     function pollMaster() {
+        if (!dhcpManaged) return;
         haAjax({
             url: API + "?action=master-config",
             timeout: 4000,
