@@ -3598,6 +3598,33 @@ assert_eq "a piped install with no answer still stops" "rc=1" "$_out"
 
 # ============================================================
 echo
+echo "=== Saving a peer password must not lock the panel out ==="
+# ------------------------------------------------------------
+# "install -d -m 0700" sets the mode on an EXISTING directory too, so the first
+# peer password saved during an install turned /etc/pihole-ha into 0700
+# root:root. pihole-FTL runs as the pihole user and ha-api.lp reads nodes.conf
+# and sync.conf from that directory itself, so Config Sync on that node started
+# answering "no sync primary is configured on this node" and never recovered.
+# Verified on a live node: 0700 -> that error, 0755 -> the manifest. The secret
+# is protected by auth.conf's own 0600, not by the directory it sits in.
+_ins="$(cat "$SCRIPT_DIR/../install.sh")"
+assert_eq "nothing re-modes the config directory" "" \
+    "$(grep -nE 'install .*-d .*/etc/pihole-ha' "$SCRIPT_DIR/../install.sh" "$SCRIPT_DIR/../pihole-ha-dash" "$SCRIPT_DIR/../pihole-ha")"
+assert_eq "and nothing chmods it either" "" \
+    "$(grep -nE 'chmod [0-7]+ /etc/pihole-ha( |$)' "$SCRIPT_DIR/../install.sh" "$SCRIPT_DIR/../pihole-ha-dash" "$SCRIPT_DIR/../pihole-ha")"
+assert_contains "the installer only creates it"   "$_ins" "mkdir -p /etc/pihole-ha"
+# The stored secret, and the temp file it is built in on the way there.
+assert_contains "auth.conf ends up owner-only"    "$_ins" "chmod 600 /etc/pihole-ha/auth.conf 2>/dev/null"
+assert_contains "the temp file is locked first"   "$_ins" "chmod 600 /etc/pihole-ha/auth.conf.tmp"
+assert_eq "both of the dash's save paths do the same" "2" \
+    "$(grep -c 'chmod 600 "$_AUTH_CONF.tmp"' "$SCRIPT_DIR/../pihole-ha-dash")"
+# A password is read on this node and sent to that node's own Pi-hole. It is
+# never echoed back out of an endpoint.
+assert_eq "no endpoint prints a stored password" "" \
+    "$(grep -nE '(echo|printf).*\$\{?PASS_' "$SCRIPT_DIR/../pihole-ha-dash")"
+
+# ============================================================
+echo
 echo "=== Curling the dash port says what the dash is ==="
 # ------------------------------------------------------------
 # The port serves JSON only -- the UI is Pi-hole's admin tab -- but a bare

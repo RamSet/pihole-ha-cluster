@@ -652,7 +652,8 @@ if [[ "${1:-}" == "--handle" ]]; then
                 # Empty password = remove entry
                 _key="PASS_${_auth_ip//\./_}"
                 mkdir -p /etc/pihole-ha
-                touch "$_AUTH_CONF"
+                touch "$_AUTH_CONF" "$_AUTH_CONF.tmp"
+                chmod 600 "$_AUTH_CONF.tmp" 2>/dev/null || true
                 grep -v "^$_key=" "$_AUTH_CONF" > "$_AUTH_CONF.tmp" 2>/dev/null || true
                 mv "$_AUTH_CONF.tmp" "$_AUTH_CONF"
                 chmod 600 "$_AUTH_CONF" 2>/dev/null || true
@@ -660,7 +661,10 @@ if [[ "${1:-}" == "--handle" ]]; then
             else
                 _key="PASS_${_auth_ip//\./_}"
                 mkdir -p /etc/pihole-ha
-                touch "$_AUTH_CONF"
+                # The temp file carries the password in the clear until the
+                # rename, so it is locked down before anything goes into it.
+                touch "$_AUTH_CONF" "$_AUTH_CONF.tmp"
+                chmod 600 "$_AUTH_CONF.tmp" 2>/dev/null || true
                 grep -v "^$_key=" "$_AUTH_CONF" > "$_AUTH_CONF.tmp" 2>/dev/null || true
                 echo "$_key=$_auth_pass" >> "$_AUTH_CONF.tmp"
                 mv "$_AUTH_CONF.tmp" "$_AUTH_CONF"

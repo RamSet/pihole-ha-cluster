@@ -23,8 +23,19 @@ _save_peer_pass() {   # $1 = node ip   $2 = password
     local _ip="$1" _pw="$2" _key
     [[ -z "$_ip" || -z "$_pw" ]] && return 0
     _key="PASS_${_ip//./_}"
-    install -o root -g root -m 0700 -d /etc/pihole-ha 2>/dev/null || mkdir -p /etc/pihole-ha
-    touch /etc/pihole-ha/auth.conf
+    # Create the directory, do not re-mode it. This used to be
+    # "install -m 0700 -d", which chmods an EXISTING directory too, and
+    # /etc/pihole-ha has to stay traversable by the user pihole-FTL runs as
+    # (pihole): the HA panel's ha-api.lp reads nodes.conf and sync.conf from
+    # here itself. Saving one peer password therefore broke Config Sync on that
+    # node -- verified on a live node, where the panel answered "no sync primary
+    # is configured on this node" at 0700 and recovered at 0755. The secret is
+    # protected by auth.conf's own 0600, not by the directory.
+    mkdir -p /etc/pihole-ha
+    touch /etc/pihole-ha/auth.conf /etc/pihole-ha/auth.conf.tmp
+    # The temp file holds the password in the clear for the moment before the
+    # rename, so it is locked down before anything is written into it.
+    chmod 600 /etc/pihole-ha/auth.conf.tmp 2>/dev/null || true
     grep -v "^${_key}=" /etc/pihole-ha/auth.conf > /etc/pihole-ha/auth.conf.tmp 2>/dev/null || true
     printf '%s=%s\n' "$_key" "$_pw" >> /etc/pihole-ha/auth.conf.tmp
     mv /etc/pihole-ha/auth.conf.tmp /etc/pihole-ha/auth.conf
