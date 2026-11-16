@@ -100,6 +100,7 @@ $(function () {
     var masterErr = null;
     var vipCfg = null;
     var vipErr = null;
+    var vipDirty = false;      // the address field holds an unsaved edit
     var haCfg = null;
     var haErr = null;
     var authPending = {};  // ip -> Date.now() of the last auth save (bounds the spinner)
@@ -151,6 +152,9 @@ $(function () {
     });
     $(document).on("click", "#toggle-ha", function () { window.haHaToggle(); });
     $(document).on("click", "#toggle-vip", function () { window.haVipToggle(); });
+    $(document).on("click", "#vip-address-save", function () { window.haVipSave(); });
+    $(document).on("input", "#vip-address", function () { vipDirty = true; });
+    $(document).on("keydown", "#vip-address", function (e) { if (e.which === 13) window.haVipSave(); });
     $(document).on("click", "#toggle-enabled", function () { window.haToggle("enabled"); });
     $(document).on("click", "#toggle-gravity", function () { window.haToggle("gravity"); });
     $(document).on("click", "#toggle-dhcp", function () { window.haToggle("dhcp"); });
@@ -1220,11 +1224,13 @@ $(function () {
         var isMaster = vipCfg.is_master;
         $("#toggle-vip").toggleClass("on", enabled);
         $("#toggle-vip").toggleClass("disabled", !isMaster);
-        if (enabled) {
-            $("#vip-details").show();
-        } else {
-            $("#vip-details").hide();
-        }
+        // The address: never overwrite what someone is typing, and only the
+        // node allowed to change it gets a live field.
+        var $addr = $("#vip-address");
+        if (!$addr.is(":focus") && !vipDirty) $addr.val(vipCfg.vip || "");
+        $addr.prop("disabled", !isMaster);
+        $("#vip-address-save").prop("disabled", !isMaster);
+        $("#vip-unset").toggle(!vipCfg.vip);
         var $badge = $("#vip-status");
         var text = enabled ? "Enabled" : "Disabled";
         if (!isMaster) text += dhcpManaged ? " (only DHCP master can toggle)" : " (only the primary can toggle)";
@@ -1233,9 +1239,64 @@ $(function () {
 
     // ---- VIP toggle handler ----
 
+    // ---- VIP address ----
+
+    // Each peer's answer is shown: "saved" must not mean "saved here".
+    function vipPeerSummary(peers) {
+        var missed = $.grep(peers || [], function (p) { return !p.ok; });
+        if (!missed.length) return "";
+        return " " + $.map(missed, function (p) { return p.ip; }).join(", ") +
+               " did not answer and will pick it up when " +
+               (missed.length > 1 ? "they return" : "it returns") + ".";
+    }
+
+    window.haVipSave = function () {
+        var $res = $("#vip-address-result");
+        var ip = $.trim($("#vip-address").val());
+        if (vipCfg && !vipCfg.is_master) return;
+        if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) {
+            showPanelError($res, "enter an IPv4 address, e.g. 192.168.1.250");
+            return;
+        }
+        clearPanelError($res);
+        $res.find(".ha-vip-ok").remove();
+        $("#vip-address-save").prop("disabled", true);
+        haAjax({
+            url: API + "?action=vip-set&ip=" + encodeURIComponent(ip),
+            timeout: 20000,
+            dataType: "json"
+        })
+        .done(function (data) {
+            if (data && data.ok) {
+                vipDirty = false;
+                if (vipCfg) { vipCfg.vip = data.vip; vipCfg.vip_enabled = data.vip_enabled; }
+                renderVip();
+                var missed = vipPeerSummary(data.peers);
+                var msg = "Saved: " + data.vip + "." + missed +
+                          (data.vip_enabled ? "" : " The VIP is switched off — turn it on above to use it.");
+                $res.append($('<span class="ha-vip-ok"></span>')
+                    .css("color", missed ? "#f39c12" : "#00a65a").text(msg));
+            } else {
+                showPanelError($res, apiReason(data));
+            }
+        })
+        .fail(function (xhr, textStatus) {
+            showPanelError($res, apiReason(null, xhr, textStatus));
+        })
+        .always(function () {
+            $("#vip-address-save").prop("disabled", !!(vipCfg && !vipCfg.is_master));
+        });
+    };
+
     window.haVipToggle = function () {
         if (vipCfg && !vipCfg.is_master) {
             renderVip();
+            return;
+        }
+        // Switching on a VIP with no address did nothing and said nothing.
+        if (vipCfg && !vipCfg.vip_enabled && !vipCfg.vip) {
+            showPanelError($("#vip-result"), "set a VIP address below first.");
+            $("#vip-address").trigger("focus");
             return;
         }
         haAjax({

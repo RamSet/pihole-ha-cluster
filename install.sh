@@ -929,6 +929,7 @@ else
         if [[ -z "$vip" && "$_vip_defaulted" == "true" ]]; then
             vip_enabled="false"; vip=""
             printf "  %b No address given — continuing without a VIP\\n" "${INFO}"
+            printf "      You can add one later: Pi-hole admin > HA Cluster > Virtual IP.\\n"
         elif [[ -z "$vip" ]]; then
             printf "  %b %bVIP address is required when VIP is enabled%b\\n" "${CROSS}" "${COL_RED}" "${COL_NC}"
             exit 1
@@ -942,6 +943,7 @@ else
         vip_enabled="false"
         vip=""
         printf "  %b VIP disabled\\n" "${TICK}"
+        printf "      You can add one later: Pi-hole admin > HA Cluster > Virtual IP.\\n"
     fi
 fi
 

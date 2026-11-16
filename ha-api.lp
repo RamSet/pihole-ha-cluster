@@ -356,6 +356,18 @@ elseif action == "vip-config" then
     local content, err = curl_local("/api/vip/config")
     mg.write(content or err or '{"error":"unreachable"}')
 
+elseif action == "vip-set" then
+    -- Digits and dots only, so the value is safe in the shell'd curl URL. The
+    -- backend does the real validation. It waits for every peer's answer (up
+    -- to 5s each, in parallel), hence the longer timeout.
+    local ip = get_param("ip") or ""
+    if ip:match("^%d+%.%d+%.%d+%.%d+$") then
+        local content, err = curl_local("/api/vip/set?ip=" .. ip, 14)
+        mg.write(content or err or '{"error":"VIP change failed"}')
+    else
+        mg.write('{"error":"not a valid IPv4 address"}')
+    end
+
 elseif action == "vip-toggle" then
     local content, err = curl_local("/api/vip/toggle")
     mg.write(content or err or '{"error":"toggle failed"}')

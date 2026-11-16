@@ -478,17 +478,22 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                     </tbody>
                 </table>
                 <span id="vip-result" style="margin-left:10px"></span>
-<? if ha_vip == "" then ?>
-                <p class="text-muted" id="vip-unset" style="padding:0 10px;margin:4px 0">
-                    <strong>No VIP address is set</strong>, so this switch has nothing to move. Add
-                    <code>VIP=&lt;an unused address on this LAN&gt;</code> to <code>/etc/pihole-ha/nodes.conf</code>
-                    on every node; it is picked up within seconds, no restart needed.
-                </p>
-<? else ?>
-                <div id="vip-details" style="padding:0 10px<? if not ha_vip_enabled then ?>;display:none<? end ?>">
-                    <p style="margin:4px 0"><strong>VIP Address:</strong> <?=ha_vip?></p>
+                <div id="vip-address-row" style="padding:0 10px">
+                    <p class="text-muted" id="vip-unset" style="margin:4px 0 8px<? if ha_vip ~= "" then ?>;display:none<? end ?>">
+                        <strong>No VIP address is set</strong>, so the switch above has nothing to move.
+                        Enter an unused address on this LAN, outside your DHCP pool.
+                    </p>
+                    <div class="form-inline">
+                        <label for="vip-address" style="margin-right:8px">VIP Address</label>
+                        <input type="text" class="form-control input-sm" id="vip-address" value="<?=ha_vip?>"
+                               placeholder="e.g. 192.168.1.250" style="width:160px" inputmode="decimal" autocomplete="off">
+                        <button class="btn btn-sm btn-primary" id="vip-address-save" style="margin-left:6px">Save</button>
+                        <span id="vip-address-result" style="margin-left:10px"></span>
+                    </div>
+                    <p class="text-muted" style="margin:6px 0 0;font-size:12px">
+                        Saved to every node. A node that is down picks it up when it returns.
+                    </p>
                 </div>
-<? end ?>
             </div>
         </div>
     </div>

@@ -60,6 +60,11 @@ if [[ "${1:-}" == "--handle" ]]; then
     # made a missed announcement recoverable (see the daemon's reconcile).
     _NODES_GEN="${_NODES_GEN:-${NODES_GEN:-0}}"
     [[ "$_NODES_GEN" =~ ^[0-9]+$ ]] || _NODES_GEN=0
+    # Same idea for the VIP settings (address + on/off), on a counter of their
+    # own: they change independently of the node order, and a node that adopts
+    # one must not be taken to have adopted the other.
+    _VIP_GEN="${VIP_GEN:-0}"
+    [[ "$_VIP_GEN" =~ ^[0-9]+$ ]] || _VIP_GEN=0
     _DHCP_HA="${DHCP_HA:-true}"
     if [[ -z "$_GATEWAY" || -z "$_HA_NODES" ]]; then
         # Auto-detect defaults so dash stays alive for /api/nodes/join
@@ -316,16 +321,51 @@ if [[ "${1:-}" == "--handle" ]]; then
     # an API session seat occupied on the peer. Fire-and-forget: call as
     # `_propagate "$ip" "$path" &`. The path already carries a query string, so the
     # session id is appended with "&sid=".
+    # Returns the status of the push itself. It used to return whatever the
+    # logout below returned, so a peer whose pihole-ha was stopped but whose
+    # Pi-hole still answered was reported as having taken the change (measured:
+    # sidecar stopped, "ok":true). The peer's reply is left in _PROPAGATE_BODY
+    # for callers that need more than "it answered".
     _propagate() {
-        local ip="$1" path="$2" sid
+        local ip="$1" path="$2" sid rc
         sid="$(_get_peer_sid "$ip")"
         if [[ -n "$sid" ]]; then
-            curl -sf --max-time 5 "http://$ip:8887${path}&sid=$sid" &>/dev/null
+            _PROPAGATE_BODY="$(curl -sf --max-time 5 "http://$ip:8887${path}&sid=$sid" 2>/dev/null)"; rc=$?
             # Best-effort logout of the session we just created.
             curl -s --max-time 3 -X DELETE "http://$ip:${_NODE_PORTS[$ip]:-80}/api/auth?sid=$sid" &>/dev/null
         else
-            curl -sf --max-time 5 "http://$ip:8887${path}" &>/dev/null
+            _PROPAGATE_BODY="$(curl -sf --max-time 5 "http://$ip:8887${path}" 2>/dev/null)"; rc=$?
         fi
+        return "$rc"
+    }
+
+    # Write the VIP settings and their generation into nodes.conf. The daemon
+    # re-reads the file every cycle, so this is all it takes to apply them.
+    _vip_conf_write() {   # $1 address (may be empty)  $2 true|false  $3 generation
+        local k v
+        for k in VIP VIP_ENABLED VIP_GEN; do
+            case "$k" in VIP) v="$1" ;; VIP_ENABLED) v="$2" ;; *) v="$3" ;; esac
+            if [[ -f "$_NODES_CONF" ]] && grep -q "^$k=" "$_NODES_CONF"; then
+                sed -i "s/^$k=.*/$k=$v/" "$_NODES_CONF"
+            else
+                printf '%s=%s\n' "$k" "$v" >> "$_NODES_CONF"
+            fi
+        done
+        _VIP="$1"; _VIP_ENABLED="$2"; _VIP_GEN="$3"
+    }
+
+    # A generation that outranks every node's, not just ours: a peer we failed
+    # to reach last time may hold a higher one, and a change that only ties with
+    # it would be ignored there and then undone here by the reconcile.
+    _vip_next_gen() {
+        local g="$_VIP_GEN" n r
+        for n in "${_HA_NODES[@]}"; do
+            [[ "$n" == "$LOCAL_IP" ]] && continue
+            r="$(curl -sf --max-time 1 "http://$n:8887/api/priority/config" 2>/dev/null)"
+            r="$(json_num "$r" vip_gen)"
+            [[ "$r" =~ ^[0-9]+$ ]] && (( r > g )) && g="$r"
+        done
+        echo $(( g + 1 ))
     }
 
     # On disk, not /run -- see the note in pihole-ha-sync. Fall back to the old
@@ -741,7 +781,9 @@ if [[ "${1:-}" == "--handle" ]]; then
             # Deliberately unauthenticated, like the rest of this read-only
             # endpoint: peers poll it every cycle to spot a newer order, and
             # making them log in first would cost a password hash per cycle.
-            printf '{"nodes":"%s","gen":%s}\n' "$(IFS=,; echo "${_HA_NODES[*]}")" "$_NODES_GEN"
+            # vip_gen rides along so a peer learns that the VIP settings moved
+            # from the request it already makes, and asks for them only then.
+            printf '{"nodes":"%s","gen":%s,"vip_gen":%s}\n' "$(IFS=,; echo "${_HA_NODES[*]}")" "$_NODES_GEN" "$_VIP_GEN"
             ;;
         /api/priority/set*)
             _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
@@ -882,7 +924,93 @@ if [[ "${1:-}" == "--handle" ]]; then
             # is_master = may this node drive the VIP toggle (mode-aware)
             _is_master="false"; _is_vip_authority && _is_master="true"
             send_headers "200 OK" "application/json"
-            printf '{"vip":"%s","vip_enabled":%s,"is_master":%s}\n' "$_VIP" "$_VIP_ENABLED" "$_is_master"
+            printf '{"vip":"%s","vip_enabled":%s,"is_master":%s,"gen":%s}\n' "$_VIP" "$_VIP_ENABLED" "$_is_master" "$_VIP_GEN"
+            ;;
+        /api/vip/set*)
+            # Set the VIP address and/or its on/off state, as absolute values.
+            #
+            # The address used to be settable only at install time; afterwards
+            # the panel offered a switch and nothing to switch on -- a DNS-only
+            # user enabled it and got "VIP Address:" followed by a blank, with
+            # nodes.conf on every node as the only way forward. And the switch
+            # itself was announced to peers as "toggle", which is relative: a
+            # node that missed one announcement stayed inverted for good.
+            #
+            # So peers are told the VALUES, with a generation. Each one's answer
+            # is collected and returned, because "saved" must not mean "saved
+            # here". A node that was down catches up from its daemon's reconcile.
+            _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
+            send_headers "200 OK" "application/json"
+            _vs_ip="" _vs_has_ip="" _vs_en="" _vs_prop="" _vs_gen=""
+            IFS='&' read -ra _vsp <<< "$_qs"
+            for _vp in "${_vsp[@]}"; do
+                case "$_vp" in
+                    ip=*)         _vs_ip="${_vp#ip=}"; _vs_has_ip=1 ;;
+                    enabled=*)    _vs_en="${_vp#enabled=}" ;;
+                    propagated=*) _vs_prop="${_vp#propagated=}" ;;
+                    gen=*)        _vs_gen="${_vp#gen=}" ;;
+                esac
+            done
+            [[ "$_vs_gen" =~ ^[0-9]+$ ]] || _vs_gen=""
+            [[ "$_vs_en" == "true" || "$_vs_en" == "false" ]] || _vs_en=""
+            LOCAL_IP="$(platform_get_local_ip)"
+            _vs_err=""
+            if [[ "$_vs_prop" == "1" ]]; then
+                # From a peer: both values, absolute. An empty address is a
+                # legitimate value there (a cluster that has none).
+                [[ -n "$_vs_gen" && -n "$_vs_en" && -n "$_vs_has_ip" ]] || _vs_err="incomplete announcement"
+                [[ -z "$_vs_ip" ]] || is_valid_ip "$_vs_ip" || _vs_err="invalid address"
+            else
+                _is_vip_authority || _vs_err="Only the primary (DNS-only) or DHCP master can change the VIP"
+                if [[ -z "$_vs_err" ]]; then
+                    if [[ -n "$_vs_has_ip" ]]; then
+                        if ! is_valid_ip "$_vs_ip"; then
+                            _vs_err="not a valid IPv4 address"
+                        elif [[ "$_vs_ip" == "$_GATEWAY" ]]; then
+                            _vs_err="that is the gateway's address"
+                        elif [[ "$_vs_ip" == 0.* || "$_vs_ip" == 127.* || "$_vs_ip" == 255.* || "$_vs_ip" == *.0 || "$_vs_ip" == *.255 ]]; then
+                            _vs_err="that address cannot be used as a VIP"
+                        elif _is_known_node "$_vs_ip"; then
+                            _vs_err="that is a node's own address; the VIP must be a separate, unused address"
+                        fi
+                    elif [[ -z "$_vs_en" ]]; then
+                        _vs_err="nothing to set"
+                    fi
+                fi
+            fi
+            if [[ -n "$_vs_err" ]]; then
+                printf '{"error":"%s"}\n' "$_vs_err"
+            elif [[ "$_vs_prop" == "1" ]] && (( _vs_gen <= _VIP_GEN )); then
+                printf '{"ok":true,"ignored":"not newer","gen":%s}\n' "$_VIP_GEN"
+            else
+                _vs_new_ip="$_VIP"; [[ -n "$_vs_has_ip" ]] && _vs_new_ip="$_vs_ip"
+                _vs_new_en="${_VIP_ENABLED:-true}"; [[ -n "$_vs_en" ]] && _vs_new_en="$_vs_en"
+                if [[ "$_vs_prop" == "1" ]]; then
+                    _vs_new_gen="$_vs_gen"
+                else
+                    _vs_new_gen="$(_vip_next_gen)"
+                fi
+                _vip_conf_write "$_vs_new_ip" "$_vs_new_en" "$_vs_new_gen"
+                _vs_peers=""
+                if [[ "$_vs_prop" != "1" ]]; then
+                    _vs_dir="$(mktemp -d /tmp/.pihole-ha-vip.XXXXXX 2>/dev/null)"
+                    for _node in "${_HA_NODES[@]}"; do
+                        [[ "$_node" == "$LOCAL_IP" ]] && continue
+                        # "Answered" is not "accepted": a 200 can carry an error.
+                        ( _propagate "$_node" "/api/vip/set?ip=$_vs_new_ip&enabled=$_vs_new_en&gen=$_vs_new_gen&propagated=1" \
+                            && [[ "$_PROPAGATE_BODY" == *'"ok":true'* ]] && : > "$_vs_dir/$_node" ) &
+                    done
+                    wait
+                    for _node in "${_HA_NODES[@]}"; do
+                        [[ "$_node" == "$LOCAL_IP" ]] && continue
+                        _vs_ok=false; [[ -n "$_vs_dir" && -e "$_vs_dir/$_node" ]] && _vs_ok=true
+                        _vs_peers+="${_vs_peers:+,}{\"ip\":\"$_node\",\"ok\":$_vs_ok}"
+                    done
+                    [[ -n "$_vs_dir" ]] && rm -rf "$_vs_dir"
+                fi
+                printf '{"ok":true,"vip":"%s","vip_enabled":%s,"gen":%s,"peers":[%s]}\n' \
+                    "$_vs_new_ip" "$_vs_new_en" "$_vs_new_gen" "$_vs_peers"
+            fi
             ;;
         /api/vip/toggle*)
             _qs="${path#*\?}"; if ! _check_auth "$_qs"; then _send_401; exit 0; fi
@@ -912,18 +1040,26 @@ if [[ "${1:-}" == "--handle" ]]; then
                     done < "$_NODES_CONF"
                 fi
                 if [[ "$_VIP_ENABLED" == "true" ]]; then _NEW_VIP="false"; else _NEW_VIP="true"; fi
-                # Update nodes.conf
-                if [[ -f "$_NODES_CONF" ]] && grep -q "^VIP_ENABLED=" "$_NODES_CONF"; then
-                    sed -i "s/^VIP_ENABLED=.*/VIP_ENABLED=$_NEW_VIP/" "$_NODES_CONF"
+                if [[ "$_vip_propagated" == "1" ]]; then
+                    # Only a peer on an older release still announces "toggle".
+                    # Honour it, without a generation: it has none to offer.
+                    if [[ -f "$_NODES_CONF" ]] && grep -q "^VIP_ENABLED=" "$_NODES_CONF"; then
+                        sed -i "s/^VIP_ENABLED=.*/VIP_ENABLED=$_NEW_VIP/" "$_NODES_CONF"
+                    else
+                        echo "VIP_ENABLED=$_NEW_VIP" >> "$_NODES_CONF"
+                    fi
                 else
-                    echo "VIP_ENABLED=$_NEW_VIP" >> "$_NODES_CONF"
-                fi
-                # Propagate to other nodes
-                if [[ "$_vip_propagated" != "1" ]]; then
+                    # Announce the resulting VALUE with a generation, so a peer
+                    # that misses it can catch up and one that was already out
+                    # of step is corrected rather than flipped the wrong way. A
+                    # peer too old to know /api/vip/set (it answers 404) gets the
+                    # old relative call, as before.
                     LOCAL_IP="$(platform_get_local_ip)"
+                    _vip_conf_write "$_VIP" "$_NEW_VIP" "$(_vip_next_gen)"
                     for _node in "${_HA_NODES[@]}"; do
                         [[ "$_node" == "$LOCAL_IP" ]] && continue
-                        _propagate "$_node" "/api/vip/toggle?propagated=1" &
+                        { _propagate "$_node" "/api/vip/set?ip=$_VIP&enabled=$_NEW_VIP&gen=$_VIP_GEN&propagated=1" \
+                            || _propagate "$_node" "/api/vip/toggle?propagated=1"; } &
                     done
                 fi
                 printf '{"vip_enabled":%s}\n' "$_NEW_VIP"

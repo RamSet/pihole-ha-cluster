@@ -34,6 +34,8 @@ CONFIG_VERSION="${CONFIG_VERSION:-0}"
 # announcement recoverable.
 NODES_GEN="${NODES_GEN:-0}"
 [[ "$NODES_GEN" =~ ^[0-9]+$ ]] || NODES_GEN=0
+VIP_GEN="${VIP_GEN:-0}"
+[[ "$VIP_GEN" =~ ^[0-9]+$ ]] || VIP_GEN=0
 if [[ -z "$GATEWAY" || -z "$HA_NODES" ]]; then
     echo "ERROR: /etc/pihole-ha/nodes.conf missing or incomplete (need GATEWAY and HA_NODES)" >&2
     exit 1
@@ -267,8 +269,21 @@ reload_vip_conf() {
             DHCP_HA)     DHCP_HA="$val" ;;
             HA_NODES)    HA_NODES="$val" ;;
             NODES_GEN)   [[ "$val" =~ ^[0-9]+$ ]] && NODES_GEN="$val" ;;
+            VIP_GEN)     [[ "$val" =~ ^[0-9]+$ ]] && VIP_GEN="$val" ;;
         esac
     done < "$NODES_CONF"
+    # The address itself changed. Give back the old one before forgetting it:
+    # has_vip and remove_vip only ever look at $VIP, so an address this node
+    # still held under the previous value would stay bound to the interface for
+    # good -- answering on an address the cluster no longer knows about.
+    if [[ -n "$prev_vip" && "$VIP" != "$prev_vip" ]]; then
+        local _new_vip="$VIP"
+        VIP="$prev_vip"
+        if has_vip; then
+            remove_vip && log_warn "event=vip_released ip=$prev_vip reason=\"VIP address changed to ${_new_vip:-none}\""
+        fi
+        VIP="$_new_vip"
+    fi
     # Rebuild node array if order changed
     if [[ "$HA_NODES" != "$prev_nodes" ]]; then
         # Re-parse with the same IP:PORT handling as startup, else :PORT suffixes
@@ -1701,16 +1716,52 @@ manage_sync_role() {
 # not raise our generation above the one we adopted.
 reconcile_node_order() {
     (( NODE_COUNT > 1 )) || return 0
-    local ip resp peer_gen peer_nodes
+    local ip resp peer_gen peer_nodes peer_vgen
     for ip in "${NODES[@]}"; do
         [[ "$ip" == "$LOCAL_IP" ]] && continue
         resp="$(curl -sf --max-time "${HEALTH_TIMEOUT:-2}" "http://${ip}:8887/api/priority/config" 2>/dev/null)" || continue
+        # The same reply says whether that peer's VIP settings are newer than
+        # ours, so the steady state costs no extra request.
+        peer_vgen="$(json_num "$resp" vip_gen)"
+        if [[ "$peer_vgen" =~ ^[0-9]+$ ]] && (( peer_vgen > VIP_GEN )); then
+            adopt_vip_conf "$ip" "$peer_vgen"
+        fi
         peer_gen="$(json_num "$resp" gen)"
         peer_nodes="$(json_str "$resp" nodes)"
         [[ "$peer_gen" =~ ^[0-9]+$ && -n "$peer_nodes" ]] || continue
         (( peer_gen > NODES_GEN )) || continue
         adopt_node_order "$ip" "$peer_gen" "$peer_nodes" && return 0
     done
+    return 0
+}
+
+# Take a peer's newer VIP settings (address and on/off).
+#
+# Changing them in the panel tells each peer once. A node that was down then
+# would otherwise come back with the old address, or none, and never claim the
+# VIP on failover -- or claim a different one. Written to nodes.conf only;
+# reload_vip_conf picks it up at the top of the next cycle, releasing an old
+# address and updating the DHCP DNS option exactly as for a hand edit.
+adopt_vip_conf() {
+    local from="$1" want_gen="$2" resp vip en gen
+    resp="$(curl -sf --max-time "${HEALTH_TIMEOUT:-2}" "http://${from}:8887/api/vip/config" 2>/dev/null)" || return 1
+    gen="$(json_num "$resp" gen)"
+    en="$(json_bool "$resp" vip_enabled)"
+    vip="$(json_str "$resp" vip)"
+    [[ "$gen" =~ ^[0-9]+$ && -n "$en" ]] || return 1
+    (( gen > VIP_GEN )) || return 1
+    [[ -z "$vip" ]] || is_valid_ip "$vip" || return 1
+    local k v
+    for k in VIP VIP_ENABLED VIP_GEN; do
+        case "$k" in VIP) v="$vip" ;; VIP_ENABLED) v="$en" ;; *) v="$gen" ;; esac
+        if grep -q "^$k=" "$NODES_CONF" 2>/dev/null; then
+            sed -i "s/^$k=.*/$k=$v/" "$NODES_CONF" || return 1
+        else
+            printf '%s=%s\n' "$k" "$v" >> "$NODES_CONF" || return 1
+        fi
+    done
+    log_warn "event=vip_conf_adopted from=$from gen=$gen vip=${vip:-none} enabled=$en previous=${VIP:-none}/$VIP_ENABLED reason=\"that peer holds newer VIP settings; this node had missed the change\""
+    VIP_GEN="$gen"
     return 0
 }
 

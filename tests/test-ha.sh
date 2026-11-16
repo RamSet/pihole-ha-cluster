@@ -3542,7 +3542,7 @@ echo "=== The panel asks pihole-FTL for one process at a time ==="
 _js="$(cat "$SCRIPT_DIR/../ha.js")"
 assert_eq "no call site talks to the API directly" "0" \
     "$(grep -c '\$\.ajax({' "$SCRIPT_DIR/../ha.js")"
-assert_eq "every one of them goes through the queue" "24" \
+assert_eq "every one of them goes through the queue" "25" \
     "$(grep -c 'haAjax({' "$SCRIPT_DIR/../ha.js")"
 assert_eq "and the queue is the only thing that calls jQuery" "1" \
     "$(grep -c '\$\.ajax(' "$SCRIPT_DIR/../ha.js")"
@@ -3824,8 +3824,8 @@ rm -f "$_ctl"
 assert_contains "it says outright that Pi-hole need not be the DHCP server" "$_lpg" "does not need to be your DHCP server"
 # A switch with no address behind it moves nothing; say so instead of showing
 # "VIP Address:" followed by a blank.
-assert_contains "an unset VIP is named"            "$_lpg" '<? if ha_vip == "" then ?>'
-assert_contains "and the way to set one is given"  "$_lpg" '<code>/etc/pihole-ha/nodes.conf</code>'
+assert_contains "an unset VIP is named"            "$_lpg" '<strong>No VIP address is set</strong>'
+assert_contains "and the way to set one is right there" "$_lpg" 'id="vip-address"'
 assert_contains 'VIP="" counts as unset too'       "$_lpg" 'ha_vip = (v:gsub("[\"'"'"'%s]", ""))'
 assert_contains "the toggle note names the right authority" "$(cat "$SCRIPT_DIR/../ha.js")" '" (only the primary can toggle)"'
 
@@ -3922,6 +3922,114 @@ if command -v node >/dev/null 2>&1; then
     assert_not_contains "and is not blamed on the login" "$(_ur 200 '{"enabled":true,"gravity":')" "log in again"
     _long="$(printf 'x%.0s' $(seq 1 900))"
     assert_true "a long reply is cut, not dumped into the page" [ "$(_ur 200 "$_long" | wc -c)" -lt 330 ]
+fi
+
+# ============================================================
+# The VIP address can be set from the panel, and reaches every node
+# ============================================================
+# The address was settable only at install time. A DNS-only user who declined
+# it there later switched "VIP Enabled" on and got "VIP Address:" followed by a
+# blank: the switch flipped VIP_ENABLED and nothing could set VIP short of
+# editing nodes.conf on every node.
+section "VIP address in the panel"
+_dash="$SCRIPT_DIR/../pihole-ha-dash"; _dmn="$SCRIPT_DIR/../pihole-ha"
+_vset="$(sed -n '/^        \/api\/vip\/set\*)/,/^            ;;/p' "$_dash")"
+assert_contains "the write is authenticated before anything else" "$(head -22 <<< "$_vset")" 'if ! _check_auth "$_qs"; then _send_401; exit 0; fi'
+assert_contains "only the VIP authority may start a change"       "$_vset" '_is_vip_authority || _vs_err='
+assert_contains "a node address is refused"                       "$_vset" '_is_known_node "$_vs_ip"'
+assert_contains "the gateway is refused"                          "$_vset" '"$_vs_ip" == "$_GATEWAY"'
+assert_contains "an announcement no newer than ours is ignored"   "$_vset" '(( _vs_gen <= _VIP_GEN ))'
+assert_contains "accepted is not the same as answered"            "$_vset" "\"\$_PROPAGATE_BODY\" == *'\"ok\":true'*"
+assert_contains "every peer's result is returned"                 "$_vset" '"peers":[%s]'
+assert_contains "the panel only forwards digits and dots"         "$(sed -n '/^elseif action == "vip-set" then/,/^elseif/p' "$SCRIPT_DIR/../ha-api.lp")" 'ip:match("^%d+%.%d+%.%d+%.%d+$")'
+assert_contains "switching on with no address asks for one"       "$(cat "$SCRIPT_DIR/../ha.js")" 'if (vipCfg && !vipCfg.vip_enabled && !vipCfg.vip) {'
+assert_contains "a poll does not overwrite a half-typed address"  "$(cat "$SCRIPT_DIR/../ha.js")" 'if (!$addr.is(":focus") && !vipDirty)'
+
+# The switch used to be announced as "toggle" -- relative, so a node that
+# missed one stayed inverted. It now announces the value.
+_vtog="$(sed -n '/^        \/api\/vip\/toggle\*)/,/^            ;;/p' "$_dash")"
+assert_contains "the switch announces its value"               "$_vtog" '/api/vip/set?ip=$_VIP&enabled=$_NEW_VIP&gen=$_VIP_GEN&propagated=1'
+assert_contains "and falls back for a peer on an older release" "$_vtog" '|| _propagate "$_node" "/api/vip/toggle?propagated=1"'
+
+# _propagate returned the status of its logout call, so a peer whose pihole-ha
+# was stopped but whose Pi-hole answered was reported as updated (measured).
+_prc="$(
+    eval "$(extract_fn "$_dash" _propagate)"
+    declare -A _NODE_PORTS=()
+    _get_peer_sid() { echo SID; }
+    curl() { case "$*" in *DELETE*) return 0 ;; *) return 7 ;; esac; }
+    _propagate 10.0.0.2 "/api/vip/set?x=1"; printf '%s' "$?"
+)"
+assert_eq "a refused push is a failure even when the logout works" "7" "$_prc"
+_prc="$(
+    eval "$(extract_fn "$_dash" _propagate)"
+    declare -A _NODE_PORTS=()
+    _get_peer_sid() { echo SID; }
+    curl() { case "$*" in *DELETE*) return 22 ;; *) echo '{"ok":true}'; return 0 ;; esac; }
+    _propagate 10.0.0.2 "/api/vip/set?x=1"; printf '%s|%s' "$?" "$_PROPAGATE_BODY"
+)"
+assert_eq "a push that landed is a success even when the logout fails" '0|{"ok":true}' "$_prc"
+
+# A node that was down when the address changed adopts it on return.
+_adopt() {   # $1 own gen  $2 peer reply  -> "rc|file contents"
+    (
+        NODES_CONF="$(mktemp)"; printf 'GATEWAY=10.0.0.1\nVIP=10.0.0.50\nVIP_ENABLED=true\n' > "$NODES_CONF"
+        VIP=10.0.0.50 VIP_ENABLED=true VIP_GEN="$1" HEALTH_TIMEOUT=1
+        . "$SCRIPT_DIR/../pihole-ha-platform" 2>/dev/null
+        log_warn() { :; }
+        curl() { printf '%s' "$_reply"; }
+        _reply="$2"
+        eval "$(extract_fn "$_dmn" adopt_vip_conf)"
+        adopt_vip_conf 10.0.0.2 9; rc=$?
+        printf '%s|%s' "$rc" "$(grep -E '^(VIP|VIP_ENABLED|VIP_GEN)=' "$NODES_CONF" | tr '\n' ' ')"
+        rm -f "$NODES_CONF"
+    )
+}
+assert_eq "newer settings are adopted" "0|VIP=10.0.0.60 VIP_ENABLED=false VIP_GEN=4 " \
+    "$(_adopt 3 '{"vip":"10.0.0.60","vip_enabled":false,"is_master":true,"gen":4}')"
+assert_eq "a cleared address is adopted too" "0|VIP= VIP_ENABLED=false VIP_GEN=4 " \
+    "$(_adopt 3 '{"vip":"","vip_enabled":false,"is_master":true,"gen":4}')"
+assert_eq "settings that are not newer are left alone" "1|VIP=10.0.0.50 VIP_ENABLED=true " \
+    "$(_adopt 4 '{"vip":"10.0.0.60","vip_enabled":false,"is_master":true,"gen":4}')"
+assert_eq "a peer on an older release (no generation) is left alone" "1|VIP=10.0.0.50 VIP_ENABLED=true " \
+    "$(_adopt 0 '{"vip":"10.0.0.60","vip_enabled":true,"is_master":true}')"
+assert_eq "a malformed address is never written" "1|VIP=10.0.0.50 VIP_ENABLED=true " \
+    "$(_adopt 0 '{"vip":"10.0.0.60; reboot","vip_enabled":true,"is_master":true,"gen":4}')"
+assert_contains "the reconcile asks only when a peer says its settings are newer" \
+    "$(sed -n '/^reconcile_node_order() {/,/^}/p' "$_dmn")" '(( peer_vgen > VIP_GEN ))'
+# Changing the address must give the old one back: has_vip/remove_vip only look
+# at $VIP, so it would otherwise stay bound for good (seen live: event=vip_released).
+_rvc="$(sed -n '/^reload_vip_conf() {/,/^}/p' "$_dmn")"
+assert_contains "the old address is released when it changes" "$_rvc" 'if [[ -n "$prev_vip" && "$VIP" != "$prev_vip" ]]; then'
+assert_contains "the installer says where to add one later" "$(cat "$SCRIPT_DIR/../install.sh")" 'You can add one later: Pi-hole admin > HA Cluster > Virtual IP.'
+
+# ============================================================
+# The page templates compile
+# ============================================================
+# Every other check on ha.lp reads its text. A template with one stray
+# "<? end ?>" passes all of them and renders as a single line -- "attempt to
+# call a userdata value" -- in place of the whole HA page. Translate the page to
+# the Lua it becomes and compile it with Pi-hole's own compiler, where one is
+# at hand.
+section "Templates compile"
+_lp2lua() {
+    perl -0777 -ne 'my $s=$_; my $o=""; while($s=~/\G(.*?)<\?(=?)(.*?)\?>/sgc){ $o.="mg.write[==[".$1."]==]\n" if length $1; $o.= $2 ? "mg.write($3)\n" : "$3\n"; } $s=~/\G(.*)\z/s; $o.="mg.write[==[$1]==]\n"; print $o' "$1"
+}
+_luac=()
+if command -v pihole-FTL >/dev/null 2>&1; then _luac=(pihole-FTL luac -p -)
+elif command -v luac >/dev/null 2>&1; then _luac=(luac -p -)
+elif command -v docker >/dev/null 2>&1 && docker image inspect pihole/pihole:latest >/dev/null 2>&1; then
+    _luac=(docker run --rm -i --entrypoint pihole-FTL pihole/pihole:latest luac -p -)
+fi
+if (( ${#_luac[@]} )) && command -v perl >/dev/null 2>&1; then
+    for _t in ha.lp ha-api.lp; do
+        assert_eq "$_t compiles" "" "$(_lp2lua "$SCRIPT_DIR/../$_t" | "${_luac[@]}" 2>&1)"
+    done
+    _bad="$(mktemp)"; printf '%s\n' '<? if x then ?>a<? end ?>' '<? end ?>' > "$_bad"
+    assert_true "control: a stray end is caught" [ -n "$(_lp2lua "$_bad" | "${_luac[@]}" 2>&1)" ]
+    rm -f "$_bad"
+else
+    printf "  SKIP  no Lua compiler here (pihole-FTL, luac or the pihole/pihole image)\n"
 fi
 
 # ============================================================
