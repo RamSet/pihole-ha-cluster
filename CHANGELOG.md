@@ -2,6 +2,10 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.41 — 2026-11-16
+- Refuse to update inside the container, and keep logs out of API replies
+- Remove browser-test snapshots that were committed by accident
+
 ## v3.19.40 — 2026-11-15
 - Stop telling a DNS-only cluster its VIP needs Pi-hole DHCP
 
