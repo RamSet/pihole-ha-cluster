@@ -3788,6 +3788,48 @@ assert_true "the mode is known before the first poll" \
     [ "$(grep -n 'var dhcpManaged = ' "$SCRIPT_DIR/../ha.js" | cut -d: -f1)" -lt "$(grep -n '^    pollMaster();' "$SCRIPT_DIR/../ha.js" | head -1 | cut -d: -f1)" ]
 
 # ============================================================
+# A DNS-only cluster is not told its VIP needs Pi-hole DHCP
+# ============================================================
+# Reported by a DNS-only user whose DHCP is on OPNsense: the VIP box said the
+# address "follows the active DHCP node" and is "added ... in DHCP leases", so
+# he read the VIP as unavailable to him. The daemon has run a DNS-health VIP
+# for such clusters all along (dns_only_vip_cycle); only the page said otherwise.
+#
+# The guard is on the class, not the sentences: outside the DHCP Master row
+# (which a DNS-only cluster does not get) and the new-device notifier (which is
+# about leases by definition), no line of page text may talk about DHCP being
+# failed over or followed unless the mode conditional is on that line or the
+# line sits in a mode branch.
+section "DNS-only wording"
+_lpg="$(cat "$SCRIPT_DIR/../ha.lp")"
+_dhcp_text_unguarded() {
+    awk '
+        /<!-- Row 1b: DHCP Master Override/ { skip=1 }
+        /<!-- Row 1c/                       { skip=0 }
+        /<\? if ha_dhcp_managed then \?>[[:space:]]*$/ { branch=1; next }
+        /^<\? else \?>[[:space:]]*$/ { if (branch==1) branch=2; next }
+        /^<\? end \?>[[:space:]]*$/  { branch=0; next }
+        skip || branch==1 { next }
+        /^(local|--|[[:space:]]*(if|elseif|local) )/ { next }
+        /active DHCP|DHCP master|DHCP failover|fail over DHCP|DHCP node|in DHCP leases/ {
+            if ($0 !~ /ha_dhcp_managed/) print FNR": "$0
+        }
+    ' "$1"
+}
+assert_eq "no DHCP-failover wording reaches a DNS-only page" "" "$(_dhcp_text_unguarded "$SCRIPT_DIR/../ha.lp")"
+# Positive control: the same scan must catch the sentence that misled him.
+_ctl="$(mktemp)"; printf '%s\n' '<p>' 'A floating IP that orbits the active DHCP node.' '</p>' > "$_ctl"
+assert_contains "the scan finds the old sentence" "$(_dhcp_text_unguarded "$_ctl")" "active DHCP node"
+rm -f "$_ctl"
+assert_contains "it says outright that Pi-hole need not be the DHCP server" "$_lpg" "does not need to be your DHCP server"
+# A switch with no address behind it moves nothing; say so instead of showing
+# "VIP Address:" followed by a blank.
+assert_contains "an unset VIP is named"            "$_lpg" '<? if ha_vip == "" then ?>'
+assert_contains "and the way to set one is given"  "$_lpg" '<code>/etc/pihole-ha/nodes.conf</code>'
+assert_contains 'VIP="" counts as unset too'       "$_lpg" 'ha_vip = (v:gsub("[\"'"'"'%s]", ""))'
+assert_contains "the toggle note names the right authority" "$(cat "$SCRIPT_DIR/../ha.js")" '" (only the primary can toggle)"'
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh pihole-ha-cluster-key pihole-ha-cli; do

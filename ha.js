@@ -1208,7 +1208,7 @@ $(function () {
         }
         var $badge = $("#vip-status");
         var text = enabled ? "Enabled" : "Disabled";
-        if (!isMaster) text += " (only DHCP master can toggle)";
+        if (!isMaster) text += dhcpManaged ? " (only DHCP master can toggle)" : " (only the primary can toggle)";
         $badge.text(text);
     }
 

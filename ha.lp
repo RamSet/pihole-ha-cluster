@@ -35,7 +35,7 @@ if ncf then
     for line in ncf:lines() do
         local k, v = line:match("^([%w_]+)=(.*)")
         if k == "GATEWAY" then ha_gateway = v
-        elseif k == "VIP" then ha_vip = v
+        elseif k == "VIP" then ha_vip = (v:gsub("[\"'%s]", ""))
         elseif k == "VIP_ENABLED" then ha_vip_enabled = (v == "true")
         elseif k == "DHCP_HA" then ha_dhcp_managed = (v:gsub("[\"'%s]", "") ~= "false")
         elseif k == "HA_NODES" then
@@ -239,7 +239,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
     of them start a new one.</p>
 <? else ?>
     <h4><i class="fa fa-power-off"></i> HA Failover Disabled</h4>
-    <p>All DHCP failover, health checks, and VIP management are paused across all nodes.
+    <p>All <? if ha_dhcp_managed then ?>DHCP failover, <? end ?>health checks<? if ha_dhcp_managed then ?>,<? end ?> and VIP management are paused across all nodes.
     <button class="btn btn-sm btn-success ha-re-enable-btn" style="margin-left:10px"><i class="fa fa-play"></i> Re-enable HA</button></p>
 <? end ?>
 </div>
@@ -305,8 +305,13 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                     under <strong>Cluster Members</strong> below to make failover meaningful.
 <? else ?>
                     Controls the entire HA system. When enabled, nodes continuously monitor each other and automatically
+<? if ha_dhcp_managed then ?>
                     fail over DHCP if the active server goes down. When disabled, all failover logic, health checks,
                     and VIP management stop across every node &mdash; DHCP stays wherever it currently is.
+<? else ?>
+                    move the VIP, if one is set, to a node that is answering DNS. When disabled, health checks
+                    and VIP management stop across every node. DHCP is not managed by this cluster either way.
+<? end ?>
 <? end ?>
                 </p>
                 <table class="table">
@@ -394,7 +399,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
             </div>
             <div class="box-body">
                 <p class="text-muted" style="margin:0 0 12px;font-size:12px;line-height:1.5">
-                    Every node in the cluster, in failover order. When the active DHCP master goes down, the
+                    Every node in the cluster, in failover order. When the <? if ha_dhcp_managed then ?>active DHCP master<? else ?>node holding the VIP<? end ?> goes down, the
                     next node in this list takes over. Reorder, add, or remove nodes here &mdash; every change
                     propagates to all nodes immediately so they all agree on who takes over next.
                 </p>
@@ -444,10 +449,18 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
             </div>
             <div class="box-body">
                 <p class="text-muted" style="margin:0 0 12px;font-size:12px;line-height:1.5">
+<? if ha_dhcp_managed then ?>
                     A floating IP address (the VIP) that orbits the active DHCP node - it follows whichever node is active. When enabled, clients get the VIP
                     as their DNS server instead of individual node IPs. This means failover is seamless &mdash;
                     clients never need to update their DNS settings. The VIP is added and removed automatically
                     via gratuitous ARP when the active node changes.
+<? else ?>
+                    A floating IP address (the VIP) held by the highest-priority node that is answering DNS. Pi-hole
+                    does not need to be your DHCP server for this: set the VIP as the DNS server in whatever
+                    hands out your leases (router, OPNsense, ...) and lookups keep working when a node goes down.
+                    No single node owns it &mdash; it moves by gratuitous ARP when the holder stops answering
+                    and returns when it is back.
+<? end ?>
                 </p>
                 <table class="table" id="vip-toggles">
                     <tbody>
@@ -459,15 +472,23 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                             </td>
                             <td>
                                 <strong>VIP Enabled</strong><br>
-                                <small class="text-muted">Floating IP added as first DNS server in DHCP leases &mdash; follows the active DHCP node</small>
+                                <small class="text-muted"><? if ha_dhcp_managed then ?>Floating IP added as first DNS server in DHCP leases &mdash; follows the active DHCP node<? else ?>Floating IP that follows the healthy DNS node &mdash; point your own DHCP server's DNS setting at it<? end ?></small>
                             </td>
                         </tr>
                     </tbody>
                 </table>
                 <span id="vip-result" style="margin-left:10px"></span>
+<? if ha_vip == "" then ?>
+                <p class="text-muted" id="vip-unset" style="padding:0 10px;margin:4px 0">
+                    <strong>No VIP address is set</strong>, so this switch has nothing to move. Add
+                    <code>VIP=&lt;an unused address on this LAN&gt;</code> to <code>/etc/pihole-ha/nodes.conf</code>
+                    on every node; it is picked up within seconds, no restart needed.
+                </p>
+<? else ?>
                 <div id="vip-details" style="padding:0 10px<? if not ha_vip_enabled then ?>;display:none<? end ?>">
                     <p style="margin:4px 0"><strong>VIP Address:</strong> <?=ha_vip?></p>
                 </div>
+<? end ?>
             </div>
         </div>
     </div>
@@ -479,7 +500,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
         <p class="text-muted" style="margin:0 0 8px 4px;font-size:12px;line-height:1.5">
             Each node runs periodic health checks against every other node. A node is considered healthy when
             its Pi-hole DNS service and the HA daemon are both responding. If a node fails consecutive checks,
-            it becomes ineligible for DHCP failover until it recovers.
+            it becomes ineligible for <? if ha_dhcp_managed then ?>DHCP failover<? else ?>the VIP<? end ?> until it recovers.
         </p>
     </div>
 </div>
@@ -652,7 +673,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
             </div>
             <div class="box-body">
                 <p class="text-muted" style="margin:0 0 12px;font-size:12px;line-height:1.5">
-                    Get push notifications on your phone when something happens in the cluster &mdash; DHCP failovers,
+                    Get push notifications on your phone when something happens in the cluster &mdash; <? if ha_dhcp_managed then ?>DHCP failovers<? else ?>VIP moves<? end ?>,
                     nodes going down or coming back up, and VIP changes. Requires a free
                     <a href="https://pushover.net" target="_blank">Pushover</a> account and app. Enter your user key
                     and API token below, then use <strong>Send Test</strong> to verify delivery.
@@ -667,7 +688,7 @@ local col_class = node_count == 2 and "col-lg-6 col-md-6" or "col-lg-4 col-md-4"
                             </td>
                             <td>
                                 <strong>HA Event Notifications</strong><br>
-                                <small class="text-muted">Send alerts on DHCP failover events via Pushover</small>
+                                <small class="text-muted">Send alerts on <? if ha_dhcp_managed then ?>DHCP failover<? else ?>cluster<? end ?> events via Pushover</small>
                             </td>
                         </tr>
                         <tr class="ha-sync-row">
