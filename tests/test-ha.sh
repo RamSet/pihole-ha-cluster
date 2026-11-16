@@ -3896,6 +3896,35 @@ _ctl="$(
 assert_eq "control: the stock logger does write to stdout" "1" "$_ctl"
 
 # ============================================================
+# An unreadable reply is shown, not guessed at
+# ============================================================
+# Reported twice from a Docker cluster: "Pi-hole answered the panel with
+# something other than data -- almost always its login page. Reload this page
+# and log in again", with "these tips don't fix the issue". The text was a guess
+# printed for every reply that would not parse, so the report carried nothing to
+# diagnose from. Only a reply that is a page is called one; the rest is quoted.
+section "Unreadable replies"
+_hjs="$SCRIPT_DIR/../ha.js"
+assert_not_contains "the blanket login-page guess is gone" "$(cat "$_hjs")" "something other than data"
+if command -v node >/dev/null 2>&1; then
+    _ur() {
+        node -e '
+            const src = require("fs").readFileSync(process.argv[1], "utf8");
+            const m = src.match(/    function unparsedReply\(xhr\) \{[\s\S]*?\n    \}\n/);
+            const f = new Function(m[0] + "; return unparsedReply;")();
+            process.stdout.write(f({status: +process.argv[2], responseText: process.argv[3]}));
+        ' "$_hjs" "$1" "$2"
+    }
+    assert_contains "a login page is still called one"   "$(_ur 200 '<!DOCTYPE html><html><body>login</body></html>')" "a web page instead of data"
+    assert_contains "an empty reply is called empty"     "$(_ur 200 $'\n')" "an empty reply (HTTP 200, 0 bytes)"
+    assert_contains "a stray log line is quoted"         "$(_ur 200 '2026-11-16T07:15:00 [] [WARN] event=x {"enabled":true}')" 'It starts: 2026-11-16T07:15:00 [] [WARN] event=x {"enabled":true}'
+    assert_contains "truncated JSON is quoted"           "$(_ur 200 '{"enabled":true,"gravity":')" 'It starts: {"enabled":true,"gravity":'
+    assert_not_contains "and is not blamed on the login" "$(_ur 200 '{"enabled":true,"gravity":')" "log in again"
+    _long="$(printf 'x%.0s' $(seq 1 900))"
+    assert_true "a long reply is cut, not dumped into the page" [ "$(_ur 200 "$_long" | wc -c)" -lt 330 ]
+fi
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh pihole-ha-cluster-key pihole-ha-cli; do

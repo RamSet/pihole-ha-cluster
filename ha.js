@@ -317,12 +317,33 @@ $(function () {
     // member list, the VIP toggle and the sync toggles were all dead and nothing
     // on the page said why. A failed read must not look like a pending one, and a
     // control that cannot act must say what stopped it.
-    function apiReason(data, xhr, textStatus) {
-        if (data && data.error) return String(data.error);
-        if (textStatus === "parsererror") {
-            return "Pi-hole answered the panel with something other than data " +
+    // What a reply that would not parse actually was.
+    //
+    // This used to say "almost always its login page" whatever came back, and
+    // told the reader to log in again. On a Docker cluster that advice was
+    // followed, changed nothing, and left neither the user nor us with anything
+    // to go on -- the message described a guess, not the reply. Only a reply
+    // that IS a page is called one now; anything else is shown, since the first
+    // line of it is usually the whole diagnosis.
+    function unparsedReply(xhr) {
+        var body = (xhr && typeof xhr.responseText === "string") ? xhr.responseText : "";
+        var http = (xhr && xhr.status) ? "HTTP " + xhr.status + ", " : "";
+        if (!body.replace(/\s+/g, "")) {
+            return "Pi-hole answered the panel with an empty reply (" + http + "0 bytes).";
+        }
+        if (/<!doctype|<html|<head|<body/i.test(body.slice(0, 2000))) {
+            return "Pi-hole answered the panel with a web page instead of data " +
                    "— almost always its login page. Reload this page and log in again.";
         }
+        var shown = body.replace(/\s+/g, " ").replace(/^ | $/g, "");
+        if (shown.length > 200) shown = shown.slice(0, 200) + "…";
+        return "the pihole-ha API sent a reply the panel cannot read (" + http +
+               body.length + " bytes). It starts: " + shown;
+    }
+
+    function apiReason(data, xhr, textStatus) {
+        if (data && data.error) return String(data.error);
+        if (textStatus === "parsererror") return unparsedReply(xhr);
         if (xhr && xhr.status) {
             return "Pi-hole's web server returned HTTP " + xhr.status +
                    " for the ha-api page.";
@@ -357,10 +378,8 @@ $(function () {
             var code = xhr ? xhr.status : 0;
             title = "Cannot load HA status";
             if (textStatus === "parsererror") {
-                title = "Not logged in";
-                text = "Pi-hole answered the panel with something other than data " +
-                       "&mdash; almost always its login page. Your admin session has " +
-                       "probably expired: reload this page and log in again.";
+                text = escapeHtml(unparsedReply(xhr));
+                title = /a web page instead of data/.test(text) ? "Not logged in" : "Unreadable reply";
             } else if (code === 404) {
                 text = "Pi-hole's web server has no <code>ha-api</code> page " +
                        "(404). The admin files were likely replaced by a Pi-hole " +
