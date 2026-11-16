@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.42 — 2026-11-16
+- Show an unreadable reply instead of guessing it was the login page
+
 ## v3.19.41 — 2026-11-16
 - Refuse to update inside the container, and keep logs out of API replies
 - Remove browser-test snapshots that were committed by accident
