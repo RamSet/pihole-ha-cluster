@@ -146,9 +146,20 @@ if [[ -n "$existing_sidecar" ]]; then
         2)
             printf "  %b Rebuilding and restarting..." "${INFO}"
             cd "$DOCKER_DIR"
-            docker compose build --no-cache pihole-ha >/dev/null 2>&1
+            # A failed build used to be discarded and reported as "updated".
+            if ! _upd_out="$(docker compose build --no-cache pihole-ha 2>&1)"; then
+                printf "%b  %b %bBuild failed — nothing was changed%b\\n" "${OVER}" "${CROSS}" "${COL_RED}" "${COL_NC}"
+                printf '%s\n' "$_upd_out" | tail -15
+                exit 1
+            fi
             docker compose up -d pihole-ha >/dev/null 2>&1
-            printf "%b  %b pihole-ha sidecar updated\\n" "${OVER}" "${TICK}"
+            # The HA page lives in the Pi-hole container and is copied there only
+            # when that container starts, so a rebuilt sidecar alone leaves the
+            # old page up. Restart both, then start anything a restart left down
+            # (a sidecar can lose the race to rejoin Pi-hole's process namespace).
+            docker compose restart >/dev/null 2>&1
+            docker compose up -d >/dev/null 2>&1
+            printf "%b  %b pihole-ha updated to %s; Pi-hole restarted to load the new HA page\\n" "${OVER}" "${TICK}" "$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo '?')"
             exit 0
             ;;
         *) printf "  Aborted.\\n"; exit 0 ;;

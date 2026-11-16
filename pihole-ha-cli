@@ -44,6 +44,28 @@ _have_systemd() { _c systemctl && [[ -d /run/systemd/system ]]; }
 _local_version() { tr -d '[:space:]' < "$VERSION_FILE" 2>/dev/null || echo "unknown"; }
 _latest_version() { curl -fsSL --max-time 5 "$RAW_VERSION_URL" 2>/dev/null | tr -d '[:space:]'; }
 
+# In the Docker sidecar the image is the unit of update, and only the Docker host
+# can rebuild it. Running the bare-metal installer here overwrote the scripts the
+# daemon was started from and then failed at /etc/systemd/system.
+_in_container() { [[ -f "${1:-/.dockerenv}" ]] && ! _have_systemd; }
+_container_update_steps() {
+    printf '  %s\n' "git pull" "cd docker" "docker compose build pihole-ha" \
+        "docker compose up -d pihole-ha" "docker compose restart" "docker compose up -d"
+}
+_refuse_in_container() {
+    _in_container || return 0
+    {
+        echo "This is the pihole-ha container: it is updated (or removed) from the Docker host, not from inside."
+        echo "Nothing was changed. On the host, in your pihole-ha-cluster checkout:"
+        echo
+        _container_update_steps
+        echo
+        echo "The restart takes Pi-hole with it: the HA page is copied into the Pi-hole"
+        echo "container only when that container starts."
+    } >&2
+    exit 1
+}
+
 # Re-run the whole command as root via sudo when needed.
 _need_root() {
     [[ $EUID -eq 0 ]] && return 0
@@ -58,6 +80,7 @@ _need_root() {
 # Replacing the process avoids that. One temp dir is left behind and cleaned at
 # the start of the next run.
 _run_installer() {   # $1 = --update | --uninstall
+    _refuse_in_container
     _need_root
     rm -rf /tmp/.pihole-ha-src.* 2>/dev/null || true
     local dir; dir="$(mktemp -d /tmp/.pihole-ha-src.XXXXXX)" || { echo "mktemp failed" >&2; exit 1; }
@@ -85,7 +108,12 @@ cmd_version() {
     printf 'updates follow: %s [%s]\n' "$REPO_SLUG" "$REPO_BRANCH"
     if [[ -n "$latest" ]]; then
         if [[ "$latest" != "$cur" ]]; then
-            printf 'update available: %s  (run: sudo pihole-ha update)\n' "$latest"
+            if _in_container; then
+                printf 'update available: %s  (rebuild the image on the Docker host:)\n' "$latest"
+                _container_update_steps
+            else
+                printf 'update available: %s  (run: sudo pihole-ha update)\n' "$latest"
+            fi
         else
             printf 'up to date\n'
         fi

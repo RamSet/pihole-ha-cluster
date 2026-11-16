@@ -199,6 +199,34 @@ if [[ $EUID -ne 0 ]]; then
 fi
 printf "  %b Running as root\\n" "${TICK}"
 
+# Inside the pihole-ha container there is nothing for this installer to do.
+#
+# "docker exec pihole-ha pihole-ha update" is the obvious thing to try on a
+# Docker node, and it ran the bare-metal update: copied the new scripts over the
+# ones the running daemon was started from, then died at /etc/systemd/system,
+# which a container does not have. The node kept running the old code under a
+# half-new file tree. The image is the unit of update there, and only the Docker
+# host can rebuild it -- so say that, before touching anything. The guard lives
+# here as well as in the CLI because the CLI already installed in every existing
+# container fetches THIS file and runs it.
+_in_container() { [[ -f "${1:-/.dockerenv}" && ! -d "${2:-/run/systemd/system}" ]]; }
+_container_help() {
+    printf "\\n  %b %bThis is the pihole-ha container: it is updated from the Docker host, not from inside.%b\\n" "${CROSS}" "${COL_RED}" "${COL_NC}"
+    printf "      Nothing was changed. On the host, in your pihole-ha-cluster checkout:\\n\\n"
+    printf "        git pull\\n"
+    printf "        cd docker\\n"
+    printf "        docker compose build pihole-ha\\n"
+    printf "        docker compose up -d pihole-ha\\n"
+    printf "        docker compose restart\\n"
+    printf "        docker compose up -d\\n\\n"
+    printf "      The restart takes Pi-hole with it: the HA page is copied into the Pi-hole\\n"
+    printf "      container only when that container starts.\\n"
+}
+if _in_container; then
+    _container_help
+    exit 1
+fi
+
 # --- 1b. Uninstall mode (install.sh --uninstall [-y]) ---
 if [[ "${1:-}" == "--uninstall" || "${1:-}" == "-u" ]]; then
     printf "\\n  %b ${COL_BOLD}Uninstall pihole-ha from this node${COL_NC}\\n" "${INFO}"

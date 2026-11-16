@@ -3830,6 +3830,72 @@ assert_contains 'VIP="" counts as unset too'       "$_lpg" 'ha_vip = (v:gsub("[\
 assert_contains "the toggle note names the right authority" "$(cat "$SCRIPT_DIR/../ha.js")" '" (only the primary can toggle)"'
 
 # ============================================================
+# "pihole-ha update" inside the Docker sidecar
+# ============================================================
+# Reported from a Docker node: "docker exec -it pihole-ha pihole-ha update" ran
+# the bare-metal updater, which overwrote the scripts the running daemon was
+# started from and the VERSION file (so the node then claimed the new release
+# while running the old code -- reproduced: the daemon's md5 changed, VERSION
+# read 3.19.40 on a 3.19.34 process) and died at /etc/systemd/system.
+section "Update inside a container"
+_ins="$(cat "$SCRIPT_DIR/../install.sh")"
+_cli="$(cat "$SCRIPT_DIR/../pihole-ha-cli")"
+eval "$(grep '^_in_container() {' "$SCRIPT_DIR/../install.sh")"   # a one-line function
+_tc="$(mktemp -d)"; touch "$_tc/dockerenv"; mkdir "$_tc/systemd"
+assert_true  "a container without systemd is recognised"        _in_container "$_tc/dockerenv" "$_tc/none"
+assert_false "a container that does run systemd is not refused" _in_container "$_tc/dockerenv" "$_tc/systemd"
+assert_false "bare metal is not refused"                        _in_container "$_tc/none" "$_tc/systemd"
+rm -rf "$_tc"
+# The CLI already inside every existing container fetches install.sh and runs
+# it, so the guard has to sit in install.sh, ahead of every mode that writes.
+_g="$(grep -n '^if _in_container; then' "$SCRIPT_DIR/../install.sh" | cut -d: -f1)"
+_u="$(grep -n '^if \[\[ "${1:-}" == "--update" \]\]; then' "$SCRIPT_DIR/../install.sh" | cut -d: -f1)"
+_x="$(grep -n -- '--uninstall' "$SCRIPT_DIR/../install.sh" | grep -v '^[0-9]*:#' | head -1 | cut -d: -f1)"
+assert_true "the installer refuses before the update path"    [ -n "$_g" -a "$_g" -lt "$_u" ]
+assert_true "and before the uninstall path"                   [ "$_g" -lt "$_x" ]
+assert_contains "the CLI refuses before fetching anything" "$(sed -n '/^_run_installer()/,/^}/p' "$SCRIPT_DIR/../pihole-ha-cli" | head -3)" "_refuse_in_container"
+# Both must give the same host-side steps, in the order that was measured to
+# work: the sidecar first (it stages the new page), then a restart of both.
+_steps_of() { grep -o 'docker compose [a-z -]*' <<< "$1" | sed 's/ *$//' | awk '!seen[$0]++' | tr '\n' '|'; }
+_want="docker compose build pihole-ha|docker compose up -d pihole-ha|docker compose restart|docker compose up -d|"
+assert_eq "installer steps" "$_want" "$(_steps_of "$(sed -n '/^_container_help()/,/^}/p' "$SCRIPT_DIR/../install.sh")")"
+assert_eq "CLI steps"       "$_want" "$(_steps_of "$(sed -n '/^_container_update_steps()/,/^}/p' "$SCRIPT_DIR/../pihole-ha-cli")")"
+assert_contains "the version check does not suggest the bare-metal command there" "$_cli" "if _in_container; then"
+_di="$(cat "$SCRIPT_DIR/../docker-install.sh")"
+assert_not_contains "the Docker update no longer hides a failed build" "$_di" 'docker compose build --no-cache pihole-ha >/dev/null 2>&1'
+assert_contains "and restarts Pi-hole so the new page is loaded"       "$_di" 'docker compose restart >/dev/null 2>&1'
+
+# ============================================================
+# A log line is not part of an API reply
+# ============================================================
+# The request handler's stdout is the HTTP reply. _log echoes to stdout, so one
+# warning during a request -- load_sync_conf warns about an unknown SYNC_ key on
+# every call -- landed ahead of the status line and curl rejected the whole
+# answer (measured: exit 1, 0 bytes; the Config Sync box went dead).
+section "API replies carry no log lines"
+_dash="$SCRIPT_DIR/../pihole-ha-dash"
+assert_not_contains "the handler's stderr is not wired into the socket" "$(grep -n '^exec socat' "$_dash")" ",stderr"
+_reply="$(
+    _d="$(mktemp -d)"; printf 'SYNC_ENABLED=true\nSYNC_UPTREAMS=true\n' > "$_d/sync.conf"
+    # The handler's own preamble: source the platform, then its _log override.
+    . "$SCRIPT_DIR/../pihole-ha-platform" 2>/dev/null
+    eval "$(sed -n '/^    _log() {$/,/^    }$/p' "$_dash")"
+    logger() { :; }
+    load_sync_conf "$_d/sync.conf" 2>"$_d/err"
+    printf 'REPLY'
+    printf '|%s' "$(grep -c sync_conf_unknown_key "$_d/err")"
+    rm -rf "$_d"
+)"
+assert_eq "a warning during a request goes to stderr, not the reply" "REPLY|1" "$_reply"
+# Positive control: with the platform's own _log the same call does pollute stdout.
+_ctl="$(
+    _d="$(mktemp -d)"; printf 'SYNC_UPTREAMS=true\n' > "$_d/sync.conf"
+    . "$SCRIPT_DIR/../pihole-ha-platform" 2>/dev/null; logger() { :; }
+    load_sync_conf "$_d/sync.conf" 2>/dev/null | grep -c sync_conf_unknown_key; rm -rf "$_d"
+)"
+assert_eq "control: the stock logger does write to stdout" "1" "$_ctl"
+
+# ============================================================
 
 all_ok=true
 for script in pihole-ha pihole-ha-dash pihole-ha-sync pihole-ha-sync-pull install.sh pihole-ha-cluster-key pihole-ha-cli; do

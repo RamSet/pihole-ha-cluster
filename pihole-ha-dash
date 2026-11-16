@@ -31,6 +31,21 @@ if [[ "${1:-}" == "--handle" ]]; then
         [[ -f "$_p" ]] && { . "$_p"; break; }
     done
 
+    # In a request handler, stdout IS the HTTP reply, so nothing but the reply
+    # may be written to it -- and a log line is not a reply. _log echoes to
+    # stdout (right for the daemons, whose stdout is the journal), which here put
+    # the line ahead of "HTTP/1.1 200 OK": curl then rejects the answer outright
+    # (exit 1, no body), and the panel reports that the API could not be read.
+    # Measured: one mistyped SYNC_ key in sync.conf, which load_sync_conf warns
+    # about on every request, was enough to take out the whole Config Sync box.
+    # Send logs to stderr instead, which the listener below no longer wires into
+    # the socket.
+    _log() {
+        local lvl="$1"; shift
+        echo "$(date '+%Y-%m-%dT%H:%M:%S') [${ROLE:-DASH}] [$lvl] $*" >&2
+        logger -t "${PIHOLE_HA_LOG_TAG:-pihole-ha}" "[${ROLE:-DASH}] [$lvl] $*" 2>/dev/null || true
+    }
+
     # Load node config (with backwards-compatible defaults)
     _NODES_CONF="/etc/pihole-ha/nodes.conf"
     _GATEWAY="" _VIP="" _VIP_ENABLED="" _HA_NODES="" _NODES_GEN=""
@@ -1481,4 +1496,7 @@ NEOF
     exit 0
 fi
 
-exec socat TCP-LISTEN:"$PORT",fork,reuseaddr EXEC:"$0 --handle",stderr
+# No ",stderr" on EXEC: that option sends the handler's stderr down the socket,
+# so every warning -- bash's own included -- became part of the HTTP reply.
+# Without it stderr goes where this listener's goes: the journal or docker logs.
+exec socat TCP-LISTEN:"$PORT",fork,reuseaddr EXEC:"$0 --handle"

@@ -341,6 +341,28 @@ Same value on both — the node whose IP comes first in the list is primary.
 - **Status API:** `curl http://<node-ip>:8887/api/status`
 - **Logs:** `docker compose logs -f pihole-ha`
 
+## Updating
+
+The sidecar runs from an image, so it is updated on the **Docker host**, from
+your checkout of this repo — not with `pihole-ha update` inside the container
+(that is the bare-metal updater; in the container it now refuses and prints
+these steps):
+
+```bash
+git pull
+cd docker
+docker compose build pihole-ha
+docker compose up -d pihole-ha
+docker compose restart
+docker compose up -d
+```
+
+`restart` takes Pi-hole with it on purpose: the HA page is copied into the
+Pi-hole container only when that container starts. The final `up -d` starts
+anything the restart left stopped. Expect a few seconds without DNS on that
+node, so do one node at a time. `sudo bash docker-install.sh` → **Update** runs
+the same steps (after your `git pull`).
+
 ## Admin Panel Integration
 
 The HA page is automatically injected into Pi-hole's admin UI at container startup. Access it at `http://<node-ip>:<pihole-port>/admin/ha`. The sidecar stages the HA source files to a shared volume, and an inject script running in the Pi-hole container copies them to the web root and patches the sidebar.
