@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.40 — 2026-11-15
+- Stop telling a DNS-only cluster its VIP needs Pi-hole DHCP
+
 ## v3.19.39 — 2026-11-15
 - Leave the DHCP Master box out of a DNS-only cluster
 
