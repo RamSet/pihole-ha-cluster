@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.44 — 2026-11-16
+- Keep the last-pull record whole when two sync pulls overlap
+
 ## v3.19.43 — 2026-11-16
 - Set the VIP address from the panel, and make VIP settings reach every node
 
