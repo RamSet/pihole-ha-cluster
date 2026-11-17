@@ -4053,6 +4053,48 @@ assert_contains "a requested pull waits for the one in progress" \
 assert_not_contains "without the option busybox flock does not have" \
     "$(grep -v '^ *#' "$SCRIPT_DIR/../pihole-ha-sync-pull")" 'flock -w'
 
+section "Refusals say why"
+
+# G241, Discourse 86667 #219: saving the VIP and the sync interval answered
+# "unauthorized" and nothing else. The API had the cause in "reason" all along.
+_hajs="$(cat "$SCRIPT_DIR/../ha.js")"
+if command -v node >/dev/null 2>&1; then
+    _rt="$(sed -n '/^    function refusalText(data, fallback) {$/,/^    }$/p' "$SCRIPT_DIR/../ha.js")"
+    assert_eq "a refusal is shown with its reason" \
+        "unauthorized — this node's Pi-hole rejected the session" \
+        "$(node -e "$_rt; process.stdout.write(refusalText({error:'unauthorized',reason:\"this node's Pi-hole rejected the session\"},'Failed'))")"
+    assert_eq "an error without a reason is shown as it is" "nope" \
+        "$(node -e "$_rt; process.stdout.write(refusalText({error:'nope'},'Failed'))")"
+    assert_eq "no error falls back" "Failed" \
+        "$(node -e "$_rt; process.stdout.write(refusalText(null,'Failed'))")"
+fi
+assert_not_contains "no control prints the bare error word" "$_hajs" 'data.error || "'
+assert_not_contains "nor through a ternary" "$_hajs" 'data.error ? data.error'
+assert_contains "the API sends the reason with a refusal" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-dash")" '{"error":"unauthorized","auth_required":true,"reason":%s}'
+
+section "Notifications go out without dig"
+
+# sounds2k, Discourse 86667 #218: Test worked, failover sent nothing. The
+# Docker sidecar had no dig, and notify gave up when dig returned no address.
+_nt() {  # $1 = "dig" to provide one, anything else to hide it
+    ( source "$SCRIPT_DIR/../pihole-ha-platform" 2>/dev/null
+      log_warn() { echo "WARN $*"; }; log_info() { :; }
+      if [[ "$1" == dig ]]; then dig() { echo 104.20.1.1; }; else dig() { return 127; }; fi
+      curl() { echo "CURL $*"; echo '{"status":1}'; }
+      _notify_tag_muted() { return 1; }
+      PO_ENABLED=true PO_USER=u PO_TOKEN=t PO_TITLE=x NODES=() LOCAL_IP=""
+      eval "$(declare -f notify | sed 's/_po_resp="\$(curl/_po_resp="$(curl >\&2/')" 2>/dev/null
+      notify "hello" 2>&1 )
+}
+assert_contains "with no dig the message is still sent" "$(_nt nodig)" "CURL "
+assert_not_contains "and curl resolves the name itself" "$(_nt nodig)" "--resolve"
+assert_contains "with dig the resolved address is pinned" "$(_nt dig)" "--resolve api.pushover.net:443:104.20.1.1"
+assert_contains "a send that fails is logged" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-platform")" 'event=notify_failed'
+assert_contains "the sidecar image ships dig" \
+    "$(cat "$SCRIPT_DIR/../docker/Dockerfile")" 'bind-tools'
+
 section "Templates compile"
 _lp2lua() {
     perl -0777 -ne 'my $s=$_; my $o=""; while($s=~/\G(.*?)<\?(=?)(.*?)\?>/sgc){ $o.="mg.write[==[".$1."]==]\n" if length $1; $o.= $2 ? "mg.write($3)\n" : "$3\n"; } $s=~/\G(.*)\z/s; $o.="mg.write[==[$1]==]\n"; print $o' "$1"

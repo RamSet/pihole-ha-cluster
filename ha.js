@@ -345,8 +345,18 @@ $(function () {
                body.length + " bytes). It starts: " + shown;
     }
 
+    // Every control reports a refusal through this, so none of them can print
+    // the bare word again.
+    function refusalText(data, fallback) {
+        if (!data || !data.error) return fallback;
+        return data.reason ? String(data.error) + " — " + String(data.reason)
+                           : String(data.error);
+    }
+
     function apiReason(data, xhr, textStatus) {
-        if (data && data.error) return String(data.error);
+        // A refusal carries its cause in "reason" (which of four things went
+        // wrong with the session); "unauthorized" alone tells nobody what to do.
+        if (data && data.error) return refusalText(data, "");
         if (textStatus === "parsererror") return unparsedReply(xhr);
         if (xhr && xhr.status) {
             return "Pi-hole's web server returned HTTP " + xhr.status +
@@ -790,7 +800,7 @@ $(function () {
                 renderSync();
             } else {
                 $("#sync-result")
-                    .text("Toggle failed: " + (data && data.error || "unknown"))
+                    .text("Toggle failed: " + refusalText(data, "unknown"))
                     .show();
             }
         })
@@ -848,15 +858,14 @@ $(function () {
             if (data && data.interval) {
                 if (syncCfg) syncCfg.interval = data.interval;
                 $res.text("Saved: " + data.interval + " min");
+                // Only the confirmation fades; a refusal stays up to be read.
+                setTimeout(function () { $res.fadeOut(); }, 4000);
             } else {
-                $res.text(data && data.error ? data.error : "Failed");
+                $res.text(refusalText(data, "Failed"));
             }
         })
         .fail(function (xhr, textStatus, err) {
             $res.text("Error: " + (err || textStatus));
-        })
-        .always(function () {
-            setTimeout(function () { $res.fadeOut(); }, 4000);
         });
     };
 
@@ -882,7 +891,7 @@ $(function () {
                 if (syncCfg) syncCfg.primary = data.primary;
                 renderSync();
             } else {
-                $res.html('<span style="color:#dd4b39">' + (data && data.error || "Failed") + '</span>');
+                $res.html('<span style="color:#dd4b39">' + escapeHtml(refusalText(data, "Failed")) + '</span>');
             }
         })
         .fail(function (xhr, textStatus, err) {
@@ -966,7 +975,7 @@ $(function () {
                 if (masterCfg) masterCfg.dhcp_master = data.dhcp_master;
                 renderMaster();
             } else {
-                $res.html('<span style="color:#dd4b39">' + (data && data.error || "Failed") + '</span>');
+                $res.html('<span style="color:#dd4b39">' + escapeHtml(refusalText(data, "Failed")) + '</span>');
             }
         })
         .fail(function (xhr, textStatus, err) {
@@ -1087,7 +1096,7 @@ $(function () {
                 prioCfg.nodes = data.nodes;
                 renderPriority();
             } else {
-                $res.html('<span style="color:#dd4b39">' + (data && data.error || "Failed") + '</span>');
+                $res.html('<span style="color:#dd4b39">' + escapeHtml(refusalText(data, "Failed")) + '</span>');
             }
         })
         .fail(function (xhr, textStatus, err) {
@@ -1139,7 +1148,7 @@ $(function () {
                     setTimeout(function () { location.reload(); }, 1500);
                 }
             } else {
-                $res.html('<span style="color:#dd4b39">' + (data && data.error || "Failed") + '</span>');
+                $res.html('<span style="color:#dd4b39">' + escapeHtml(refusalText(data, "Failed")) + '</span>');
             }
         })
         .fail(function (xhr, textStatus, err) {
@@ -1179,7 +1188,7 @@ $(function () {
                 prioCfg.nodes = data.nodes;
                 renderPriority();
             } else {
-                $res.html('<span style="color:#dd4b39">' + (data && data.error || "Failed") + '</span>');
+                $res.html('<span style="color:#dd4b39">' + escapeHtml(refusalText(data, "Failed")) + '</span>');
             }
         })
         .fail(function (xhr, textStatus, err) {
@@ -1535,7 +1544,7 @@ $(function () {
             if (data && data.ok) {
                 $res.html('<span style="color:#00a65a"><i class="fa fa-check"></i> Sent!</span>');
             } else {
-                $res.html('<span style="color:#dd4b39">' + (data && data.error || "Failed") + '</span>');
+                $res.html('<span style="color:#dd4b39">' + escapeHtml(refusalText(data, "Failed")) + '</span>');
             }
         })
         .fail(function () {

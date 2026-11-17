@@ -501,17 +501,29 @@ notify() {
         po_ip="$(dig +short +timeout=2 +tries=1 api.pushover.net A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | tail -1)"
         [[ -n "$po_ip" ]] && src="system"
     fi
-    if [[ -z "$po_ip" ]]; then
-        command -v log_warn >/dev/null 2>&1 && log_warn "event=notify_dns_failed host=api.pushover.net"
-        return 0
+    # No address from dig is not a reason to stay silent: dig may simply not be
+    # installed (the Docker sidecar shipped without it until 3.19.45, so every
+    # event notification there was dropped here while the panel's Test button,
+    # which calls curl directly, worked). Let curl resolve the name itself.
+    local -a _po_resolve=()
+    if [[ -n "$po_ip" ]]; then
+        _po_resolve=(--resolve "api.pushover.net:443:$po_ip")
+        command -v log_info >/dev/null 2>&1 && log_info "event=notify_sending dns_src=$src resolved=$po_ip"
+    else
+        command -v log_warn >/dev/null 2>&1 && log_warn "event=notify_dns_failed host=api.pushover.net action=\"sending anyway, curl resolves\""
     fi
-    command -v log_info >/dev/null 2>&1 && log_info "event=notify_sending dns_src=$src resolved=$po_ip"
-    curl -s --max-time 10 \
-        --resolve "api.pushover.net:443:$po_ip" \
+    local _po_resp _po_rc=0
+    _po_resp="$(curl -s --max-time 10 \
+        "${_po_resolve[@]}" \
         -X POST "https://api.pushover.net/1/messages.json" \
         -d "token=$PO_TOKEN" -d "user=$PO_USER" \
         -d "html=1" -d "title=$PO_TITLE" \
-        --data-urlencode "message=$*" >/dev/null 2>&1
+        --data-urlencode "message=$*" 2>/dev/null)" || _po_rc=$?
+    # A notification that did not go out used to leave no trace at all.
+    if (( _po_rc != 0 )) || [[ "$_po_resp" != *'"status":1'* ]]; then
+        command -v log_warn >/dev/null 2>&1 && log_warn "event=notify_failed curl_rc=$_po_rc reply=\"$(printf '%s' "$_po_resp" | tr -d '"\n' | cut -c1-120)\""
+    fi
+    return 0
 }
 
 platform_get_local_ip() {
