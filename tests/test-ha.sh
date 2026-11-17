@@ -3684,7 +3684,7 @@ echo "=== Found in the forks: a reload FTL never got is still owed ==="
 _sp="$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")"
 _rl="$(sed -n '/^reload_ftl_for_sync()/,/^}/p' "$SCRIPT_DIR/../pihole-ha-sync-pull")"
 assert_contains "the debt is written down before the attempt" "$_rl" ': > "$FTL_RELOAD_PENDING"'
-assert_contains "a failed reload leaves it standing"          "$_rl" "platform_ftl_restart || return 1"
+assert_contains "a failed reload leaves it standing"          "$_rl" "platform_ftl_restart 9>&- || return 1"
 assert_contains "and only a delivered one clears it"          "$_rl" 'rm -f "$FTL_RELOAD_PENDING"'
 assert_true "the write precedes the reload, the clear follows it" \
     [ "$(printf '%s\n' "$_rl" | grep -n ': > ' | cut -d: -f1)" -lt "$(printf '%s\n' "$_rl" | grep -n 'platform_ftl_restart' | cut -d: -f1)" ]
@@ -4011,6 +4011,48 @@ assert_contains "the installer says where to add one later" "$(cat "$SCRIPT_DIR/
 # call a userdata value" -- in place of the whole HA page. Translate the page to
 # the Lua it becomes and compile it with Pi-hole's own compiler, where one is
 # at hand.
+section "Last-pull record survives overlapping pulls"
+
+# G241, Discourse 86667: two pulls overlapped, each opened sync-last-pull with
+# ">" and the shorter "applied" line landed on top of the longer "unchanged"
+# one, leaving "...applied\nd". The newline went into the JSON and the panel
+# could not read the reply. These run the shipped lines, not copies.
+_lpd="$(mktemp -d)"
+_lp_reader="$(grep -A1 '_lp=""; \[\[ -r /etc/pihole-ha/sync-last-pull' "$SCRIPT_DIR/../pihole-ha-dash" | sed "s|/etc/pihole-ha/sync-last-pull|$_lpd/sync-last-pull|g")"
+_lp_json() {
+    ( eval "$_lp_reader"
+      printf '{"last_pull":"%s","last_pull_status":"%s"}' "${_lp%% *}" "${_lp##* }" )
+}
+assert_true "the reader lines were found in pihole-ha-dash" test -n "$_lp_reader"
+printf '2026-11-14T02:04:31Z applied\nd\n' > "$_lpd/sync-last-pull"
+assert_eq "a damaged record still gives one-line JSON" \
+    '{"last_pull":"2026-11-14T02:04:31Z","last_pull_status":"applied"}' "$(_lp_json)"
+printf 'garbage "quote\n' > "$_lpd/sync-last-pull"
+assert_eq "an unrecognised record is reported as never, not passed through" \
+    '{"last_pull":"","last_pull_status":""}' "$(_lp_json)"
+printf '2026-11-14T02:04:31Z unchanged\n' > "$_lpd/sync-last-pull"
+assert_eq "a normal record is passed through" \
+    '{"last_pull":"2026-11-14T02:04:31Z","last_pull_status":"unchanged"}' "$(_lp_json)"
+rm -f "$_lpd/sync-last-pull"
+assert_eq "no record yet" '{"last_pull":"","last_pull_status":""}' "$(_lp_json)"
+
+# The writer: many overlapping writes must leave exactly one whole line.
+_rp_src="$(sed -n '/^_record_pull() {$/,/^}$/p' "$SCRIPT_DIR/../pihole-ha-sync-pull" | sed "s|/etc/pihole-ha/|$_lpd/|g")"
+( eval "$_rp_src"
+  for _i in $(seq 40); do _record_pull unchanged & _record_pull applied & done; wait )
+assert_eq "40 overlapping writes leave one line" "1" "$(wc -l < "$_lpd/sync-last-pull" | tr -d ' ')"
+assert_true "and it is a whole record" grep -Eq '^[0-9TZ:-]+ (applied|unchanged)$' "$_lpd/sync-last-pull"
+assert_eq "no temp files are left behind" "" "$(ls -A "$_lpd" | grep -v '^sync-last-pull$')"
+rm -rf "$_lpd"
+
+assert_contains "only one pull runs at a time" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")" 'flock -n 9'
+assert_contains "a requested pull waits for the one in progress" \
+    "$(cat "$SCRIPT_DIR/../pihole-ha-sync-pull")" 'until flock -n 9; do'
+# busybox flock, in the Docker sidecar, has no -w: it fails at once.
+assert_not_contains "without the option busybox flock does not have" \
+    "$(grep -v '^ *#' "$SCRIPT_DIR/../pihole-ha-sync-pull")" 'flock -w'
+
 section "Templates compile"
 _lp2lua() {
     perl -0777 -ne 'my $s=$_; my $o=""; while($s=~/\G(.*?)<\?(=?)(.*?)\?>/sgc){ $o.="mg.write[==[".$1."]==]\n" if length $1; $o.= $2 ? "mg.write($3)\n" : "$3\n"; } $s=~/\G(.*)\z/s; $o.="mg.write[==[$1]==]\n"; print $o' "$1"

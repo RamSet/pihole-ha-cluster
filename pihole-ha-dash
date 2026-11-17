@@ -474,7 +474,10 @@ if [[ "${1:-}" == "--handle" ]]; then
             # Last completed pull on THIS node: the manifest only carries the
             # publisher's build time, which does not tell a standby whether it
             # ever received it.
-            _lp="$(cat /etc/pihole-ha/sync-last-pull 2>/dev/null)"
+            # First line only, and only the two shapes we write: anything else
+            # (a damaged file) is reported as "never", not put into the JSON.
+            _lp=""; [[ -r /etc/pihole-ha/sync-last-pull ]] && read -r _lp < /etc/pihole-ha/sync-last-pull
+            [[ "$_lp" =~ ^[0-9TZ:-]+\ (applied|unchanged)$ ]] || _lp=""
             printf '{"enabled":%s,"gravity":%s,"dhcp":%s,"dns":%s,"settings":%s,"primary":"%s","interval":%s,"last_pull":"%s","last_pull_status":"%s"}\n' \
                 "$SYNC_ENABLED" "$SYNC_GRAVITY" "$SYNC_DHCP" "$SYNC_DNS" "$SYNC_SETTINGS" "$SYNC_PRIMARY" "$SYNC_INTERVAL" \
                 "${_lp%% *}" "${_lp##* }"

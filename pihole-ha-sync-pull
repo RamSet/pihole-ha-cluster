@@ -65,7 +65,30 @@ LAST_HASH_FILE="$SYNC_DIR/last-pull-hash"
 # which is the steady state: a timestamp that only moves when the config
 # changes answers "when did something change", not "is sync alive", and the
 # second is the question people are asking when they look at it.
-_record_pull() { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" > /etc/pihole-ha/sync-last-pull 2>/dev/null || true; }
+# Written whole or not at all (temp file, then rename). A plain "> file" from
+# two overlapping runs left "...applied\nd" behind -- the tail of the longer
+# "unchanged" line -- and that newline made the panel's JSON unreadable.
+_record_pull() {
+    local _t="/etc/pihole-ha/.sync-last-pull.$$"
+    printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" > "$_t" 2>/dev/null \
+        && mv -f "$_t" /etc/pihole-ha/sync-last-pull 2>/dev/null || rm -f "$_t" 2>/dev/null || true
+}
+# One pull at a time. The timer and "Sync Now" can fire together, and two runs
+# applying the same payload at once step on each other's files. A scheduled run
+# gives way; a requested one (--force) waits for the run in progress.
+if command -v flock >/dev/null 2>&1 && mkdir -p "$SYNC_DIR" 2>/dev/null && exec 9>"$SYNC_DIR/sync-pull.lock"; then
+    if [[ " $* " == *" --force "* ]]; then
+        # Polled, not "flock -w": busybox flock (the Docker sidecar) has no -w
+        # and would fail at once, so Sync Now would never run there.
+        _lw=0
+        until flock -n 9; do
+            (( ++_lw > 120 )) && { log_warn "event=skip reason=\"another pull is still running after 120s\""; exit 0; }
+            sleep 1
+        done
+    else
+        flock -n 9 || { log_info "event=skip reason=\"another pull is already running\""; exit 0; }
+    fi
+fi
 STAGING_DIR="$SYNC_BLOB_DIR/staging-pull"
 SYNC_CONF="/etc/pihole-ha/sync.conf"
 
@@ -86,7 +109,7 @@ mkdir -p "$SYNC_DIR" "$SYNC_BLOB_DIR"
 FTL_RELOAD_PENDING="$SYNC_DIR/ftl-reload-pending"
 reload_ftl_for_sync() {
     : > "$FTL_RELOAD_PENDING" 2>/dev/null || true
-    platform_ftl_restart || return 1
+    platform_ftl_restart 9>&- || return 1
     rm -f "$FTL_RELOAD_PENDING"
 }
 if [[ -f "$FTL_RELOAD_PENDING" ]]; then
@@ -595,7 +618,7 @@ if [[ -f /etc/pihole/gravity.db ]]; then
     if [[ -n "$_own_now" && -n "$_own_want" && "$_own_now" != "$_own_want" ]]; then
         if platform_chown_checked "$_own_want" /etc/pihole/gravity.db; then
             log_warn "event=repair component=gravity status=ok reason=\"gravity.db was owned $_own_now, which FTL cannot open; set to $_own_want\""
-            platform_ftl_restart >/dev/null 2>&1 || true
+            platform_ftl_restart >/dev/null 2>&1 9>&- || true
         else
             log_error "event=repair component=gravity status=failed owner=$_own_now want=$_own_want reason=\"gravity.db is not owned by the user FTL runs as and could not be corrected\""
         fi
