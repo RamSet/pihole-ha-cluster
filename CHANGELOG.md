@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.46 — 2026-11-17
+- Find this node's own Pi-hole API on whatever address it listens
+
 ## v3.19.45 — 2026-11-17
 - Send failover notifications in Docker, and say why a write was refused
 
