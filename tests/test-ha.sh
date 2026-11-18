@@ -4102,7 +4102,14 @@ echo; echo "=== Finding this node's own Pi-hole API ==="
 # digits of webserver.port> -- which is wrong for an address-bound or TLS-first
 # setting. Measured on a real Pi-hole: "127.0.0.1:8081o" asked port 127.
 _pa_src="$(sed -n '/^    _pihole_base_candidates() {$/,/^    _send_401() {$/p' "$SCRIPT_DIR/../pihole-ha-dash" | sed '$d')"
-_pa_cands() { ( eval "$_pa_src"; _PIHOLE_PORT=80; unset PIHOLE_WEB_PORT; _pihole_base_candidates "$1" | tr '\n' ' ' ); }
+_pa_cands() { ( eval "$_pa_src"; _PIHOLE_PORT=80; unset PIHOLE_WEB_PORT; _LOCAL_IP=""; _pihole_base_candidates "$1" | grep -v 127.0.0.1 | tr '\n' ' ' ); }
+# G241 again: stock ports, yet "curl rc=56" on http and "rc=35" on https. That
+# is Pi-hole's access list resetting a source it does not allow -- reproduced
+# with webserver.acl=+<lan>: localhost (::1) and 127.0.0.1 are reset, the
+# node's own address answers.
+assert_eq "localhost is also asked as 127.0.0.1 and as the node's own address" \
+    "http://localhost:80 https://localhost:443 http://127.0.0.1:80 https://127.0.0.1:443 http://192.168.2.253:80 https://192.168.2.253:443 " \
+    "$( eval "$_pa_src"; _PIHOLE_PORT=80; unset PIHOLE_WEB_PORT; _LOCAL_IP=192.168.2.253; _pihole_base_candidates '80o,443os,[::]:80o,[::]:443os' | tr '\n' ' ' )"
 assert_eq "the stock setting" "http://localhost:80 https://localhost:443 " \
     "$(_pa_cands '80o,443os,[::]:80o,[::]:443os')"
 assert_eq "a listener bound to an address is asked on that address" \
@@ -4127,7 +4134,7 @@ assert_contains "no password is recognised from the API's own answer" \
 assert_contains "some other reply is never read as 'no password'" \
     "$(_pa_auth http://localhost:80 '<html>"moved"</html>')" "rc=2"
 assert_contains "and the refusal names what was tried" \
-    "$(_pa_auth http://nowhere:1 x)" "http://localhost:80 (curl rc=7), https://localhost:443 (curl rc=7)"
+    "$(_pa_auth http://nowhere:1 x)" "http://localhost:80 (curl rc=7), https://localhost:443 (curl rc=7), http://127.0.0.1:80 (curl rc=7)"
 
 echo; echo "=== Templates compile ==="
 _lp2lua() {

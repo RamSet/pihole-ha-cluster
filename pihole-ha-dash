@@ -250,7 +250,24 @@ if [[ "${1:-}" == "--handle" ]]; then
             if [[ "$flags" == *s* ]]; then https+=("https://$addr:$port"); else http+=("http://$addr:$port"); fi
         done
         http+=("http://localhost:${_PIHOLE_PORT:-80}")
-        printf '%s\n' "${http[@]}" "${https[@]}" | awk 'NF && !seen[$0]++'
+        # "localhost" is one name for three ways in, and Pi-hole's access list
+        # (webserver.acl) judges each by its source address: localhost is ::1
+        # here, so a list that allows only the LAN, or 127.0.0.1 but not ::1,
+        # resets the connection (curl rc=56, and 35 on TLS) while the very same
+        # server answers on 127.0.0.1 or on the node's own address. Ask those
+        # too, after the usual one.
+        local u
+        local -a out=()
+        for u in "${http[@]}" "${https[@]}"; do out+=("$u"); done
+        for u in "${http[@]}" "${https[@]}"; do
+            [[ "$u" == *"://localhost:"* ]] && out+=("${u/localhost/127.0.0.1}")
+        done
+        if [[ -n "${_LOCAL_IP:-}" ]]; then
+            for u in "${http[@]}" "${https[@]}"; do
+                [[ "$u" == *"://localhost:"* ]] && out+=("${u/localhost/$_LOCAL_IP}")
+            done
+        fi
+        printf '%s\n' "${out[@]}" | awk 'NF && !seen[$0]++'
     }
     # Ask each candidate until one answers, and keep it for the session check
     # that follows. -k because the certificate is not issued for "localhost";
