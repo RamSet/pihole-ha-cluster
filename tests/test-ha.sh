@@ -3800,7 +3800,7 @@ assert_true "the mode is known before the first poll" \
 # about leases by definition), no line of page text may talk about DHCP being
 # failed over or followed unless the mode conditional is on that line or the
 # line sits in a mode branch.
-section "DNS-only wording"
+echo; echo "=== DNS-only wording ==="
 _lpg="$(cat "$SCRIPT_DIR/../ha.lp")"
 _dhcp_text_unguarded() {
     awk '
@@ -3837,7 +3837,7 @@ assert_contains "the toggle note names the right authority" "$(cat "$SCRIPT_DIR/
 # started from and the VERSION file (so the node then claimed the new release
 # while running the old code -- reproduced: the daemon's md5 changed, VERSION
 # read 3.19.40 on a 3.19.34 process) and died at /etc/systemd/system.
-section "Update inside a container"
+echo; echo "=== Update inside a container ==="
 _ins="$(cat "$SCRIPT_DIR/../install.sh")"
 _cli="$(cat "$SCRIPT_DIR/../pihole-ha-cli")"
 eval "$(grep '^_in_container() {' "$SCRIPT_DIR/../install.sh")"   # a one-line function
@@ -3872,7 +3872,7 @@ assert_contains "and restarts Pi-hole so the new page is loaded"       "$_di" 'd
 # warning during a request -- load_sync_conf warns about an unknown SYNC_ key on
 # every call -- landed ahead of the status line and curl rejected the whole
 # answer (measured: exit 1, 0 bytes; the Config Sync box went dead).
-section "API replies carry no log lines"
+echo; echo "=== API replies carry no log lines ==="
 _dash="$SCRIPT_DIR/../pihole-ha-dash"
 assert_not_contains "the handler's stderr is not wired into the socket" "$(grep -n '^exec socat' "$_dash")" ",stderr"
 _reply="$(
@@ -3903,7 +3903,7 @@ assert_eq "control: the stock logger does write to stdout" "1" "$_ctl"
 # and log in again", with "these tips don't fix the issue". The text was a guess
 # printed for every reply that would not parse, so the report carried nothing to
 # diagnose from. Only a reply that is a page is called one; the rest is quoted.
-section "Unreadable replies"
+echo; echo "=== Unreadable replies ==="
 _hjs="$SCRIPT_DIR/../ha.js"
 assert_not_contains "the blanket login-page guess is gone" "$(cat "$_hjs")" "something other than data"
 if command -v node >/dev/null 2>&1; then
@@ -3931,7 +3931,7 @@ fi
 # it there later switched "VIP Enabled" on and got "VIP Address:" followed by a
 # blank: the switch flipped VIP_ENABLED and nothing could set VIP short of
 # editing nodes.conf on every node.
-section "VIP address in the panel"
+echo; echo "=== VIP address in the panel ==="
 _dash="$SCRIPT_DIR/../pihole-ha-dash"; _dmn="$SCRIPT_DIR/../pihole-ha"
 _vset="$(sed -n '/^        \/api\/vip\/set\*)/,/^            ;;/p' "$_dash")"
 assert_contains "the write is authenticated before anything else" "$(head -22 <<< "$_vset")" 'if ! _check_auth "$_qs"; then _send_401; exit 0; fi'
@@ -4011,7 +4011,7 @@ assert_contains "the installer says where to add one later" "$(cat "$SCRIPT_DIR/
 # call a userdata value" -- in place of the whole HA page. Translate the page to
 # the Lua it becomes and compile it with Pi-hole's own compiler, where one is
 # at hand.
-section "Last-pull record survives overlapping pulls"
+echo; echo "=== Last-pull record survives overlapping pulls ==="
 
 # G241, Discourse 86667: two pulls overlapped, each opened sync-last-pull with
 # ">" and the shorter "applied" line landed on top of the longer "unchanged"
@@ -4053,7 +4053,7 @@ assert_contains "a requested pull waits for the one in progress" \
 assert_not_contains "without the option busybox flock does not have" \
     "$(grep -v '^ *#' "$SCRIPT_DIR/../pihole-ha-sync-pull")" 'flock -w'
 
-section "Refusals say why"
+echo; echo "=== Refusals say why ==="
 
 # G241, Discourse 86667 #219: saving the VIP and the sync interval answered
 # "unauthorized" and nothing else. The API had the cause in "reason" all along.
@@ -4073,7 +4073,7 @@ assert_not_contains "nor through a ternary" "$_hajs" 'data.error ? data.error'
 assert_contains "the API sends the reason with a refusal" \
     "$(cat "$SCRIPT_DIR/../pihole-ha-dash")" '{"error":"unauthorized","auth_required":true,"reason":%s}'
 
-section "Notifications go out without dig"
+echo; echo "=== Notifications go out without dig ==="
 
 # sounds2k, Discourse 86667 #218: Test worked, failover sent nothing. The
 # Docker sidecar had no dig, and notify gave up when dig returned no address.
@@ -4095,7 +4095,41 @@ assert_contains "a send that fails is logged" \
 assert_contains "the sidecar image ships dig" \
     "$(cat "$SCRIPT_DIR/../docker/Dockerfile")" 'bind-tools'
 
-section "Templates compile"
+echo; echo "=== Finding this node's own Pi-hole API ==="
+
+# G241, Discourse 86667: every write refused with "could not reach this node's
+# own Pi-hole API". The address was one guess -- http://localhost:<leading
+# digits of webserver.port> -- which is wrong for an address-bound or TLS-first
+# setting. Measured on a real Pi-hole: "127.0.0.1:8081o" asked port 127.
+_pa_src="$(sed -n '/^    _pihole_base_candidates() {$/,/^    _send_401() {$/p' "$SCRIPT_DIR/../pihole-ha-dash" | sed '$d')"
+_pa_cands() { ( eval "$_pa_src"; _PIHOLE_PORT=80; unset PIHOLE_WEB_PORT; _pihole_base_candidates "$1" | tr '\n' ' ' ); }
+assert_eq "the stock setting" "http://localhost:80 https://localhost:443 " \
+    "$(_pa_cands '80o,443os,[::]:80o,[::]:443os')"
+assert_eq "a listener bound to an address is asked on that address" \
+    "http://192.168.2.253:80 http://localhost:80 https://192.168.2.253:443 " \
+    "$(_pa_cands '192.168.2.253:80o,192.168.2.253:443os')"
+assert_eq "TLS first, and a redirect-only port is not a candidate of its own" \
+    "http://localhost:80 https://localhost:443 " "$(_pa_cands '443s,80r')"
+assert_eq "nothing configured still asks port 80" "http://localhost:80 " "$(_pa_cands '')"
+# $1 = base that answers, $2 = its reply
+_pa_auth() {
+    ( eval "$_pa_src"; _PIHOLE_PORT=80; unset PIHOLE_WEB_PORT
+      _ANS_BASE="$1" _ANS_BODY="$2" _PIHOLE_BASE=""
+      function pihole-FTL { echo '443s,80r'; }
+      curl() { local u="${*: -1}"; [[ "$u" == "$_ANS_BASE"/* ]] && { echo "$_ANS_BODY"; return 0; }; return 7; }
+      _rc=0; _pihole_has_auth || _rc=$?
+      echo "rc=$_rc base=$_PIHOLE_BASE tried=$_PIHOLE_PROBE_TRIED" )
+}
+assert_contains "a password is found on the TLS port when plain HTTP is refused" \
+    "$(_pa_auth https://localhost:443 '{"error":{"key":"unauthorized"}}')" "rc=0 base=https://localhost:443"
+assert_contains "no password is recognised from the API's own answer" \
+    "$(_pa_auth https://localhost:443 '{"blocking":"enabled"}')" "rc=1 base=https://localhost:443"
+assert_contains "some other reply is never read as 'no password'" \
+    "$(_pa_auth http://localhost:80 '<html>"moved"</html>')" "rc=2"
+assert_contains "and the refusal names what was tried" \
+    "$(_pa_auth http://nowhere:1 x)" "http://localhost:80 (curl rc=7), https://localhost:443 (curl rc=7)"
+
+echo; echo "=== Templates compile ==="
 _lp2lua() {
     perl -0777 -ne 'my $s=$_; my $o=""; while($s=~/\G(.*?)<\?(=?)(.*?)\?>/sgc){ $o.="mg.write[==[".$1."]==]\n" if length $1; $o.= $2 ? "mg.write($3)\n" : "$3\n"; } $s=~/\G(.*)\z/s; $o.="mg.write[==[$1]==]\n"; print $o' "$1"
 }

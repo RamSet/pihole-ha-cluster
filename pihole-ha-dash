@@ -224,12 +224,54 @@ if [[ "${1:-}" == "--handle" ]]; then
     # config apply, so the window recurred on a timer. Budget matches
     # _validate_sid below; the old 2s was the same figure that function was
     # given 5s to fix.
+    # Where this node's own Pi-hole API can be reached, most likely first.
+    #
+    # It used to be one guess: http://localhost:<leading digits of
+    # webserver.port>. That is right for the stock "80o,443os,..." and wrong for
+    # everything else the setting allows -- "192.168.2.253:80o" gave port 192,
+    # "443s,80o" gave plain HTTP to the TLS port, an address-bound listener is
+    # not on localhost at all -- and every write was then refused as "could not
+    # reach this node's own Pi-hole API" (Discourse 86667, G241). Each entry is
+    # [address:]port[flags]: s = TLS, r = redirect only (useless to ask), o is
+    # irrelevant here. Plain HTTP is tried before TLS.
+    _pihole_base_candidates() {
+        local spec="$1" e flags hp addr port
+        local -a http=() https=()
+        [[ -n "${PIHOLE_WEB_PORT:-}" ]] && http+=("http://localhost:${PIHOLE_WEB_PORT%%[!0-9]*}")
+        local IFS=','
+        for e in $spec; do
+            e="${e//[[:space:]]/}"
+            [[ "$e" =~ ^(.*[0-9])([osr]*)$ ]] || continue
+            hp="${BASH_REMATCH[1]}"; flags="${BASH_REMATCH[2]}"
+            [[ "$flags" == *r* ]] && continue
+            if [[ "$hp" == *:* ]]; then addr="${hp%:*}"; port="${hp##*:}"; else addr=""; port="$hp"; fi
+            [[ "$port" =~ ^[0-9]+$ ]] || continue
+            case "$addr" in ""|"+"|"0.0.0.0"|"[::]") addr="localhost" ;; esac
+            if [[ "$flags" == *s* ]]; then https+=("https://$addr:$port"); else http+=("http://$addr:$port"); fi
+        done
+        http+=("http://localhost:${_PIHOLE_PORT:-80}")
+        printf '%s\n' "${http[@]}" "${https[@]}" | awk 'NF && !seen[$0]++'
+    }
+    # Ask each candidate until one answers, and keep it for the session check
+    # that follows. -k because the certificate is not issued for "localhost";
+    # this is a loopback question, not a trust decision.
+    _PIHOLE_PROBE_TRIED=""
     _pihole_has_auth() {
-        local resp rc=0
-        resp="$(curl -s --max-time "${SID_VALIDATE_TIMEOUT:-5}" "${_PIHOLE_BASE}/api/dns/blocking" 2>/dev/null)" || rc=$?
-        (( rc != 0 )) && return 2
-        [[ -z "$resp" ]] && return 2
-        echo "$resp" | grep -q '"unauthorized"'
+        local resp rc base n=0
+        _PIHOLE_PROBE_TRIED=""
+        while IFS= read -r base; do
+            [[ -n "$base" ]] || continue
+            rc=0
+            # Full budget for the first (usual) answer, less for the fallbacks.
+            resp="$(curl -sk --max-time "$(( n++ == 0 ? ${SID_VALIDATE_TIMEOUT:-5} : 3 ))" "$base/api/dns/blocking" 2>/dev/null)" || rc=$?
+            # Only the API's own two answers count. Anything else that happens
+            # to come back (a redirect page, another service on that port) must
+            # not be read as "no password is set".
+            if (( rc == 0 )) && [[ "$resp" == *'"unauthorized"'* ]]; then _PIHOLE_BASE="$base"; return 0; fi
+            if (( rc == 0 )) && [[ "$resp" == *'"blocking"'* ]];     then _PIHOLE_BASE="$base"; return 1; fi
+            _PIHOLE_PROBE_TRIED+="${_PIHOLE_PROBE_TRIED:+, }$base (curl rc=$rc$( (( rc == 0 )) && printf ', not an API reply'))"
+        done < <(_pihole_base_candidates "$(pihole-FTL --config webserver.port 2>/dev/null)")
+        return 2
     }
     # Validate the caller's Pi-hole session. Sets _AUTH_FAIL_WHY so a refusal can
     # say WHICH refusal it was: a session Pi-hole rejected, versus not being able
@@ -245,9 +287,9 @@ if [[ "${1:-}" == "--handle" ]]; then
             return 1
         fi
         local resp rc=0
-        resp="$(curl -s --max-time "${SID_VALIDATE_TIMEOUT:-5}" "${_PIHOLE_BASE}/api/dns/blocking?sid=$sid" 2>/dev/null)" || rc=$?
+        resp="$(curl -sk --max-time "${SID_VALIDATE_TIMEOUT:-5}" "${_PIHOLE_BASE}/api/dns/blocking?sid=$sid" 2>/dev/null)" || rc=$?
         if (( rc != 0 )); then
-            _AUTH_FAIL_WHY="could not reach this node's own Pi-hole API to check the session within ${SID_VALIDATE_TIMEOUT:-5}s (curl rc=${rc}) — the session may well be fine"
+            _AUTH_FAIL_WHY="could not reach this node's own Pi-hole API to check the session within ${SID_VALIDATE_TIMEOUT:-5}s (${_PIHOLE_BASE}, curl rc=${rc}) — the session may well be fine"
             return 1
         fi
         if echo "$resp" | grep -q '"unauthorized"'; then
@@ -272,7 +314,7 @@ if [[ "${1:-}" == "--handle" ]]; then
         fi
         # Fail closed: refuse the write rather than assume there is no password.
         if [[ "$_AUTH_REQUIRED" == "unknown" ]]; then
-            _AUTH_FAIL_WHY="could not reach this node's own Pi-hole API within ${SID_VALIDATE_TIMEOUT:-5}s to determine whether a password is set — refusing the write rather than assuming there is none"
+            _AUTH_FAIL_WHY="could not reach this node's own Pi-hole API to determine whether a password is set — refusing the write rather than assuming there is none. Tried: ${_PIHOLE_PROBE_TRIED:-nothing}"
             return 1
         fi
         [[ "$_AUTH_REQUIRED" != "true" ]] && return 0
