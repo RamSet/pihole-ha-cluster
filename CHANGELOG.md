@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.47 — 2026-11-18
+- Reach this node's Pi-hole API when its access list excludes loopback
+
 ## v3.19.46 — 2026-11-17
 - Find this node's own Pi-hole API on whatever address it listens
 
