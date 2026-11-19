@@ -230,14 +230,24 @@ blocking_canary() {
         printf 'unknown'
         return 0
     fi
-    local ours d ans routable=0 last=""
+    local ours d out ans routable=0 asked=0 unanswered=0 last=""
     ours="$(ip -4 -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | paste -sd' ' -)"
     while read -r d; do
         [[ -n "$d" ]] || continue
+        asked=$(( asked + 1 ))
         # WITH recursion: under +norecurse an unblocked name only answers from
         # cache, so the check would flip on cache state alone.
-        ans="$(dig +short +time=2 +tries=1 @127.0.0.1 "$d" A 2>/dev/null | tail -1)"
-        [[ -z "$ans" || "$ans" == "0.0.0.0" || "$ans" == "::" ]] && continue
+        out="$(dig +short +time=2 +tries=1 @127.0.0.1 "$d" A 2>/dev/null)"
+        # dig +short prints its own failures on stdout (";; no servers could be
+        # reached", ";; communications error"). That is "no answer", and it was
+        # being read as the address the name resolved to -- a "Not Blocking"
+        # alert, with a different domain each time, whenever FTL was slow to
+        # answer (Discourse 86667 #229). Only an IPv4 address is an answer to
+        # an A query; anything else is either blocked or unanswered.
+        if [[ "$out" == *";;"* ]]; then unanswered=$(( unanswered + 1 )); continue; fi
+        ans="$(printf '%s\n' "$out" | tail -1)"
+        [[ "$ans" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || continue
+        [[ "$ans" == "0.0.0.0" ]] && continue
         [[ " $ours " == *" $ans "* ]] && continue
         routable=$(( routable + 1 ))
         last="$d resolves to $ans here"
@@ -246,6 +256,8 @@ blocking_canary() {
         printf 'broken:%s, and it is on this node own blocklist' "$last"
         return 1
     fi
+    # Nothing answered is not evidence of blocking either.
+    (( unanswered > 0 && unanswered == asked )) && { printf 'unknown'; return 0; }
     (( routable == 0 )) && { printf 'ok'; return 0; }
     printf 'unknown'
     return 0

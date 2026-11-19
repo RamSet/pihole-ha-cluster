@@ -2341,6 +2341,11 @@ _canary_probe() {   # $1 blocking.active, $2 domains (space separated), $3.. ans
             for d in $P_DOMAINS; do
                 if [[ "$d" == "$want" ]]; then
                     local a; a="$(printf "%s\n" $P_ANSWERS | sed -n "${i}p")"
+                    # dig +short reports a timeout on stdout, exit 9.
+                    if [[ "$a" == "TIMEOUT" ]]; then
+                        printf ";; communications error to 127.0.0.1#53: timed out\n;; no servers could be reached\n"
+                        return 9
+                    fi
                     [[ "$a" == "NONE" ]] || printf "%s\n" "$a"
                     return 0
                 fi
@@ -2364,6 +2369,16 @@ assert_eq "empty answers read as blocking"       "ok" \
 # One resolving domain is an allowlist entry as easily as a fault: say nothing.
 assert_eq "a single resolving domain is inconclusive" "unknown" \
     "$(_canary_probe true "a.test b.test c.test" 93.184.1.1 NONE NONE)"
+# sounds2k, Discourse 86667 #229: "resolves to ;; no servers could be reached",
+# a different domain each time. dig's own failure text was read as an address.
+assert_eq "timeouts are not addresses" "unknown" \
+    "$(_canary_probe true "a.test b.test c.test" TIMEOUT TIMEOUT TIMEOUT)"
+assert_eq "two timeouts and a block is still not a fault" "ok" \
+    "$(_canary_probe true "a.test b.test c.test" TIMEOUT TIMEOUT 0.0.0.0)"
+assert_contains "a real fault is still found next to a timeout" \
+    "$(_canary_probe true "a.test b.test c.test" 93.184.1.1 TIMEOUT 104.18.2.2)" "resolves to 104.18.2.2"
+assert_eq "an IPv6 or CNAME-only answer is not read as resolving" "ok" \
+    "$(_canary_probe true "a.test b.test c.test" :: cdn.example. 0.0.0.0)"
 assert_eq "IP mode answers with our own address read as blocking" "ok" \
     "$(_canary_probe true "a.test b.test c.test" 127.0.0.1 127.0.0.1 NONE)"
 # Nothing to sample has two causes and they are not the same fault. No mappings
