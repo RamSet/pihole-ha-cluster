@@ -2,6 +2,9 @@
 
 All notable changes to pihole-ha, newest first. Versions are the `vMAJOR.MINOR.PATCH` release tags in git; the current one drives the "update available" badge in the HA panel.
 
+## v3.19.48 — 2026-11-19
+- Stop reading dig's timeout text as a resolved address
+
 ## v3.19.47 — 2026-11-18
 - Reach this node's Pi-hole API when its access list excludes loopback
 
